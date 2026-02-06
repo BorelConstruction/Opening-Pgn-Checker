@@ -1,0 +1,7 @@
+cache/
+input pgns/
+output pgns/
+__pycache__/
+.vscode/
+.venv/
+.vs/

@@ -1,0 +1,16 @@
+{
+    "input_pgn": "C:/Users/Vadim/Downloads/PgnChecker/input pgns/Scandi.pgn",
+    "min_depth": 26,
+    "max_depth": 36,
+    "min_games": 10,
+    "freq_threshold": 0.12,
+    "added_depth": 1,
+    "start_ply": 16,
+    "end_ply": 22,
+    "play_white": true,
+    "obv_threshold": 0.8,
+    "add_nag": true,
+    "trim_obvious_moves": true,
+    "check_alternatives": false,
+    "output_pgn": "Output.pgn"
+}
