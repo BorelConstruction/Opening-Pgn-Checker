@@ -1,9 +1,9 @@
 {
-    "input_pgn": "C:/Users/Vadim/Downloads/PgnChecker/input pgns/Scandi.pgn",
+    "input_pgn": "C:/Users/Vadim/Downloads/PgnChecker/input pgns/Benkog4.pgn",
     "min_depth": 26,
     "max_depth": 36,
     "min_games": 6,
-    "freq_threshold": 0.13,
+    "freq_threshold": 0.08,
     "added_depth": 5,
     "start_ply": 8,
     "end_ply": 22,

@@ -1,4 +1,5 @@
 from dataclasses import fields
+from pathlib import Path
 
 import chess
 from PySide6.QtCore import QCoreApplication, QObject, QThread, Signal, Slot
@@ -166,8 +167,10 @@ class MainWindow(QWidget):
         return self.options_class(**data)
 
     def browse_opening(self):
+        project_root = Path(__file__).resolve().parents[2]
+        start_dir = project_root / "input pgns"
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select opening PGN", "", "PGN files (*.pgn)"
+            self, "Select opening PGN", str(start_dir), "PGN files (*.pgn)"
         )
         if path:
             self.input_pgn_path.setText(path)
