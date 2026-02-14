@@ -46,7 +46,7 @@ class Options:
     )
     freq_threshold: float = field(
         default=0.15,
-        metadata={"label": "Frequency Threshold", "ui_hint": "percentage", "min": 0.0, "max": 1.0, "step": 0.05}
+        metadata={"label": "Frequency Threshold", "ui_hint": "percentage", "min": 0.0, "max": 1.0, "step": 0.025}
     )
 
     added_depth: int = field(
@@ -126,7 +126,6 @@ def load_settings() -> Options:
         try:
             with open(CONFIG_FILE, "r") as f:
                 data = json.load(f)
-                print(data)
                 return Options(**data)
         except Exception as e:
             print(f"Error loading settings: {e}")

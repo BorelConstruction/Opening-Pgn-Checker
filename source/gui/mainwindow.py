@@ -1,7 +1,7 @@
 from dataclasses import fields
 
 import chess
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QObject, QThread, Signal, Slot
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -40,8 +40,8 @@ class MainWindow(QWidget):
         self.options_class = Options
         self.widgets = {}  # Store widgets to retrieve values later
         self.init_ui()
+        # QCoreApplication.instance().aboutToQuit.connect(self.controller.shutdown)
 
-        return
 
 
     def init_ui(self):
@@ -210,7 +210,7 @@ class MainWindow(QWidget):
     def on_finished(self, report: str):
         self.hide_runtime_widgets()
         self.setEnabled(True)
-        # QMessageBox.information(self, "Analysis finished.", report)
+        QMessageBox.information(self, "Analysis finished.", report)
 
     def on_error(self, message):
         self.setEnabled(True)

@@ -12,14 +12,14 @@ from functools import partial  # for currying
 from typing import Callable, NamedTuple, Optional, Union, TypeVar, Generic
 from collections.abc import Callable
 # from __future__ import annotations # to resolve PgnChecker<->EvalProvider... I'll just annotate with a str.
+from abc import ABC, abstractmethod
 
 import berserk
 import berserk.exceptions
 import chess
-import chess.engine
 from chess.pgn import GameNode as Node
-import chess.pgn
-import chess.svg
+# import chess.pgn
+# import chess.svg
 from chess import WHITE as WHITE
 from chess import BLACK as BLACK
 
@@ -34,6 +34,7 @@ from .timer import clock
 # TODO: engine management
 
 # TODO: lower move_freq_thresh for better moves
+# TODO: cap freq from above
 
 # TODO: let the engine play where no moves are found in the DB
 
@@ -80,7 +81,7 @@ class Gap(NamedTuple):
 
 
 @dataclass
-class GapInfo:
+class GapsInfo:
     node: Node
     gaps: list[Gap] = field(default_factory=list)
 
@@ -150,8 +151,6 @@ class KeyDefaultDict(dict[K, V], Generic[K, V]):
     # def get_factory(self) -> Callable[[K], V]:
     #     return self._factory
 
-from abc import ABC, abstractmethod
-
 class QueryResult(ABC):
     """
     Lazy result of a query(node, kind).
@@ -179,6 +178,7 @@ class EvalProvider(QueryResult):
     def __init__(self, checker: 'PgnChecker', fen: str):
         self._checker = checker   # gives access to engine, options, cache helpers
         self._fen = fen
+        # TODO: remember depths
 
         self._multipvs = {}    # dict[int, list[EngineEval]]
 
@@ -243,23 +243,27 @@ class PgnChecker():
         self._finalizer = weakref.finalize(self, self._cleanup)
         self.progress = Progress(progress_cb)
         self.report = report_cb or (lambda *_: None)
-        self.init_queries()
         self.cache = KeyDefaultDict(lambda fen: PosCache(fen))
 
-        output_dir = "output pgns"
+        self.init_queries()
+        self.set_output_pgn()
+        
+
+    def set_output_pgn(self):
+        output_dir = "output pgns" # should we give the user a choice?
         input_stem = os.path.splitext(os.path.basename(self.options.input_pgn))[0]
         timestamp = datetime.datetime.now().strftime("%d-%m_%H-%M-%S")
         os.makedirs(output_dir, exist_ok=True)
         self.options.output_pgn = os.path.join(
             output_dir,
-            f"{input_stem} PROCESSED {timestamp}.pgn",
-        ) # TODO
+            f"{input_stem} -- {timestamp}.pgn",
+        )
 
     def init_queries(self):
         self._queries = {
-            # NOTE: will be a bug is self.opening_explorer changes during Checker's lifetime
+            # NOTE: will be a bug is self.opening_explorer changes
             # (as self.cache will then store the result relative to the old explorer)
-            # If we expect this to happen, here and below such parameters have to be frozen
+            # If we expect this to happen, here and below such parameters have to be frozen (and not cached)
             "db_lichess": lambda fen: safe_get_games(self.opening_explorer, position=fen),
 
             "eval": lambda fen: EvalProvider(self, fen)
@@ -334,7 +338,7 @@ class PgnChecker():
     def __exit__(self, exc_type, exc, tb):
         self.close()
 
-    @property # we want to start the engine if it is used, but we also don't want to restart it every time
+    @property # we want to start the engine if it is needed, but we also don't want to restart it every time
     def engine(self):
         if self._engine is None:
             self._engine = chess.engine.SimpleEngine.popen_uci(self.engine_path)
@@ -399,14 +403,9 @@ class PgnChecker():
         try:
             self.load_cache()
             cache_size_after_load = len(self.cache)
-            # start_time = time.perf_counter()
 
-            lichessClient = berserk.Client()
-
+            lichessClient = berserk.Client() # TODO: token
             self.opening_explorer = lichessClient.opening_explorer
-
-            # engine = initialize_engine(sf_path)
-            # self.options.engine = engine # TODO
 
             self.lines_added = 0
 
@@ -465,7 +464,7 @@ class PgnChecker():
         self.fill_gaps(gaps)
 
     def find_local_gaps(self, node: Node):
-        gap_info = GapInfo(node)
+        gap_info = GapsInfo(node)
 
         if node.comment.startswith('tr') or node.comment.startswith('Tr'):
             return False
@@ -488,17 +487,17 @@ class PgnChecker():
 
                 freq = move_frequency(m, games)
 
-                if freq > self.options.freq_threshold and total_games(m) >= self.options.min_games:
+                if freq >= self.options.freq_threshold and total_games(m) >= self.options.min_games:
                     gap_info.add_gap(m_uci, freq, total_games(m))
 
         return gap_info
     
-    def fill_gaps(self, gaps: list[GapInfo]):
+    def fill_gaps(self, gaps: list[GapsInfo]):
         for gaps_info in self.progress.iter(gaps):
             node = gaps_info.node
             self.act_on_gap_data_local(node, gaps_info)
 
-    def act_on_gap_data_local(self, log_node, gap_data: GapInfo):
+    def act_on_gap_data_local(self, log_node, gap_data: GapsInfo):
         annotate = False # should be True if we only do find_gaps
         arrows = []
         comment = ''
@@ -525,7 +524,7 @@ class PgnChecker():
 
 
     def find_gaps(self, game: Node):
-        def post(node, child_results: list[GapInfo]):
+        def post(node, child_results: list[GapsInfo]):
             all_gaps = sum(child_results, [])
             if node.ply() < self.options.start_ply:
                 return all_gaps # only propagate the results
@@ -556,8 +555,8 @@ class PgnChecker():
                 if log_node.turn() == self.options.side:
                     mark_based_on_freq_us(target_node, freq)
                 else:
-                    # eval, move = quick_eval(self.engine, fen(target_node), pov=self.options.side)[0]
-                    # target_node.comment += f"Eval: {eval:.2f} pawns. "
+                    # line1, line2 = quick_eval(self.engine, fen(target_node), pov=self.options.side, multipv=2)
+                    # target_node.comment += f"Eval: {line1[0]:.2f}, {line2[0]:.2f} pawns. "
                     mark_based_on_freq_them(target_node, freq)
 
     def mark_moves(self, log_node):
@@ -572,52 +571,56 @@ class PgnChecker():
         node.comment = (node.comment + " Transp.").lstrip()
 
     def add_sample_line(self, log_node: Node, depth: int = 5):
-        self.set_question_marks(log_node)
-        
-        score, best_move = self.query(fen(log_node), "eval").top(2)[0] # top(2) because we'll need it later for nags
+        leaf_node = True
+        try:
+            self.set_question_marks(log_node)
+            
+            score, best_move = self.query(fen(log_node), "eval").top(2)[0] # top(2) because we'll need it later for nags
 
-        best_move_child = log_node.add_variation(best_move)
-        best_fen = fen(best_move_child)
-        if self.cache[best_fen].TTed:
-             self.annotate_transposition(best_move_child)
-             return
-        self._record_position_in_TT(best_move_child)
+            best_move_child = log_node.add_variation(best_move)
+            best_fen = fen(best_move_child)
+            if self.cache[best_fen].TTed:
+                self.annotate_transposition(best_move_child)
+                return
+            self._record_position_in_TT(best_move_child)
 
-        nags = self.nags_our_move(best_move_child)
-        best_move_child.nags.update(nags)
-        stats = self.query(best_fen, "db_lichess")
+            nags = self.nags_our_move(best_move_child)
+            best_move_child.nags.update(nags)
+            stats = self.query(best_fen, "db_lichess")
 
-        # try:
-        #     # log_node.comment += f'{stats["moves"][0]["uci"]} == {best_move.uci()} and {move_frequency(stats["moves"][0], stats)}'
-        #     if stats["moves"][0]["uci"] == best_move.uci() and move_frequency(stats["moves"][0], stats) > 0.6:
-        #         best_move_child.comment += ' obvious'
-        # except IndexError:
-        #     pass # could happen if we entered while there were still games and then "we" all resigned
+            # try:
+            #     # log_node.comment += f'{stats["moves"][0]["uci"]} == {best_move.uci()} and {move_frequency(stats["moves"][0], stats)}'
+            #     if stats["moves"][0]["uci"] == best_move.uci() and move_frequency(stats["moves"][0], stats) > 0.6:
+            #         best_move_child.comment += ' obvious'
+            # except IndexError:
+            #     pass # could happen if we entered while there were still games and then "we" all resigned
 
-        if depth <= 0:  # even if depth was 0 we first add a move for outselves and a nag
-            if abs(score) > 0.3: # leaf nags
+            if depth <= 0:  # even if depth was 0 we first add a move for ourselves
+                return
+
+            # stats["moves"] = [{"uci": "e7e5", "white": ..., "black": ..., "draws": ..., "games": ...}, ...]
+            opponent_moves = stats.get("moves", [])
+
+            if total_games(stats) == 0:
+                # best_move_child.comment += 'No games, returning...'
+                return
+
+            # 4. Filter replies by frequency
+            for m in opponent_moves:
+                # freq = m["games"] / total_games
+                if (total_games(m) < self.options.min_games 
+                    or move_frequency(m, stats) < self.options.freq_threshold):
+                    continue
+
+                reply_child = self._add_variation(best_move_child, m["uci"])
+
+                leaf_node = False
+                self.add_sample_line(reply_child,depth=depth - 2)
+            
+        finally: # add an evaluation nag at the end of the line
+            if leaf_node and abs(score) > 0.3:
                 best_move_child.nags.add(eval_to_nag(pov_eval_to_white_eval(score, self.options.side)))
             return
-
-        # stats["moves"] = [{"uci": "e7e5", "white": ..., "black": ..., "draws": ..., "games": ...}, ...]
-        opponent_moves = stats.get("moves", [])
-
-        if total_games(stats) == 0:
-            best_move_child.nags.add(eval_to_nag(pov_eval_to_white_eval(score, self.options.side)))
-            # best_move_child.comment += 'No games, returning...'
-            return
-
-        # 4. Filter replies by frequency
-        for m in opponent_moves:
-            # freq = m["games"] / total_games
-            if (total_games(m) < self.options.min_games 
-                or move_frequency(m, stats) < self.options.freq_threshold):
-                continue
-
-            reply_child = self._add_variation(best_move_child, m["uci"])
-
-            best_move_child.nags = set() # if the next move is to be added, remove nags as we want them at the end of the line
-            self.add_sample_line(reply_child,depth=depth - 2)
 
         
     def set_question_marks(self, node: Node, eval_query="eval"):
@@ -689,6 +692,7 @@ class Progress:
         self.total = total
         self.done = 0
 
+        self._emit()
         try:
             for item in items:
                 yield item
@@ -762,7 +766,7 @@ def eval_to_nag(eval_pawns: float) -> int:
 def compute_question_marks(eval_was: float, eval_became: float) -> list[int]:
     if eval_was > 2.5 or eval_became < 0.4:
         return []
-    if eval_became - eval_was > 1.5:
+    if eval_became - eval_was > 2:
         return [chess.pgn.NAG_BLUNDER]
     elif eval_became - eval_was > 0.9:
         return [chess.pgn.NAG_MISTAKE]
