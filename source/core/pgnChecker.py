@@ -26,6 +26,7 @@ from chess import BLACK as BLACK
 
 from .options import Options
 from .timer import clock
+from .caching import CacheDict
 
 # TODO: trim obvious moves (don't add the last move if it's forced)
 # TODO: find unobvious moves
@@ -116,7 +117,7 @@ class PosCache:
             # We actually want it to reset between runs, or we may find undexpected transpositions
             "data": data,
         }
-
+    
     @classmethod
     def from_dict(cls, checker: 'PgnChecker', payload: dict) -> "PosCache":
         pc = cls(payload["fen"])
@@ -128,28 +129,6 @@ class PosCache:
         if "eval" in data:
             pc._data["eval"] = EvalProvider.from_dict(checker, pc.fen, data["eval"])
         return pc
-
-
-K = TypeVar("K")
-V = TypeVar("V")
-class KeyDefaultDict(dict[K, V], Generic[K, V]):
-    """
-    A default_dict but the default can depend on the key.
-    """
-
-    def __init__(self, factory: Callable[[K], V]):
-        if not callable(factory):
-            raise TypeError("factory must be callable")
-        self._factory = factory
-        super().__init__()
-
-    def __missing__(self, key: K) -> V:
-        value = self._factory(key)
-        self[key] = value
-        return value
-
-    # def get_factory(self) -> Callable[[K], V]:
-    #     return self._factory
 
 class QueryResult(ABC):
     """
@@ -243,7 +222,7 @@ class PgnChecker():
         self._finalizer = weakref.finalize(self, self._cleanup)
         self.progress = Progress(progress_cb)
         self.report = report_cb or (lambda *_: None)
-        self.cache = KeyDefaultDict(lambda fen: PosCache(fen))
+        self.cache = CacheDict(lambda fen: PosCache(fen))
 
         self.init_queries()
         self.set_output_pgn()
@@ -279,47 +258,57 @@ class PgnChecker():
         if self.options.input_pgn:
             name = os.path.splitext(os.path.basename(self.options.input_pgn))[0]
         return os.path.join(base, f"{name}.json")
-
-    def load_cache(self, path: Optional[str] = None, merge: bool = True) -> bool:
-        path = path or self._default_cache_path()
+    
+    def load_cache(self, path: Optional[str] = None) -> bool:
         self.report_message("Loading cache...")
-        if not os.path.exists(path):
-            sys.stderr.write("PATH DOES NOT EXIST")
-            return False
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except Exception as exc:
-            sys.stderr.write(f"Failed to load cache: {exc}")
-            return False
-
-        items = payload.get("items", [])
-        if not merge:
-            self.cache = KeyDefaultDict(lambda fen: PosCache(fen))
-        for item in items:
-            pc = PosCache.from_dict(self, item)
-            self.cache[pc.fen] = pc
-        return True
+        path = path or self._default_cache_path()
+        pos_cache_factory = lambda payload: PosCache.from_dict(self, payload)
+        self.cache = CacheDict.from_dict(path, pos_cache_factory)
 
     def save_cache(self, path: Optional[str] = None):
-        sys.stderr.write("\nSaving cache...")
         path = path or self._default_cache_path()
-        payload = {
-            "version": 1,
-            "items": [pc.to_dict() for pc in self.cache.values()],
-        }
-        dir_ = os.path.dirname(path)
-        os.makedirs(dir_, exist_ok=True) if dir_ else None
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=dir_ if dir_ else None,
-            delete=False
-        ) as tmp:
-            json.dump(payload, tmp)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-        os.replace(tmp.name, path)
+        self.cache.serialize(path)
+
+    # def load_cache(self, path: Optional[str] = None, merge: bool = True) -> bool:
+    #     path = path or self._default_cache_path()
+    #     self.report_message("Loading cache...")
+    #     if not os.path.exists(path):
+    #         sys.stderr.write("PATH DOES NOT EXIST")
+    #         return False
+    #     try:
+    #         with open(path, "r", encoding="utf-8") as f:
+    #             payload = json.load(f)
+    #     except Exception as exc:
+    #         sys.stderr.write(f"Failed to load cache: {exc}")
+    #         return False
+
+    #     items = payload.get("items", [])
+    #     if not merge:
+    #         self.cache = KeyDefaultDict(lambda fen: PosCache(fen))
+    #     for item in items:
+    #         pc = PosCache.from_dict(self, item)
+    #         self.cache[pc.fen] = pc
+    #     return True
+
+    # def save_cache(self, path: Optional[str] = None):
+    #     sys.stderr.write("\nSaving cache...")
+    #     path = path or self._default_cache_path()
+    #     payload = {
+    #         "version": 1,
+    #         "items": [pc.to_dict() for pc in self.cache.values()],
+    #     }
+    #     dir_ = os.path.dirname(path)
+    #     os.makedirs(dir_, exist_ok=True) if dir_ else None
+    #     with tempfile.NamedTemporaryFile(
+    #         "w",
+    #         encoding="utf-8",
+    #         dir=dir_ if dir_ else None,
+    #         delete=False
+    #     ) as tmp:
+    #         json.dump(payload, tmp)
+    #         tmp.flush()
+    #         os.fsync(tmp.fileno())
+    #     os.replace(tmp.name, path)
 
     def report_message(self, msg: str):
         self.report(CheckerReport(kind = "msg", message=msg))
@@ -400,8 +389,8 @@ class PgnChecker():
 
     @clock
     def run(self):
+        self.load_cache()
         try:
-            self.load_cache()
             cache_size_after_load = len(self.cache)
 
             lichessClient = berserk.Client() # TODO: token

@@ -4,7 +4,7 @@
     "max_depth": 36,
     "min_games": 6,
     "freq_threshold": 0.08,
-    "added_depth": 5,
+    "added_depth": 3,
     "start_ply": 8,
     "end_ply": 22,
     "play_white": true,
