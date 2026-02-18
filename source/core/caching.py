@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from typing import Callable, Generic, Optional, TypeVar
 
 K = TypeVar("K")
@@ -10,19 +11,20 @@ V = TypeVar("V")
 
 OnCreate = Callable[[K, V], None]
 OnSet = Callable[[K, V], None]
+OnGet = Callable[[K], None]
 
 
-class OnSetItemMixin(Generic[K, V]):
-    _on_setitem: Optional[OnSet[K, V]] = None
+class OnGetItemMixin(Generic[K]):
+    _on_getitem: Optional[OnGet[K]] = None
 
-    def set_on_setitem(self, cb: Optional[OnSet[K, V]]) -> None:
-        self._on_setitem = cb
+    def set_on_getitem(self, cb: Optional[OnGet[K]]) -> None:
+        self._on_getitem = cb
 
-    def __setitem__(self, key: K, val: V) -> None:
-        super().__setitem__(key, val)  # expects next class is dict-like
-        cb = getattr(self, "_on_setitem", None)
+    def __getitem__(self, key: K):
+        cb = getattr(self, "_on_getitem", None)
         if cb is not None:
-            cb(key, val)
+            cb(key)
+        return super().__getitem__(key)
     
 
 class KeyDefaultDict(dict[K, V], Generic[K, V]):
@@ -46,49 +48,67 @@ class KeyDefaultDict(dict[K, V], Generic[K, V]):
 
    
 
-class CacheDict(OnSetItemMixin[K, V], KeyDefaultDict[K, V]):
-    def __init__(self, factory: Callable[[K], V], auto_save: bool = True):
+class CacheDict(OnGetItemMixin[K], KeyDefaultDict[K, V]):
+    def __init__(self, factory: Callable[[K], V], auto_save: bool = True, save_path: Optional[str] = None):
         super().__init__(factory)
-        self.uncached = 0
-        # if auto_save:
-        #     self.enable_auto_save()
+        self._saving = False
+        self.autosave_interval = 300 # seconds
+        self._last_save_t = time.monotonic()
+        self.default_cache_path = save_path
+        if auto_save:
+            self.enable_auto_save()
 
-    def enable_auto_save(self) -> None:
-        def on_setitem(key: K, val: V) -> None:
-            self.uncached += 1
-            if key == 'db_stats' or key == 'eval':
-                sys.stderr.write(f"\nCached {self.uncached} items")
-            if self.uncached % 100 == 0:
-                self.serialize(self.default_cache_path)
-        self.set_on_setitem(on_setitem)
+    def enable_auto_save(self, enforced_path: Optional[str] = None) -> None:
+        self.default_cache_path = enforced_path or self.default_cache_path
+        
+        def autosave_on_getitem(key: K, val: V = None) -> None:
+            if self._saving: # prevents recursive calls to serialize() when saving the cache, though it won't happen unless dumping is unimaginably slow
+                return
+            
+            now = time.monotonic()
+            if now - self._last_save_t < self.autosave_interval:
+                return
+            self._last_save_t = now
+            
+            sys.stderr.write(f"\nAuto-saving cache...")
+            self.serialize()
 
-    def serialize(self, path: str) -> None:
-        sys.stderr.write("\nSaving cache...")
-        path = path or self._default_cache_path() # TODO
-        self.default_cache_path = path
-        payload = {
-            "version": 1,
-            "items": [pc.to_dict() for pc in self.values()],
-        }
-        dir_ = os.path.dirname(path)
-        os.makedirs(dir_, exist_ok=True) if dir_ else None
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=dir_ if dir_ else None,
-            delete=False
-        ) as tmp:
-            json.dump(payload, tmp)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-        os.replace(tmp.name, path)
+        self.set_on_getitem(autosave_on_getitem)
+
+    def serialize(self, enforced_path: Optional[str] = None) -> None:
+        self._saving = True
+        try:
+            sys.stderr.write("\nSaving cache...")
+            path = enforced_path or self.default_cache_path
+            if path is None:
+                raise ValueError("Cache path is not set")
+            self.default_cache_path = path
+            payload = {
+                "version": 1,
+                "items": [pc.to_dict() for pc in self.values()],
+            }
+            dir_ = os.path.dirname(path)
+            os.makedirs(dir_, exist_ok=True) if dir_ else None
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=dir_ if dir_ else None,
+                delete=False
+            ) as tmp:
+                json.dump(payload, tmp)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp.name, path)
+        finally:
+            self._saving = False
 
     @classmethod
-    def from_dict(cls, path: str, pos_cache_factory: Callable) -> bool:
-        path = path or cls._default_cache_path()
+    def from_dict(cls, path: str, pos_cache_factory: Callable) -> CacheDict[K, V]:
+        cache = cls(lambda fen: pos_cache_factory({"fen": fen}))
+        cache.default_cache_path = path
         if not os.path.exists(path):
-            sys.stderr.write("PATH DOES NOT EXIST")
-            return False
+            sys.stderr.write("\nCache file does not exist, starting with an empty cache.")
+            return cache
         try:
             with open(path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
@@ -97,7 +117,6 @@ class CacheDict(OnSetItemMixin[K, V], KeyDefaultDict[K, V]):
             return False
 
         items = payload.get("items", [])
-        cache = cls(lambda fen: pos_cache_factory({"fen": fen}))
         for item in items:
             # pc = PosCache.from_dict(self, item)
             pc = pos_cache_factory(item)

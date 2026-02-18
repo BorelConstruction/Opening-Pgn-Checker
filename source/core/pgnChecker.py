@@ -269,47 +269,6 @@ class PgnChecker():
         path = path or self._default_cache_path()
         self.cache.serialize(path)
 
-    # def load_cache(self, path: Optional[str] = None, merge: bool = True) -> bool:
-    #     path = path or self._default_cache_path()
-    #     self.report_message("Loading cache...")
-    #     if not os.path.exists(path):
-    #         sys.stderr.write("PATH DOES NOT EXIST")
-    #         return False
-    #     try:
-    #         with open(path, "r", encoding="utf-8") as f:
-    #             payload = json.load(f)
-    #     except Exception as exc:
-    #         sys.stderr.write(f"Failed to load cache: {exc}")
-    #         return False
-
-    #     items = payload.get("items", [])
-    #     if not merge:
-    #         self.cache = KeyDefaultDict(lambda fen: PosCache(fen))
-    #     for item in items:
-    #         pc = PosCache.from_dict(self, item)
-    #         self.cache[pc.fen] = pc
-    #     return True
-
-    # def save_cache(self, path: Optional[str] = None):
-    #     sys.stderr.write("\nSaving cache...")
-    #     path = path or self._default_cache_path()
-    #     payload = {
-    #         "version": 1,
-    #         "items": [pc.to_dict() for pc in self.cache.values()],
-    #     }
-    #     dir_ = os.path.dirname(path)
-    #     os.makedirs(dir_, exist_ok=True) if dir_ else None
-    #     with tempfile.NamedTemporaryFile(
-    #         "w",
-    #         encoding="utf-8",
-    #         dir=dir_ if dir_ else None,
-    #         delete=False
-    #     ) as tmp:
-    #         json.dump(payload, tmp)
-    #         tmp.flush()
-    #         os.fsync(tmp.fileno())
-    #     os.replace(tmp.name, path)
-
     def report_message(self, msg: str):
         self.report(CheckerReport(kind = "msg", message=msg))
 
@@ -362,7 +321,7 @@ class PgnChecker():
                     visit: Callable = None,
                     post: Callable = None,
                     reasons_to_stop: Callable = None):
-        sys.stderr.write(str(node.ply()) + "\n")
+        # sys.stderr.write(str(node.ply()) + "\n")
         child_results = []
 
         if visit and self.options.start_ply <= node.ply() <= self.options.end_ply:
@@ -412,6 +371,7 @@ class PgnChecker():
 
                     # total = self.count_nodes(game)
                     self.fill_the_TT(game)
+                    self.cache.enable_auto_save()
                     cache_size_after_tt = len(self.cache)
                     total = cache_size_after_tt # - cache_size_after_load
                     self.progress.set_total(total)
