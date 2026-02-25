@@ -52,7 +52,7 @@ class CacheDict(OnGetItemMixin[K], KeyDefaultDict[K, V]):
     def __init__(self, factory: Callable[[K], V], auto_save: bool = True, save_path: Optional[str] = None):
         super().__init__(factory)
         self._saving = False
-        self.autosave_interval = 300 # seconds
+        self.autosave_interval = 180 # seconds
         self._last_save_t = time.monotonic()
         self.default_cache_path = save_path
         if auto_save:
@@ -89,16 +89,21 @@ class CacheDict(OnGetItemMixin[K], KeyDefaultDict[K, V]):
             }
             dir_ = os.path.dirname(path)
             os.makedirs(dir_, exist_ok=True) if dir_ else None
-            with tempfile.NamedTemporaryFile(
-                "w",
-                encoding="utf-8",
-                dir=dir_ if dir_ else None,
-                delete=False
-            ) as tmp:
-                json.dump(payload, tmp)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-            os.replace(tmp.name, path)
+            try:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8",
+                                                dir=dir_ if dir_ else None,
+                                                delete=False) as tmp:
+                    tmp_name = tmp.name
+                    json.dump(payload, tmp)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                os.replace(tmp_name, path)
+            except Exception as e:
+                print(f"[CACHE SAVE FAILED] {type(e).__name__}: {e}", file=sys.stderr)
+                if tmp_name:
+                    try: os.remove(tmp_name)
+                    except OSError: pass
+                raise
         finally:
             self._saving = False
 

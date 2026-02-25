@@ -111,6 +111,11 @@ class Options:
         metadata={"label": "Output PGN Filename", "ui_hint": "save_file"}
     )
 
+    _token: str = field(
+        default="",
+        metadata={"label": "Lichess API Token", "ui_hint": "password"}
+    )
+
     def validate(self):
         if self.min_depth > self.max_depth:
             raise ValueError("min_depth must be ≤ max_depth")

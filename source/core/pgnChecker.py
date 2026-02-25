@@ -30,6 +30,7 @@ from .caching import CacheDict
 
 # TODO: trim obvious moves (don't add the last move if it's forced)
 # TODO: find unobvious moves
+# TODO: exclaims for their moves (if it doesn't drop the eval while the most popular one does?)
 
 # TODO: node_count accounting for us only considering main lines
 # TODO: engine management
@@ -91,6 +92,9 @@ class GapsInfo:
 
     def __bool__(self):
         return bool(self.gaps)
+
+    def __iter__(self):
+        return iter(self.gaps)
 
 class PosCache:
     def __init__(self, fen: str):
@@ -346,14 +350,21 @@ class PgnChecker():
             return post(node, child_results)
         return child_results
 
+    def init_client(self):
+        token = getattr(self.options, "_token", None)
+        if token:
+            lichessClient = berserk.Client(session=berserk.TokenSession(token))
+        else:
+            lichessClient = berserk.Client()
+        self.opening_explorer = lichessClient.opening_explorer
+
     @clock
     def run(self):
         self.load_cache()
         try:
             cache_size_after_load = len(self.cache)
 
-            lichessClient = berserk.Client() # TODO: token
-            self.opening_explorer = lichessClient.opening_explorer
+            self.init_client()
 
             self.lines_added = 0
 
@@ -386,14 +397,13 @@ class PgnChecker():
                     # output_game.headers["White"] = game.headers["White"]
                     # output_game.headers["Black"] = game.headers["Black"]
                     sys.stderr.write('starting to traverse...')
-                    # log_node = copy.deepcopy(node)
                     self.find_fill_gaps(node)
-                    print(output_game, file=open(self.options.output_pgn, "a", encoding="utf-8"), end="\n\n") # "a" for adding
                     self.mark_moves(node)
                     print(output_game, file=open(self.options.output_pgn, "a", encoding="utf-8"), end="\n\n") # "a" for adding
 
-        except Exception:
+        except Exception as e:
             sys.stderr.write(f"Error: {traceback.format_exc()}\n")
+            raise e
             # close_engine(engine) # TODO: rewrite with "with" or something
 
         finally:
@@ -451,7 +461,7 @@ class PgnChecker():
         arrows = []
         comment = ''
 
-        for uci, freq, game_num in gap_data.gaps:
+        for uci, freq, game_num in gap_data:
             pos_snap = PositionSnapshot(fen(log_node), log_node.ply(), last_move_uci=uci)
             self.report(CheckerReport(kind="position", position=pos_snap,
                                     message=f"Filling gaps... \n{game_num} games (" + str(freq)[2:4] + "%)"))
@@ -569,7 +579,6 @@ class PgnChecker():
         finally: # add an evaluation nag at the end of the line
             if leaf_node and abs(score) > 0.3:
                 best_move_child.nags.add(eval_to_nag(pov_eval_to_white_eval(score, self.options.side)))
-            return
 
         
     def set_question_marks(self, node: Node, eval_query="eval"):
@@ -701,7 +710,7 @@ def eval_to_nag(eval_pawns: float) -> int:
 
     if a < 0.35:
         return chess.pgn.NAG_QUIET_POSITION # =
-    elif a < 0.8:
+    elif a < 0.75:
         return (chess.pgn.NAG_WHITE_SLIGHT_ADVANTAGE if eval_pawns > 0 
                 else chess.pgn.NAG_BLACK_SLIGHT_ADVANTAGE)
     elif a < 1.8:

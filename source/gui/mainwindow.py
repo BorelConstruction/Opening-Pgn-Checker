@@ -271,7 +271,7 @@ class EngineWorker(QObject):
             report = c.run()
             # test.test(self.options)
             c.close()
-            self.finished.emit(None)
+            self.finished.emit(report)
         except Exception as e:
             self.error.emit(str(e))
             c.close()
