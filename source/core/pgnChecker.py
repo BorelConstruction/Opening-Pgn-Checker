@@ -31,6 +31,7 @@ from .caching import CacheDict
 # TODO: trim obvious moves (don't add the last move if it's forced)
 # TODO: find unobvious moves
 # TODO: exclaims for their moves (if it doesn't drop the eval while the most popular one does?)
+# TODO: seek transpositions
 
 # TODO: node_count accounting for us only considering main lines
 # TODO: engine management
@@ -39,6 +40,8 @@ from .caching import CacheDict
 # TODO: cap freq from above
 
 # TODO: let the engine play where no moves are found in the DB
+
+# TODO: similar positions
 
 # sys.stdout.reconfigure(encoding='utf-8')
 
@@ -386,7 +389,6 @@ class PgnChecker():
                     cache_size_after_tt = len(self.cache)
                     total = cache_size_after_tt # - cache_size_after_load
                     self.progress.set_total(total)
-                    sys.stderr.write("\nTOTAL TOTAL: " + f"{total} = {cache_size_after_tt} - {cache_size_after_load}")
                     node = game
                     # output_game = chess.pgn.Game()
                     output_game = node
@@ -425,7 +427,7 @@ class PgnChecker():
     def find_local_gaps(self, node: Node):
         gap_info = GapsInfo(node)
 
-        if node.comment.startswith('tr') or node.comment.startswith('Tr'):
+        if node.comment.startswith('tr') or node.comment.startswith('Tr'): # TODO: add to reasons_to_stop
             return False
 
         side = self.options.side
@@ -529,18 +531,40 @@ class PgnChecker():
     def annotate_transposition(node: Node):
         node.comment = (node.comment + " Transp.").lstrip()
 
+    def _find_transposition_move(self, node: Node) -> Optional[chess.Move]:
+        board = node.board()
+        for move in board.legal_moves:
+            board.push(move)
+            cached = self.cache.get(fen(board))
+            board.pop()
+            if cached is not None and cached.TTed:
+                return move
+        return None
+
     def add_sample_line(self, log_node: Node, depth: int = 5):
         leaf_node = True
         try:
             self.set_question_marks(log_node)
-            
-            score, best_move = self.query(fen(log_node), "eval").top(2)[0] # top(2) because we'll need it later for nags
 
-            best_move_child = log_node.add_variation(best_move)
+            eval, best_move = self.query(fen(log_node), "eval").top(2)[0] # top(2) because we'll need it later for nags
+
+            tr_move = self._find_transposition_move(log_node)
+            if tr_move and tr_move != best_move:
+                board = log_node.board()
+                board.push(tr_move)
+                tr_eval = self.query(fen(board), "eval").best_eval()
+                board.pop()
+                if tr_eval >= eval - 0.15:
+                    self.annotate_transposition(log_node)
+                    self._add_variation(log_node, tr_move, to_main=True)
+                    eval = tr_eval
+                    return
+                else:
+                    tr_child = self._add_variation(log_node, tr_move)
+                    tr_child.comment += f"To transpose, ({tr_eval:.2f} vs {eval:.2f})."
+
+            best_move_child = self._add_variation(log_node, best_move, to_main=True)
             best_fen = fen(best_move_child)
-            if self.cache[best_fen].TTed:
-                self.annotate_transposition(best_move_child)
-                return
             self._record_position_in_TT(best_move_child)
 
             nags = self.nags_our_move(best_move_child)
@@ -577,8 +601,8 @@ class PgnChecker():
                 self.add_sample_line(reply_child,depth=depth - 2)
             
         finally: # add an evaluation nag at the end of the line
-            if leaf_node and abs(score) > 0.3:
-                best_move_child.nags.add(eval_to_nag(pov_eval_to_white_eval(score, self.options.side)))
+            if leaf_node and abs(eval) > 0.3:
+                best_move_child.nags.add(eval_to_nag(pov_eval_to_white_eval(eval, self.options.side)))
 
         
     def set_question_marks(self, node: Node, eval_query="eval"):
@@ -591,7 +615,7 @@ class PgnChecker():
 
     def nags_our_move(self, node: Node):
         nags = []
-        if self.move_is_important(node): # TODO: if the move is important, increase added depth
+        if self.move_is_important(node): # TODO: if the move is important, increase added depth, or show why the alternative is worse
             nags.append(chess.pgn.NAG_WHITE_ZUGZWANG)
         return nags 
 
@@ -612,17 +636,22 @@ class PgnChecker():
             return True
         return False
 
-    def _add_variation(self, node: Node, move: Union[str, chess.Board]):
+    def _add_variation(self, node: Node, move: Union[str, chess.Board], to_main: bool = False):
         if isinstance(move, str):
             move = chess.Move.from_uci(move)
-        child = node.add_variation(move)
+        if to_main:
+            child = node.add_main_variation(move)
+        else:
+            child = node.add_variation(move)
         self._record_position_in_TT(child)
         return child
 
     def _record_position_in_TT(self, node): # TODO: when do we add?
         self.cache[fen(node)].TTed = True
 
-def fen(node: Node) -> str:
+def fen(node: Union[Node, chess.Board]) -> str:
+    if isinstance(node, chess.Board):
+        return node.fen()
     return node.board().fen()
 
 def side(fen: str) -> chess.Color:
@@ -748,10 +777,12 @@ def checkpoint_pgn(game, output_path: str):
 
     os.replace(tmp.name, output_path)
 
-def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_retries=5, base_delay=1.0, **kwargs):
+def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attempts=5, base_delay=30.0, **kwargs):
     '''Query the database, retrying if HTTP 429 is raised
         (which means we query too often)'''
-    for attempt in range(max_retries):
+    max_attempts = 5
+    time.sleep(0.1)
+    for attempt in range(max_attempts):
         try:
             sys.stderr.write("\n querying the DB...")
             games = opening_explorer.get_lichess_games(*args, **kwargs, ratings=ratings, speeds=speeds)
@@ -759,7 +790,7 @@ def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_retrie
 
         except berserk.exceptions.ResponseError as e:
             if e.response is not None and e.response.status_code == 429:
-                # exponential backoff: 1s, 2s, 4s, ...
+                # exponential backoff
                 delay = base_delay * (2 ** attempt)
                 time.sleep(delay)
                 sys.stderr.write(f"\n 429, {attempt}")
@@ -903,7 +934,6 @@ def evaluate_position(engine: chess.engine.SimpleEngine,
 def process_engine_output(infos, board, pov=WHITE):
     lines = []
     for info in infos:
-        pov = board.turn
         score = info["score"].pov(pov)
         pv = info["pv"]
 
