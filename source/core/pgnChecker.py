@@ -31,7 +31,6 @@ from .caching import CacheDict
 # TODO: trim obvious moves (don't add the last move if it's forced)
 # TODO: find unobvious moves
 # TODO: exclaims for their moves (if it doesn't drop the eval while the most popular one does?)
-# TODO: seek transpositions
 
 # TODO: node_count accounting for us only considering main lines
 # TODO: engine management
@@ -203,19 +202,17 @@ class EvalProvider(QueryResult):
 
     def top(self, amount: int) -> list[EngineEval]:
         if amount not in self._multipvs:
-            self._multipvs[amount] = self._checker.engine_eval(self._fen, multipv=amount)
+            result = self._checker.engine_eval(self._fen, multipv=amount)
+            for n in range(1, amount + 1):
+                if n not in self._multipvs:
+                    self._multipvs[n] = result[:n] # will make cache heavier, so make push this to retrieval if that becomes a problem
         return self._multipvs[amount]
     
     def best_move(self) -> str:
-        if 1 not in self._multipvs:
-            self._multipvs[1] = self._checker.engine_eval(self._fen)
-        return self._multipvs[1][0].move
+        return self.top(1)[0].move
     
     def best_eval(self) -> float:
-        if 1 not in self._multipvs:
-            self._multipvs[1] = self._checker.engine_eval(self._fen)
-        return self._multipvs[1][0].eval
-
+        return self.top(1)[0].eval
 
 
 class PgnChecker():
@@ -549,14 +546,14 @@ class PgnChecker():
             eval, best_move = self.query(fen(log_node), "eval").top(2)[0] # top(2) because we'll need it later for nags
 
             tr_move = self._find_transposition_move(log_node)
-            if tr_move and tr_move != best_move:
+            if tr_move:
                 board = log_node.board()
                 board.push(tr_move)
                 tr_eval = self.query(fen(board), "eval").best_eval()
                 board.pop()
                 if tr_eval >= eval - 0.15:
                     self.annotate_transposition(log_node)
-                    self._add_variation(log_node, tr_move, to_main=True)
+                    best_move_child = self._add_variation(log_node, tr_move, to_main=True)
                     eval = tr_eval
                     return
                 else:
@@ -780,7 +777,6 @@ def checkpoint_pgn(game, output_path: str):
 def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attempts=5, base_delay=30.0, **kwargs):
     '''Query the database, retrying if HTTP 429 is raised
         (which means we query too often)'''
-    max_attempts = 5
     time.sleep(0.1)
     for attempt in range(max_attempts):
         try:
