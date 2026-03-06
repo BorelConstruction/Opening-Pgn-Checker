@@ -35,7 +35,6 @@ from .caching import CacheDict
 # TODO: node_count accounting for us only considering main lines
 # TODO: engine management
 
-# TODO: lower move_freq_thresh for better moves
 # TODO: cap freq from above
 
 # TODO: let the engine play where no moves are found in the DB
@@ -82,6 +81,7 @@ class Gap(NamedTuple):
     move: str
     freq: float
     game_num: int
+    score_rate: Optional[float] = None
 
 
 @dataclass
@@ -89,8 +89,8 @@ class GapsInfo:
     node: Node
     gaps: list[Gap] = field(default_factory=list)
 
-    def add_gap(self, move: str, freq: float, game_num: int):
-        self.gaps.append(Gap(move, freq, game_num))
+    def add_gap(self, move: str, freq: float, game_num: int, score_rate: Optional[float] = None):
+        self.gaps.append(Gap(move, freq, game_num, score_rate))
 
     def __bool__(self):
         return bool(self.gaps)
@@ -445,8 +445,8 @@ class PgnChecker():
 
                 freq = move_frequency(m, games)
 
-                if freq >= self.options.freq_threshold and total_games(m) >= self.options.min_games:
-                    gap_info.add_gap(m_uci, freq, total_games(m))
+                if gap_criterion(m, freq, self.options.freq_threshold, self.options.min_games, pov=side):
+                    gap_info.add_gap(m_uci, freq, total_games(m), score_rate(m, side))
 
         return gap_info
     
@@ -460,10 +460,11 @@ class PgnChecker():
         arrows = []
         comment = ''
 
-        for uci, freq, game_num in gap_data:
+        for uci, freq, game_num, score_rate in gap_data:
             pos_snap = PositionSnapshot(fen(log_node), log_node.ply(), last_move_uci=uci)
             self.report(CheckerReport(kind="position", position=pos_snap,
-                                    message=f"Filling gaps... \n{game_num} games (" + str(freq)[2:4] + "%)"))
+                                    message=f"Filling gaps... \n{game_num} games (" + str(freq)[2:4] + "%)." +
+                                    "\nScore rate " + str(score_rate)[2:4] + "%."))
             comment += uci + ': ' + (str(freq)[:4]) + ', '
             # arrows.append([chess.parse_square(m_uci[:2]), chess.parse_square(m_uci[2:4])])
             arrows.append(arrow_from_uci(uci, color=color_from_freq(freq)))
@@ -528,7 +529,7 @@ class PgnChecker():
     def annotate_transposition(node: Node):
         node.comment = (node.comment + " Transp.").lstrip()
 
-    def _find_transposition_move(self, node: Node) -> Optional[chess.Move]:
+    def find_transposition_move(self, node: Node) -> Optional[chess.Move]:
         board = node.board()
         for move in board.legal_moves:
             board.push(move)
@@ -545,7 +546,7 @@ class PgnChecker():
 
             eval, best_move = self.query(fen(log_node), "eval").top(2)[0] # top(2) because we'll need it later for nags
 
-            tr_move = self._find_transposition_move(log_node)
+            tr_move = self.find_transposition_move(log_node)
             if tr_move:
                 board = log_node.board()
                 board.push(tr_move)
@@ -588,8 +589,8 @@ class PgnChecker():
             # 4. Filter replies by frequency
             for m in opponent_moves:
                 # freq = m["games"] / total_games
-                if (total_games(m) < self.options.min_games 
-                    or move_frequency(m, stats) < self.options.freq_threshold):
+                if not gap_criterion(m, move_frequency(m, stats), self.options.freq_threshold, 
+                                     self.options.min_games, pov=self.options.side):
                     continue
 
                 reply_child = self._add_variation(best_move_child, m["uci"])
@@ -854,10 +855,14 @@ def total_games(game_data: dict):
 def total_decisive_games(game_data: dict):
     return game_data['white'] + game_data['draws'] + game_data['black']
 
-def score_rate(game_data: dict, side: str):
-    return game_data[side]/total_games(game_data)
+def score_rate(game_data: dict, side: Union[str, chess.Color]):
+    if isinstance(side, chess.Color):
+        side = 'white' if side == WHITE else 'black'
+    return (game_data[side] + 0.5 * game_data['draws']) / total_games(game_data)
 
-def win_rate(game_data: dict, side: str):
+def win_rate(game_data: dict, side: Union[str, chess.Color]):
+    if isinstance(side, chess.Color):
+        side = 'white' if side == WHITE else 'black'
     return game_data[side]/total_decisive_games(game_data)
 
 def move_frequency(move: dict, games: dict):
@@ -959,6 +964,16 @@ def analyse_adaptive(engine, board: chess.Board, min_depth=8, max_depth=14, mult
     
 def analyse_time_limit(engine, board: chess.Board, time_limit=0.1, multipv: int = 1) -> list:
     return engine.analyse(board, chess.engine.Limit(time=time_limit), multipv=multipv)
+
+
+def gap_criterion(move: str, move_freq: float, freq_threshold: float, min_games: int = 0, pov: chess.Color = WHITE) -> bool:
+    if total_games(move) < min_games:
+        return False
+    if move_freq >= freq_threshold:
+        return True
+    if score_rate(move, pov) <= 0.4 and move_freq >= freq_threshold/3:
+        return True
+    return False
 
 
 def close_engine(engine):
