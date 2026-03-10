@@ -42,6 +42,8 @@ from .caching import CacheDict
 
 # TODO: similar positions
 
+# TODO: remember settings for every input file
+
 # sys.stdout.reconfigure(encoding='utf-8')
 
 
@@ -83,25 +85,22 @@ class CheckerReport:
 @dataclass
 class MoveChoice:
     move: chess.Move
-    eval: float
     reason: str
-    comment: str = ''
+    eval: Optional[float] = None
+    comment: Optional[str] = ''
     # actions: Callable[[Node], None] = lambda node: None # if want to do more complex actions than commmenting
 
-class Gap(NamedTuple):
-    move: str
-    freq: float
-    game_num: int
-    score_rate: Optional[float] = None
-
+    def __iter__(self):
+        return iter((self.move, self.reason, self.eval, self.comment))
+    
 
 @dataclass
 class GapsInfo:
     node: Node
-    gaps: list[Gap] = field(default_factory=list)
+    gaps: list[str] = field(default_factory=list)
 
-    def add_gap(self, move: str, freq: float, game_num: int, score_rate: Optional[float] = None):
-        self.gaps.append(Gap(move, freq, game_num, score_rate))
+    def add_gap(self, move: str):
+        self.gaps.append(move)
 
     def __bool__(self):
         return bool(self.gaps)
@@ -138,6 +137,9 @@ class PosCache:
     @classmethod
     def from_dict(cls, checker: 'PgnChecker', payload: dict) -> "PosCache":
         pc = cls(payload["fen"])
+        # if payload["fen"].startswith("rn1qkb1r/pbp2ppp/1p2pn2/3p4/2PP4/2NBPN2/PP3PPP/R1BQK2R b KQkq -"):
+        #     sys.stderr.write(f"\nLoading cache for {payload['fen']} xxxxx".upper())
+        #     return pc
         # pc.TTed = bool(payload.get("TTed", False))
         pc.TTed = False
         data = payload.get("data", {})
@@ -174,6 +176,7 @@ class EvalProvider(QueryResult):
     def __init__(self, checker: 'PgnChecker', fen: str):
         self._checker = checker   # gives access to engine, options, cache helpers
         self._fen = fen
+        
         # TODO: remember depths
 
         self._multipvs = {}    # dict[int, list[EngineEval]]
@@ -212,6 +215,8 @@ class EvalProvider(QueryResult):
         return EngineEval(payload["eval"], move)
 
     def top(self, amount: int) -> list[EngineEval]:
+        if self._fen == "rn1qk2r/pbp2ppp/1p1bpn2/3p4/2PP4/2NBPN2/PP3PPP/R1BQK2R w KQkq - 2 7":
+            self._multipvs = {}
         if amount not in self._multipvs:
             result = self._checker.engine_eval(self._fen, multipv=amount)
             for n in range(1, amount + 1):
@@ -301,6 +306,42 @@ class PgnChecker():
     def __exit__(self, exc_type, exc, tb):
         self.close()
 
+    def move_freq(self, board: Union[Node, chess.Board], move: Union[chess.Move, str]) -> float:
+        if isinstance(move, chess.Move):
+            move = move.uci()
+        if isinstance(board, Node):
+            board = board.board()
+        stats = self.query(fen(board), "db_lichess")
+        md = stats_for_uci(stats, move)
+        return move_frequency(md, stats)
+    
+    def total_games(self, board: Union[Node, chess.Board, str]) -> int:
+        if isinstance(board, Node):
+            board = board.board()
+        if isinstance(board, chess.Board):
+            board = fen(board)
+        stats = self.query(board, "db_lichess")
+        return total_games(stats)
+
+    def score_rate_pos(self, board: Union[Node, chess.Board, str]) -> float:
+        if isinstance(board, Node):
+            board = board.board()
+        if isinstance(board, chess.Board):
+            board = fen(board)
+        stats = self.query(board, "db_lichess")
+        return score_rate(stats, self.options.side)
+    
+    def score_rate_move(self, board: Union[Node, chess.Board, str], move: Union[chess.Move, str]) -> float:
+        if isinstance(move, chess.Move):
+            move = move.uci()
+        if isinstance(board, Node):
+            board = board.board()
+        if isinstance(board, chess.Board):
+            board = fen(board)
+        stats = self.query(board, "db_lichess")
+        md = stats_for_uci(stats, move)
+        return score_rate(md, self.options.side)
+
     @property # we want to start the engine if it is needed, but we also don't want to restart it every time
     def engine(self):
         if self._engine is None:
@@ -373,8 +414,6 @@ class PgnChecker():
     def run(self):
         self.load_cache()
         try:
-            cache_size_after_load = len(self.cache)
-
             self.init_client()
 
             self.lines_added = 0
@@ -432,34 +471,16 @@ class PgnChecker():
         self.progress.reset()
         self.fill_gaps(gaps)
 
-    def find_local_gaps(self, node: Node):
-        gap_info = GapsInfo(node)
+    def find_local_gaps(self, node: Node) -> Optional[GapsInfo]:
+        if node.turn() == self.options.side:
+            return
 
         if node.comment.startswith('tr') or node.comment.startswith('Tr'): # TODO: add to reasons_to_stop
-            return False
-
-        side = self.options.side
-        opposite_side = negate_color(side)
-        if node.turn() == opposite_side:
-            pgn_moves = [n.move.uci() for n in node.variations]
-            games = self.query(fen(node), "db_lichess")
-            # if total_games(games) < self.options.min_games: # TODO
-            #     # log_node.comment += f'Too few games ({total_games(games)}), returning...\n'
-            #     return gap_found
-
-            moves_to_analyze = []
-            for m in games['moves']:
-                m_uci = m['uci']
-
-                if uci_from_lichess_to_pgn(m_uci) in pgn_moves:
-                    continue
-
-                freq = move_frequency(m, games)
-
-                if gap_criterion(m, freq, self.options.freq_threshold, self.options.min_games, pov=side):
-                    gap_info.add_gap(m_uci, freq, total_games(m), score_rate(m, side))
-
-        return gap_info
+            return
+        
+        pgn_ucis = [m.move.uci() for m in node.variations]
+        return GapsInfo(node, [mc.move.uci() for mc in self.generate_moves_them(node) if
+                not mc.move.uci() in pgn_ucis])
     
     def fill_gaps(self, gaps: list[GapsInfo]):
         for gaps_info in self.progress.iter(gaps):
@@ -471,11 +492,12 @@ class PgnChecker():
         arrows = []
         comment = ''
 
-        for uci, freq, game_num, score_rate in gap_data:
+        for uci in gap_data:
+            freq = self.move_freq(log_node, uci)
             pos_snap = PositionSnapshot(fen(log_node), log_node.ply(), last_move_uci=uci)
             self.report(CheckerReport(kind="position", position=pos_snap,
-                                    message=f"Filling gaps... \n{game_num} games (" + str(freq)[2:4] + "%)." +
-                                    "\nScore rate " + str(score_rate)[2:4] + "%."))
+                                    message=f"Filling gaps... \n" + f"{freq:.2f}% of {self.total_games(fen(log_node))} games" +
+                                    "\nScore rate " + str(self.score_rate_move(log_node, uci))[2:4] + "%."))
             comment += uci + ': ' + (str(freq)[:4]) + ', '
             # arrows.append([chess.parse_square(m_uci[:2]), chess.parse_square(m_uci[2:4])])
             arrows.append(arrow_from_uci(uci, color=color_from_freq(freq)))
@@ -550,8 +572,8 @@ class PgnChecker():
                 return move
         return None
 
-    def better_engine_move(self, node: Node) -> tuple[chess.Move, str]:
-        top2 = self.query(fen(node), "eval").top(2) # top(2) because we'll need it later for nags
+    def better_engine_move(self, node: Node) -> MoveChoice:
+        top2 = self.query(fen(node), "eval").top(2) # we'll also need top(2) later for nags
         eval1, best_move1 = top2[0]
         eval2, best_move2 = top2[1]
         stats = self.query(fen(node), "db_lichess")
@@ -562,11 +584,11 @@ class PgnChecker():
         tg1 = total_games(stats1) if stats1 else 0
         tg2 = total_games(stats2) if stats2 else 0
         if (eval2 is not None and eval1 - eval2 < 0.1 
-            and sr2 - sr1 > 0.15 and min(tg1, tg2) > STAT_SIGNIFICANCE_THRESHOLD):
-            comment = f"Best move is close, but {best_move2.uci()} has a much better score rate ({sr2*100:.1f}% vs {sr1*100:.1f}%)".upper()
-            return MoveChoice(best_move2, eval2, "eng", comment)
+            and sr2 - sr1 > 0.1 and min(tg1, tg2) > STAT_SIGNIFICANCE_THRESHOLD):
+            comment = f"Best move is close, but {best_move2.uci()} has a better score rate ({sr2*100:.1f}% vs {sr1*100:.1f}%)".upper()
+            return MoveChoice(best_move2, "eng", eval2, comment)
         else:
-            return MoveChoice(best_move1, eval1, "eng")            
+            return MoveChoice(best_move1, "eng", eval1)            
 
     def generate_moves_us(self, node: Node) -> list[MoveChoice]:
         moves = []
@@ -579,11 +601,26 @@ class PgnChecker():
             board.pop()
             if tr_eval >= eval - 0.15:
                 eval = tr_eval
-                return [MoveChoice(tr_move, tr_eval, "tr")]
+                return [MoveChoice(tr_move, "tr", tr_eval)]
             else:
                 return [self.better_engine_move(node),
-                        MoveChoice(tr_move, tr_eval, "tr", f"To transp, eval drops from {eval:.2f} to {tr_eval:.2f}")]
+                        MoveChoice(tr_move, "tr", tr_eval, f"To transp, eval drops from {eval:.2f} to {tr_eval:.2f}")]
         return [self.better_engine_move(node)]
+    
+    def generate_moves_them(self, node: Node) -> list[MoveChoice]:
+        moves = []
+        stats = self.query(fen(node), "db_lichess")
+        db_moves = stats.get("moves", [])
+        for m in db_moves:
+            crit = gap_criterion(m, move_frequency(m, stats), self.options.freq_threshold, 
+                                        self.options.min_games, pov=self.options.side) 
+            if crit == 1:
+                moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "db"))
+            if crit == 2:
+                c = f"well-scoring, ".upper() + str(score_rate(m, self.options.side))[:4] + f" in {total_games(m)} games"
+                moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "good", c))
+
+        return moves
 
     def add_sample_line(self, log_node: Node, depth: int = 5):
         sys.stderr.write(f"\nAdding sample line for {fen(log_node)}...")
@@ -591,59 +628,35 @@ class PgnChecker():
         try:
             self.set_question_marks(log_node)
 
-            moves_us = self.generate_moves_us(log_node)
-            best_move_child = self._add_variation(log_node, moves_us[0].move, to_main=True)
-            if moves_us[0].reason == "tr":
+            our_move_choices = self.generate_moves_us(log_node)
+            best_move_child = self._add_variation(log_node, our_move_choices[0].move, to_main=True)
+            if our_move_choices[0].reason == "tr":
                 self.annotate_transposition(best_move_child)
                 return
             
-            for m in moves_us[1:]:
+            for m in our_move_choices[1:]:
                 child = self._add_variation(log_node, m.move)
                 update_comment(child, m.comment)
 
             nags = self.nags_our_move(best_move_child)
             best_move_child.nags.update(nags)
-            stats = self.query(fen(best_move_child), "db_lichess")
-
-            # try:
-            #     # log_node.comment += f'{stats["moves"][0]["uci"]} == {best_move.uci()} and {move_frequency(stats["moves"][0], stats)}'
-            #     if stats["moves"][0]["uci"] == best_move.uci() and move_frequency(stats["moves"][0], stats) > 0.6:
-            #         best_move_child.comment += ' obvious'
-            # except IndexError:
-            #     pass # could happen if we entered while there were still games and then "we" all resigned
 
             if depth <= 0:  # even if depth was 0 we first add a move for ourselves
                 return
+           
+            opponent_move_choices = self.generate_moves_them(best_move_child)
 
-            # stats["moves"] = [{"uci": "e7e5", "white": ..., "black": ..., "draws": ..., "games": ...}, ...]
-            opponent_moves = stats.get("moves", [])
-
-            if total_games(stats) == 0:
-                # best_move_child.comment += 'No games, returning...'
-                return
-
-            # 4. Filter replies by frequency
-            for m in opponent_moves:
-                # freq = m["games"] / total_games
-                crit = gap_criterion(m, move_frequency(m, stats), self.options.freq_threshold, 
-                                     self.options.min_games, pov=self.options.side) 
-                if not crit:
-                    if crit == None:
-                        best_move_child.add_variation(chess.Move.from_uci(m["uci"])).comment += f"Bad move, score rate {score_rate(m, self.options.side):.2f}".upper()
-                    continue
-
-                reply_child = self._add_variation(best_move_child, m["uci"])
-
-                if crit == 2:
-                        update_comment(reply_child, (f". well-scoring, ".upper() + str(score_rate(m, self.options.side))[:4] + f" in {total_games(m)} games"
-                        + f" ({move_frequency(m, stats)*100:.1f}% of games)".upper()))
+            for move, reason, _, comment in opponent_move_choices:
+                reply_child = self._add_variation(best_move_child, move)
+                update_comment(reply_child, comment)                
 
                 leaf_node = False
+
                 self.add_sample_line(reply_child,depth=depth - 2)
             
         finally: # add an evaluation nag at the end of the line
-            if leaf_node and abs(moves_us[0].eval) > 0.3:
-                best_move_child.nags.add(eval_to_nag(pov_eval_to_white_eval(moves_us[0].eval, self.options.side)))
+            if leaf_node and abs(our_move_choices[0].eval) > 0.3:
+                best_move_child.nags.add(eval_to_nag(pov_eval_to_white_eval(our_move_choices[0].eval, self.options.side)))
 
         
     def set_question_marks(self, node: Node, eval_query="eval"):
@@ -674,7 +687,9 @@ class PgnChecker():
         if (our_move_freq < 0.4 and
             eval1 - eval2 > 0.25 and
             eval1 - eval2 > 0.25*eval2):
+            # update_comment(node, f"eval {eval1:.2f}, second best move {second_best_move.uci()} has eval {eval2:.2f} and our move frequency is only {our_move_freq*100:.1f}%".upper())
             return True
+        
         return False
 
     def _add_variation(self, node: Node, move: Union[str, chess.Board], to_main: bool = False):
@@ -856,7 +871,7 @@ def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1):
     infos = analyse_time_limit(engine, board, time_limit=0.1, multipv=multipv)
     return process_engine_output(infos, board, pov)
 
-def uci_from_lichess_to_pgn(uci: str): # TODO: match-case
+def uci_from_lichess_to_pgn(uci: str):
     if uci == 'e1h1':
         return 'e1g1'
     if uci == 'e8h8':
@@ -867,7 +882,8 @@ def uci_from_lichess_to_pgn(uci: str): # TODO: match-case
         return 'e8c8'
     return uci
 
-def uci_from_pgn_to_lichess(uci: str): # TODO: match-case
+def uci_from_pgn_to_lichess(uci: str): 
+    # A convention for safety is to always operate with pgn's ucis, so this shouldn't be used
     if uci == 'e1g1':
         return 'e1h1'
     if uci == 'e8g8':
@@ -879,7 +895,7 @@ def uci_from_pgn_to_lichess(uci: str): # TODO: match-case
     return uci
 
 def stats_for_uci(games: dict, uci: str):
-    return next((m for m in games['moves'] if uci_from_lichess_to_pgn(m['uci']) == uci), None)
+    return next((m for m in games['moves'] if uci_from_lichess_to_pgn(m['uci']) == uci), None) # {}
 
 def arrow_from_uci(uci: str, *args, **kwargs) -> chess.svg.Arrow:
     return chess.svg.Arrow(ord(uci[0])-97 + 8*(int(uci[1])-1), ord(uci[2])-97 + 8*(int(uci[3])-1), *args, **kwargs)
@@ -902,7 +918,7 @@ def total_games(game_data: dict):
     return game_data['white'] + game_data['draws'] + game_data['black']
 
 def total_decisive_games(game_data: dict):
-    return game_data['white'] + game_data['draws'] + game_data['black']
+    return game_data['white'] + game_data['black']
 
 def score_rate(game_data: dict, side: Union[str, chess.Color]):
     if isinstance(side, chess.Color):
@@ -914,25 +930,11 @@ def win_rate(game_data: dict, side: Union[str, chess.Color]):
         side = 'white' if side == WHITE else 'black'
     return game_data[side]/total_decisive_games(game_data)
 
-def move_frequency(move: dict, games: dict):
-    return total_games(move)/total_games(games)
+def move_frequency(move_data: dict, games: dict):
+    return total_games(move_data)/total_games(games)
 
-def move_freq_str(move: dict, games: dict):
-    return total_games(move), total_games(games)
-
-
-def find_moves_with_property(node: Node, prop, opening_explorer: berserk.OpeningStatistic):
-    # currently I don't want to abstract this way because of different things I want to do in the process,
-    # e.g. color arrows or write more specific comments
-    moves = [uci_from_pgn_to_lichess(n.move.uci()) for n in node.variations]
-    fen = fen(node)
-    # fen = curBoard.fen()
-    games = safe_get_games(opening_explorer, position=fen)
-    comment = ''
-    for m in games['moves']:
-        if prop(m):
-            comment += m['uci'] + ', '
-    return comment[:-2]
+def move_freq_str(move_data: dict, games: dict):
+    return total_games(move_data), total_games(games)
 
 
 def get_or_create_child(log_node, move):
@@ -971,7 +973,7 @@ def evaluate_position(engine: chess.engine.SimpleEngine,
     else:
         raise TypeError("position must be a FEN string or chess.Board")
     
-    sys.stderr.write("\n Evaluating the position...")
+    sys.stderr.write(f"\n Evaluating the position... {fen(board)}")
     # Use 'with' statement for proper engine startup and cleanup
     # with chess.engine.SimpleEngine.popen_uci("C:\\Users\\Vadim\\Downloads\\stockfish-windows-x86-64-avx2.exe") as engine:
     if adaptive:
@@ -1015,19 +1017,18 @@ def analyse_time_limit(engine, board: chess.Board, time_limit=0.1, multipv: int 
     return engine.analyse(board, chess.engine.Limit(time=time_limit), multipv=multipv)
 
 
-def gap_criterion(move: str, move_freq: float, freq_threshold: float, min_games: int = 0, pov: chess.Color = WHITE) -> bool:
-    if score_rate(move, pov) > 0.7:
-        if total_games(move) >= min_games and move_freq >= freq_threshold:
-            return None
-        return False
+
+def gap_criterion(move: str, move_freq: float, freq_threshold: float, min_games: int = 0, pov: chess.Color = WHITE) -> int:
+    if score_rate(move, pov) > 0.75: # we assume files don't need to consider moves that lose in practice
+        return 0
     if total_games(move) < min_games:
-        return False
+        return 0
     if move_freq >= freq_threshold:
-        return True
+        return 1
     if score_rate(move, pov) <= 0.4 and move_freq >= freq_threshold/3: # if a move scores well, consider it even if it is not very frequent
         # TODO: before going into this, check if the most common response transposes into something known
         return 2
-    return False
+    return 0
 
 
 def close_engine(engine):
