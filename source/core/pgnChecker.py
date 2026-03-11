@@ -20,8 +20,8 @@ import chess
 from chess.pgn import GameNode as Node
 # import chess.pgn
 # import chess.svg
-from chess import WHITE as WHITE
-from chess import BLACK as BLACK
+from chess import WHITE
+from chess import BLACK
 
 
 from .options import Options
@@ -29,12 +29,11 @@ from .timer import clock
 from .caching import CacheDict
 
 # TODO: trim obvious moves (don't add the last move if it's forced)
-# TODO: find unobvious moves
+# TODO: identify unobvious moves
 # TODO: exclaims for their moves (if it doesn't drop the eval while the most popular one does?)
 # TODO: min games depends on ply
 
 # TODO: node_count accounting for us only considering main lines
-# TODO: engine management
 
 # TODO: cap freq from above
 
@@ -46,11 +45,6 @@ from .caching import CacheDict
 
 # sys.stdout.reconfigure(encoding='utf-8')
 
-
-# freq_threshold = 0.22
-# game_amount_threshhold = 4
-# starting_ply = 10
-# end_ply = 40
 
 ratings = ["2200", "2500"] # TODO: make parameters
 speeds = ["blitz", "rapid", "classical"]
@@ -111,7 +105,7 @@ class GapsInfo:
 class PosCache:
     def __init__(self, fen: str):
         self.fen = fen
-        self.TTed : bool = False # seen in the relevant part of the pgn file
+        self.TTed : bool = False # True means "seen in the relevant part of the pgn file"
         self._data = {}
 
     def get(self, label, query_fn):
@@ -137,10 +131,6 @@ class PosCache:
     @classmethod
     def from_dict(cls, checker: 'PgnChecker', payload: dict) -> "PosCache":
         pc = cls(payload["fen"])
-        # if payload["fen"].startswith("rn1qkb1r/pbp2ppp/1p2pn2/3p4/2PP4/2NBPN2/PP3PPP/R1BQK2R b KQkq -"):
-        #     sys.stderr.write(f"\nLoading cache for {payload['fen']} xxxxx".upper())
-        #     return pc
-        # pc.TTed = bool(payload.get("TTed", False))
         pc.TTed = False
         data = payload.get("data", {})
         if "db_lichess" in data:
@@ -215,8 +205,6 @@ class EvalProvider(QueryResult):
         return EngineEval(payload["eval"], move)
 
     def top(self, amount: int) -> list[EngineEval]:
-        if self._fen == "rn1qk2r/pbp2ppp/1p1bpn2/3p4/2PP4/2NBPN2/PP3PPP/R1BQK2R w KQkq - 2 7":
-            self._multipvs = {}
         if amount not in self._multipvs:
             result = self._checker.engine_eval(self._fen, multipv=amount)
             for n in range(1, amount + 1):
@@ -419,32 +407,26 @@ class PgnChecker():
             self.lines_added = 0
 
             with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
-                    log_node = chess.pgn.read_game(pgnFile)
-                    self.log_node = log_node
-            with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
                 num = 0
                 while True:
                     num += 1
-                    game = chess.pgn.read_game(pgnFile)
+                    node = chess.pgn.read_game(pgnFile)
 
-                    if game is None:
+                    if node is None:
                         break
 
-                    # total = self.count_nodes(game)
-                    self.fill_the_TT(game)
+                    self.fill_the_TT(node)
                     self.cache.enable_auto_save()
                     cache_size_after_tt = len(self.cache)
                     total = cache_size_after_tt # - cache_size_after_load
                     self.progress.set_total(total)
-                    node = game
-                    # output_game = chess.pgn.Game()
-                    output_game = node
-                    if game.headers["Event"] == '?':
+                    node = node
+                    output_game = node  # no need to copy they way it currently works
+                    if node.headers["Event"] == '?':
                         output_game.headers["Event"] = f'''plies {self.options.start_ply}-{self.options.end_ply}'''
                     else:
-                        output_game.headers["Event"] = game.headers["Event"] + f''' | plies {self.options.start_ply}-{self.options.end_ply}'''
-                    # output_game.headers["White"] = game.headers["White"]
-                    # output_game.headers["Black"] = game.headers["Black"]
+                        output_game.headers["Event"] = node.headers["Event"] + f''' | plies {self.options.start_ply}-{self.options.end_ply}'''
+
                     sys.stderr.write('starting to traverse...')
                     self.find_fill_gaps(node)
                     self.mark_moves(node)
@@ -497,7 +479,7 @@ class PgnChecker():
             pos_snap = PositionSnapshot(fen(log_node), log_node.ply(), last_move_uci=uci)
             self.report(CheckerReport(kind="position", position=pos_snap,
                                     message=f"Filling gaps... \n" + f"{freq:.2f}% of {self.total_games(fen(log_node))} games" +
-                                    "\nScore rate " + str(self.score_rate_move(log_node, uci))[2:4] + "%."))
+                                    f"\nScore rate {self.score_rate_move(log_node, uci):.2f}%."))
             comment += uci + ': ' + (str(freq)[:4]) + ', '
             # arrows.append([chess.parse_square(m_uci[:2]), chess.parse_square(m_uci[2:4])])
             arrows.append(arrow_from_uci(uci, color=color_from_freq(freq)))
@@ -607,7 +589,7 @@ class PgnChecker():
                         MoveChoice(tr_move, "tr", tr_eval, f"To transp, eval drops from {eval:.2f} to {tr_eval:.2f}")]
         return [self.better_engine_move(node)]
     
-    def generate_moves_them(self, node: Node) -> list[MoveChoice]:
+    def generate_moves_them(self, node: Node, use_engine: bool = False) -> list[MoveChoice]:
         moves = []
         stats = self.query(fen(node), "db_lichess")
         db_moves = stats.get("moves", [])
@@ -620,12 +602,20 @@ class PgnChecker():
                 c = f"well-scoring, ".upper() + str(score_rate(m, self.options.side))[:4] + f" in {total_games(m)} games"
                 moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "good", c))
 
+        # if no DB moves and option enabled, add an engine move
+        if not moves and self.options.use_engine_for_them and use_engine:
+            engine_move = quick_eval(self.engine, fen(node))[0].move
+            moves.append(MoveChoice(engine_move, "eng", None, "Suggested by weak engine")) 
+
         return moves
 
-    def add_sample_line(self, log_node: Node, depth: int = 5):
+    def add_sample_line(self, log_node: Node, depth: int = 5, db_only=True):
         sys.stderr.write(f"\nAdding sample line for {fen(log_node)}...")
         leaf_node = True
         try:
+            self.query(fen(log_node), "eval").top(2) 
+            # TODO: ^ reliable way to know in advance how many lines we will know, so that we never call top(1) before top(2)
+
             self.set_question_marks(log_node)
 
             our_move_choices = self.generate_moves_us(log_node)
@@ -638,13 +628,19 @@ class PgnChecker():
                 child = self._add_variation(log_node, m.move)
                 update_comment(child, m.comment)
 
+
             nags = self.nags_our_move(best_move_child)
             best_move_child.nags.update(nags)
+
+            if self.only_move_criterion(fen(log_node)):
+                sys.stderr.write("\nOnly move criterion met at {}.".format(fen(log_node)))
+                update_comment(best_move_child, "Only move, depth is {}".format(depth).upper())
+                depth += 2
 
             if depth <= 0:  # even if depth was 0 we first add a move for ourselves
                 return
            
-            opponent_move_choices = self.generate_moves_them(best_move_child)
+            opponent_move_choices = self.generate_moves_them(best_move_child, use_engine=True)
 
             for move, reason, _, comment in opponent_move_choices:
                 reply_child = self._add_variation(best_move_child, move)
@@ -652,7 +648,7 @@ class PgnChecker():
 
                 leaf_node = False
 
-                self.add_sample_line(reply_child,depth=depth - 2)
+                self.add_sample_line(reply_child,depth=depth - 2, db_only=False)
             
         finally: # add an evaluation nag at the end of the line
             if leaf_node and abs(our_move_choices[0].eval) > 0.3:
@@ -691,6 +687,12 @@ class PgnChecker():
             return True
         
         return False
+    
+    def only_move_criterion(self, fen: str) -> bool:
+        evals = self.query(fen, "eval").top(2)
+        if len(evals) < 2:
+            return True
+        return only_move_criterion(evals[0].eval, evals[1].eval)
 
     def _add_variation(self, node: Node, move: Union[str, chess.Board], to_main: bool = False):
         if isinstance(move, str):
@@ -936,6 +938,10 @@ def move_frequency(move_data: dict, games: dict):
 def move_freq_str(move_data: dict, games: dict):
     return total_games(move_data), total_games(games)
 
+def only_move_criterion(eval1: float, eval2: float):
+    if eval1 - eval2 > max(1, eval1*0.5):
+        return True
+    return False
 
 def get_or_create_child(log_node, move):
     for child in log_node.variations:

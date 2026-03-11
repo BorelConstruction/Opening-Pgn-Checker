@@ -103,7 +103,10 @@ class Options:
         default=False,
         metadata={"label": "Check Alternatives"}
     )
-
+    use_engine_for_them: bool = field(
+        default=False,
+        metadata={"label": "Engine for Opponent's Move"}
+    )
 
     # Output file - another file path, but for saving
     output_pgn: str = field(
