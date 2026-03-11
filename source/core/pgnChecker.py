@@ -12,7 +12,7 @@ from functools import partial  # for currying
 from typing import Callable, NamedTuple, Optional, Union, TypeVar, Generic
 from collections.abc import Callable
 # from __future__ import annotations # to resolve PgnChecker<->EvalProvider... I'll just annotate with a str.
-from abc import ABC, abstractmethod
+from abc import ABC
 
 import berserk
 import berserk.exceptions
@@ -121,6 +121,8 @@ class PosCache:
             eval_provider = self._data["eval"]
             if hasattr(eval_provider, "to_dict"):
                 data["eval"] = eval_provider.to_dict()
+        if "q-eval" in self._data:
+            data["q-eval"] = self._data["q-eval"].to_dict()
         return {
             "fen": self.fen,
             # "TTed": self.TTed, # we don't want to cache this, this is cheap.
@@ -137,6 +139,8 @@ class PosCache:
             pc._data["db_lichess"] = data["db_lichess"]
         if "eval" in data:
             pc._data["eval"] = EvalProvider.from_dict(checker, pc.fen, data["eval"])
+        if "q-eval" in data:
+            pc._data["q-eval"] = EngineEval.from_dict(data["q-eval"])
         return pc
 
 class QueryResult(ABC):
@@ -222,6 +226,7 @@ class EvalProvider(QueryResult):
 class PgnChecker():
     def __init__(self, options: Options, progress_cb=None, report_cb=None):
         options.validate()
+        self.N = 0
         self.options = copy.copy(options)
         self.options.side = WHITE if self.options.play_white else BLACK 
         self.options.adaptive_an = True # TODO
@@ -253,8 +258,10 @@ class PgnChecker():
             # If we expect this to happen, here and below such parameters have to be frozen (and not cached)
             "db_lichess": lambda fen: safe_get_games(self.opening_explorer, position=fen),
 
-            "eval": lambda fen: EvalProvider(self, fen)
-            # evaluate_position(self.engine, position=fen, pov=self.options.side, options=self.options) # TODO: pov
+            "eval": lambda fen: EvalProvider(self, fen),
+
+            # if we don't cache quick evals, results will be different every time
+            "q-eval": lambda fen: quick_eval(self.engine, fen, pov=self.options.side)
         }
 
     def query(self, fen: str, type: str):
@@ -589,7 +596,7 @@ class PgnChecker():
                         MoveChoice(tr_move, "tr", tr_eval, f"To transp, eval drops from {eval:.2f} to {tr_eval:.2f}")]
         return [self.better_engine_move(node)]
     
-    def generate_moves_them(self, node: Node, use_engine: bool = False) -> list[MoveChoice]:
+    def generate_moves_them(self, node: Node, maybe_use_engine: bool = False) -> list[MoveChoice]:
         moves = []
         stats = self.query(fen(node), "db_lichess")
         db_moves = stats.get("moves", [])
@@ -603,13 +610,19 @@ class PgnChecker():
                 moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "good", c))
 
         # if no DB moves and option enabled, add an engine move
-        if not moves and self.options.use_engine_for_them and use_engine:
-            engine_move = quick_eval(self.engine, fen(node))[0].move
-            moves.append(MoveChoice(engine_move, "eng", None, "Suggested by weak engine")) 
+        if not moves and self.options.use_engine_for_them and maybe_use_engine:
+            self.N+=1
+            engine_move = self.query(fen(node), "q-eval").move
+            sys.stderr.write(f"\n{self.N}:  {fen(node)}, adding engine move {engine_move.uci()}...\n")
+            self.report(CheckerReport(kind="position", position=PositionSnapshot(fen(node), node.ply(), last_move_uci=engine_move.uci()),
+                                    message="Quick-evaling"))
+            # time.sleep(5)
+            c = "" if DEBUG_MODE else "Engine".upper()
+            moves.append(MoveChoice(engine_move, "eng", None, c)) 
 
         return moves
 
-    def add_sample_line(self, log_node: Node, depth: int = 5, db_only=True):
+    def add_sample_line(self, log_node: Node, depth: int = 5):
         sys.stderr.write(f"\nAdding sample line for {fen(log_node)}...")
         leaf_node = True
         try:
@@ -632,15 +645,15 @@ class PgnChecker():
             nags = self.nags_our_move(best_move_child)
             best_move_child.nags.update(nags)
 
-            if self.only_move_criterion(fen(log_node)):
+            if self.only_move_criterion(fen(log_node)) and depth<=0: # don't finish with an obvious move
                 sys.stderr.write("\nOnly move criterion met at {}.".format(fen(log_node)))
-                update_comment(best_move_child, "Only move, depth is {}".format(depth).upper())
+                update_comment(best_move_child, "Only move, continuing".format(depth).upper(), True)
                 depth += 2
 
             if depth <= 0:  # even if depth was 0 we first add a move for ourselves
                 return
            
-            opponent_move_choices = self.generate_moves_them(best_move_child, use_engine=True)
+            opponent_move_choices = self.generate_moves_them(best_move_child, maybe_use_engine=True)
 
             for move, reason, _, comment in opponent_move_choices:
                 reply_child = self._add_variation(best_move_child, move)
@@ -648,8 +661,8 @@ class PgnChecker():
 
                 leaf_node = False
 
-                self.add_sample_line(reply_child,depth=depth - 2, db_only=False)
-            
+                self.add_sample_line(reply_child,depth=depth - 2) 
+
         finally: # add an evaluation nag at the end of the line
             if leaf_node and abs(our_move_choices[0].eval) > 0.3:
                 best_move_child.nags.add(eval_to_nag(pov_eval_to_white_eval(our_move_choices[0].eval, self.options.side)))
@@ -707,8 +720,9 @@ class PgnChecker():
     def _record_position_in_TT(self, node): # TODO: when do we add?
         self.cache[fen(node)].TTed = True
 
-def update_comment(node: Node, message: str):
-    node.comment = (node.comment + " " + message).lstrip()
+def update_comment(node: Node, message: str, debug=False):
+    if not debug or (debug and DEBUG_MODE):
+        node.comment = (node.comment + " " + message).lstrip()
 
 def fen(node: Union[Node, chess.Board]) -> str:
     if isinstance(node, chess.Board):
@@ -860,9 +874,8 @@ def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attemp
 
     raise RuntimeError("Too many 429s – giving up")
 
-def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1):
+def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1) -> list[EngineEval]:
     # TODO: make a separate function for this processing?
-    sys.stderr.write("\n Quick eval...")
     if isinstance(position, str):
             board = chess.Board(position)
     elif isinstance(position, chess.Board):
@@ -870,8 +883,10 @@ def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1):
     else:
         raise TypeError("position must be a FEN string or chess.Board")
     
+    sys.stderr.write(f"\n Quick eval for {fen(board)}")
+    
     infos = analyse_time_limit(engine, board, time_limit=0.1, multipv=multipv)
-    return process_engine_output(infos, board, pov)
+    return process_engine_output(infos, board, pov)[0] # for now only return one EngineEval
 
 def uci_from_lichess_to_pgn(uci: str):
     if uci == 'e1h1':
