@@ -461,13 +461,17 @@ class PgnChecker():
         self.fill_gaps(gaps)
 
     def find_local_gaps(self, node: Node) -> Optional[GapsInfo]:
-        if node.turn() == self.options.side:
-            return
-
         if node.comment.startswith('tr') or node.comment.startswith('Tr'): # TODO: add to reasons_to_stop
             return
         
         pgn_ucis = [m.move.uci() for m in node.variations]
+
+        if node.turn() == self.options.side:
+            if not pgn_ucis:
+                node.parent.variations.remove_variation(node)
+                return GapsInfo(node.parent, [node.move.uci()])
+            return
+        
         return GapsInfo(node, [mc.move.uci() for mc in self.generate_moves_them(node) if
                 not mc.move.uci() in pgn_ucis])
     
@@ -645,7 +649,7 @@ class PgnChecker():
             nags = self.nags_our_move(best_move_child)
             best_move_child.nags.update(nags)
 
-            if self.only_move_criterion(fen(log_node)) and depth<=0: # don't finish with an obvious move
+            if self.only_move_criterion(fen(log_node)) and depth<=0: # don't want to finish with an obvious move
                 sys.stderr.write("\nOnly move criterion met at {}.".format(fen(log_node)))
                 update_comment(best_move_child, "Only move, continuing".format(depth).upper(), True)
                 depth += 2
