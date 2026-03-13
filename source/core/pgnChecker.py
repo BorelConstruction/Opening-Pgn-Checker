@@ -308,6 +308,8 @@ class PgnChecker():
             board = board.board()
         stats = self.query(fen(board), "db_lichess")
         md = stats_for_uci(stats, move)
+        if not md:
+            return -1
         return move_frequency(md, stats)
     
     def total_games(self, board: Union[Node, chess.Board, str]) -> int:
@@ -324,6 +326,9 @@ class PgnChecker():
         if isinstance(board, chess.Board):
             board = fen(board)
         stats = self.query(board, "db_lichess")
+        if not stats:
+            sys.stderr.write(f"No stats for {board}\n")
+            return -0.5
         return score_rate(stats, self.options.side)
     
     def score_rate_move(self, board: Union[Node, chess.Board, str], move: Union[chess.Move, str]) -> float:
@@ -335,6 +340,9 @@ class PgnChecker():
             board = fen(board)
         stats = self.query(board, "db_lichess")
         md = stats_for_uci(stats, move)
+        if not md:
+            sys.stderr.write(f"No stats for {board} with move {move}\n")
+            return -0.5
         return score_rate(md, self.options.side)
 
     @property # we want to start the engine if it is needed, but we also don't want to restart it every time
@@ -360,10 +368,7 @@ class PgnChecker():
 
     def fill_the_TT(self, root_node: Node):
         def visit(node: Node):
-            # self.cache[fen(node)] = PosCache(fen(node))
-            if (self.options.start_ply <= node.ply() <= self.options.end_ply):
-                # and node.turn() == self.options.side):
-                self.cache[fen(node)].TTed = True
+            self.cache[fen(node)].TTed = True
 
         self._traverse(root_node, visit=visit)
 
@@ -375,14 +380,17 @@ class PgnChecker():
         # sys.stderr.write(str(node.ply()) + "\n")
         child_results = []
 
+        v_res = None
         if visit and self.options.start_ply <= node.ply() <= self.options.end_ply:
-            visit(node)
+            v_res = visit(node)
             s = self.progress.step()
             # node.comment += f"Step {s}"
 
-        if node.ply() == self.options.end_ply:
+        if reasons_to_stop and reasons_to_stop(v_res):
             return child_results
 
+        if node.ply() == self.options.end_ply:
+            return child_results
 
         vars = node.variations
         if node.turn()==self.options.side and not self.options.check_alternatives: # or we could leave only the main lines
@@ -405,11 +413,24 @@ class PgnChecker():
             lichessClient = berserk.Client()
         self.opening_explorer = lichessClient.opening_explorer
 
+    def set_starting_pos(self, node: Node):
+        if not self.options.starting_pos:
+            return node
+        if self.options.starting_pos:
+            def visit(n: Node):
+                if fen(n).startswith(fen_essential_part(self.options.starting_pos)):
+                    self.starting_node = n
+                    return True
+            self._traverse(node, visit=visit, reasons_to_stop=lambda res: res is not None)
+            if not hasattr(self, "starting_node"):
+                raise ValueError(f"Starting position {self.options.starting_pos} not found in the PGN")
+
     @clock
     def run(self):
         self.load_cache()
         try:
             self.init_client()
+
 
             self.lines_added = 0
 
@@ -423,17 +444,19 @@ class PgnChecker():
                         break
 
                     self.fill_the_TT(node)
+                    
                     self.cache.enable_auto_save()
                     cache_size_after_tt = len(self.cache)
                     total = cache_size_after_tt # - cache_size_after_load
                     self.progress.set_total(total)
-                    node = node
                     output_game = node  # no need to copy they way it currently works
                     if node.headers["Event"] == '?':
                         output_game.headers["Event"] = f'''plies {self.options.start_ply}-{self.options.end_ply}'''
                     else:
                         output_game.headers["Event"] = node.headers["Event"] + f''' | plies {self.options.start_ply}-{self.options.end_ply}'''
 
+                    self.set_starting_pos(output_game)
+                    node = self.starting_node
                     sys.stderr.write('starting to traverse...')
                     self.find_fill_gaps(node)
                     self.mark_moves(node)
@@ -468,7 +491,8 @@ class PgnChecker():
 
         if node.turn() == self.options.side:
             if not pgn_ucis:
-                node.parent.variations.remove_variation(node)
+                if True: # self.options.fill_gaps # 
+                    node.parent.variations.remove(node) # ideally this does not belong here
                 return GapsInfo(node.parent, [node.move.uci()])
             return
         
@@ -486,7 +510,9 @@ class PgnChecker():
         comment = ''
 
         for uci in gap_data:
-            freq = self.move_freq(log_node, uci)
+            freq = self.move_freq(log_node, uci) if self.move_freq(log_node, uci) else 0
+            if freq < 0:
+                update_comment(log_node,"Move {} not found in the database".format(uci).upper(), True)
             pos_snap = PositionSnapshot(fen(log_node), log_node.ply(), last_move_uci=uci)
             self.report(CheckerReport(kind="position", position=pos_snap,
                                     message=f"Filling gaps... \n" + f"{freq:.2f}% of {self.total_games(fen(log_node))} games" +
@@ -568,6 +594,8 @@ class PgnChecker():
     def better_engine_move(self, node: Node) -> MoveChoice:
         top2 = self.query(fen(node), "eval").top(2) # we'll also need top(2) later for nags
         eval1, best_move1 = top2[0]
+        if len(top2) == 1:
+            return MoveChoice(best_move1, "eng", eval1)
         eval2, best_move2 = top2[1]
         stats = self.query(fen(node), "db_lichess")
         stats1 = stats_for_uci(stats, best_move1.uci())
@@ -597,7 +625,7 @@ class PgnChecker():
                 return [MoveChoice(tr_move, "tr", tr_eval)]
             else:
                 return [self.better_engine_move(node),
-                        MoveChoice(tr_move, "tr", tr_eval, f"To transp, eval drops from {eval:.2f} to {tr_eval:.2f}")]
+                        MoveChoice(tr_move, "tr", tr_eval, f"To transp, {eval:.2f} > {tr_eval:.2f}")]
         return [self.better_engine_move(node)]
     
     def generate_moves_them(self, node: Node, maybe_use_engine: bool = False) -> list[MoveChoice]:
@@ -650,8 +678,6 @@ class PgnChecker():
             best_move_child.nags.update(nags)
 
             if self.only_move_criterion(fen(log_node)) and depth<=0: # don't want to finish with an obvious move
-                sys.stderr.write("\nOnly move criterion met at {}.".format(fen(log_node)))
-                update_comment(best_move_child, "Only move, continuing".format(depth).upper(), True)
                 depth += 2
 
             if depth <= 0:  # even if depth was 0 we first add a move for ourselves
@@ -732,6 +758,9 @@ def fen(node: Union[Node, chess.Board]) -> str:
     if isinstance(node, chess.Board):
         return node.fen()
     return node.board().fen()
+
+def fen_essential_part(fen: str) -> str:
+    return fen.rstrip(" -0123456789")
 
 def side(fen: str) -> chess.Color:
     try:
@@ -816,7 +845,7 @@ def pov_eval_to_white_eval(eval_pov: float, pov: chess.Color) -> float:
 def eval_to_nag(eval_pawns: float) -> int:
     a = abs(eval_pawns)
 
-    if a < 0.35:
+    if a < 0.32:
         return chess.pgn.NAG_QUIET_POSITION # =
     elif a < 0.75:
         return (chess.pgn.NAG_WHITE_SLIGHT_ADVANTAGE if eval_pawns > 0 

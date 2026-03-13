@@ -108,6 +108,11 @@ class Options:
         metadata={"label": "Engine for Opponent's Move"}
     )
 
+    starting_pos: str = field(
+        default="",
+        metadata={"label": "Starting Position (FEN)"}
+    )
+
     # Output file - another file path, but for saving
     output_pgn: str = field(
         default="Output.pgn",
@@ -116,7 +121,7 @@ class Options:
 
     _token: str = field(
         default="",
-        metadata={"label": "Lichess API Token", "ui_hint": "password"}
+        metadata={"label": "Lichess API Token"}
     )
 
     def validate(self):
