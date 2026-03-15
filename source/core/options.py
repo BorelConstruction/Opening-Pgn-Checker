@@ -121,7 +121,7 @@ class Options:
 
     _token: str = field(
         default="",
-        metadata={"label": "Lichess API Token"}
+        metadata={"label": "Lichess API Token", "ui_hint": "password"}
     )
 
     def validate(self):

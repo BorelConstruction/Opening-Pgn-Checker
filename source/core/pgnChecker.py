@@ -1,3 +1,4 @@
+from collections import namedtuple
 import copy
 import datetime
 import json
@@ -328,7 +329,7 @@ class PgnChecker():
         stats = self.query(board, "db_lichess")
         if not stats:
             sys.stderr.write(f"No stats for {board}\n")
-            return -0.5
+            return -0.5 # TODO
         return score_rate(stats, self.options.side)
     
     def score_rate_move(self, board: Union[Node, chess.Board, str], move: Union[chess.Move, str]) -> float:
@@ -377,33 +378,13 @@ class PgnChecker():
                     visit: Callable = None,
                     post: Callable = None,
                     reasons_to_stop: Callable = None):
-        # sys.stderr.write(str(node.ply()) + "\n")
-        child_results = []
-
-        v_res = None
-        if visit and self.options.start_ply <= node.ply() <= self.options.end_ply:
-            v_res = visit(node)
-            s = self.progress.step()
-            # node.comment += f"Step {s}"
-
-        if reasons_to_stop and reasons_to_stop(v_res):
-            return child_results
-
-        if node.ply() == self.options.end_ply:
-            return child_results
-
-        vars = node.variations
-        if node.turn()==self.options.side and not self.options.check_alternatives: # or we could leave only the main lines
-            vars = vars[:1]
-
-        for n in vars:
-            child_results.append(self._traverse(n, visit, post))
-
-        if post:
-            if self.options.start_ply <= node.ply() <= self.options.end_ply:
-                self.progress.step()
-            return post(node, child_results)
-        return child_results
+        '''Traverse the subtree rooted at node
+        in a way consistent with self.options'''
+        tp = TraversalPolicy(
+            start_ply = self.options.start_ply,
+            end_ply = self.options.end_ply,
+            check_alternatives = self.options.check_alternatives)
+        return _traverse(node, visit, post, reasons_to_stop, tp, self.options.side, self.progress)
 
     def init_client(self):
         token = getattr(self.options, "_token", None)
@@ -415,15 +396,16 @@ class PgnChecker():
 
     def set_starting_pos(self, node: Node):
         if not self.options.starting_pos:
+            self.starting_node = node
             return node
-        if self.options.starting_pos:
-            def visit(n: Node):
-                if fen(n).startswith(fen_essential_part(self.options.starting_pos)):
-                    self.starting_node = n
-                    return True
-            self._traverse(node, visit=visit, reasons_to_stop=lambda res: res is not None)
-            if not hasattr(self, "starting_node"):
-                raise ValueError(f"Starting position {self.options.starting_pos} not found in the PGN")
+        
+        def visit(n: Node):
+            if fen(n).startswith(fen_essential_part(self.options.starting_pos)):
+                self.starting_node = n
+                return n
+        self._traverse(node, visit=visit, reasons_to_stop=lambda res: res is not None)
+        if not hasattr(self, "starting_node"):
+            raise ValueError(f"Starting position {self.options.starting_pos} not found in the PGN")
 
     @clock
     def run(self):
@@ -457,6 +439,7 @@ class PgnChecker():
 
                     self.set_starting_pos(output_game)
                     node = self.starting_node
+
                     sys.stderr.write('starting to traverse...')
                     self.find_fill_gaps(node)
                     self.mark_moves(node)
@@ -504,13 +487,14 @@ class PgnChecker():
             node = gaps_info.node
             self.act_on_gap_data_local(node, gaps_info)
 
+
     def act_on_gap_data_local(self, log_node, gap_data: GapsInfo):
         annotate = False # should be True if we only do find_gaps
         arrows = []
         comment = ''
 
         for uci in gap_data:
-            freq = self.move_freq(log_node, uci) if self.move_freq(log_node, uci) else 0
+            freq = self.move_freq(log_node, uci)
             if freq < 0:
                 update_comment(log_node,"Move {} not found in the database".format(uci).upper(), True)
             pos_snap = PositionSnapshot(fen(log_node), log_node.ply(), last_move_uci=uci)
@@ -566,8 +550,6 @@ class PgnChecker():
                 if log_node.turn() == self.options.side:
                     mark_based_on_freq_us(target_node, freq)
                 else:
-                    # line1, line2 = quick_eval(self.engine, fen(target_node), pov=self.options.side, multipv=2)
-                    # target_node.comment += f"Eval: {line1[0]:.2f}, {line2[0]:.2f} pawns. "
                     mark_based_on_freq_them(target_node, freq)
 
     def mark_moves(self, log_node):
@@ -581,8 +563,9 @@ class PgnChecker():
     def annotate_transposition(node: Node):
         update_comment(node, "Transp.")
 
-    def find_transposition_move(self, node: Node) -> Optional[chess.Move]:
-        board = node.board()
+    def find_transposition_move(self, board: Union[Node, chess.Board]) -> Optional[chess.Move]:
+        if isinstance(board, Node):
+            board = board.board()
         for move in board.legal_moves:
             board.push(move)
             cached = self.cache.get(fen(board))
@@ -590,6 +573,24 @@ class PgnChecker():
             if cached is not None and cached.TTed:
                 return move
         return None
+    
+    def seek_transposition(self, node: Node) -> Optional[chess.Move]:
+        stats = self.query(fen(node), "db_lichess")
+        db_moves = stats.get("moves", [])
+        board2 = node.board()
+        for m in db_moves[:3]:
+            board = node.board()
+            move = chess.Move.from_uci(m['uci'])
+            board.push(move) # lichess_to_pgn?
+            stats_m = self.query(fen(board), "db_lichess") 
+            if stats_m['moves']:
+                most_popular_uci = stats_m['moves'][0]['uci']
+                if self.move_freq(board, most_popular_uci) > 0.8:
+                    board.push(chess.Move.from_uci(most_popular_uci))
+                    tr_move = self.find_transposition_move(board)
+                    if tr_move:
+                        update_comment(node, f"Likely to transpose after {m['uci']} and {most_popular_uci}".upper())
+                        return move
 
     def better_engine_move(self, node: Node) -> MoveChoice:
         top2 = self.query(fen(node), "eval").top(2) # we'll also need top(2) later for nags
@@ -614,7 +615,7 @@ class PgnChecker():
     def generate_moves_us(self, node: Node) -> list[MoveChoice]:
         moves = []
         eval = self.query(fen(node), "eval").best_eval()
-        tr_move = self.find_transposition_move(node)
+        tr_move = self.find_transposition_move(node) or self.seek_transposition(node)
         if tr_move:
             board = node.board()
             board.push(tr_move)
@@ -884,6 +885,53 @@ def checkpoint_pgn(game, output_path: str):
         os.fsync(tmp.fileno())
 
     os.replace(tmp.name, output_path)
+
+TraversalPolicy = namedtuple("TraversalPolicy", ["start_ply", "end_ply", "check_alternatives"], defaults=(0, 1000, False))
+
+# @dataclass
+# class TraversalPolicy:
+#     start_ply : int = 0
+#     end_ply : int = 1000
+#     check_alternatives: bool = False
+
+def _traverse(node: Node,
+                visit: Callable = None,
+                post: Callable = None,
+                reasons_to_stop: Callable = None,
+                tp: TraversalPolicy = TraversalPolicy(),
+                side: chess.Color = WHITE,
+                progress = None):
+    start_ply, end_ply, check_alternatives = tp
+
+    child_results = []
+
+    v_res = None
+    if visit and start_ply <= node.ply() <= end_ply:
+        v_res = visit(node)
+        if progress:
+            progress.step()
+            # node.comment += f"Step {s}"
+
+    if reasons_to_stop and reasons_to_stop(v_res):
+        return child_results
+
+    if node.ply() == end_ply:
+        return child_results
+
+    vars = node.variations
+    if node.turn()==side and not check_alternatives:
+        vars = vars[:1]
+
+    for n in vars:
+        child_results.append(_traverse(n, visit, post,
+            reasons_to_stop, tp, side, progress))
+
+    if post:
+        if start_ply <= node.ply() <= end_ply:
+            if progress:
+                progress.step()
+        return post(node, child_results)
+    return child_results
 
 def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attempts=5, base_delay=30.0, **kwargs):
     '''Query the database, retrying if HTTP 429 is raised
