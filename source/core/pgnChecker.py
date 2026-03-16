@@ -371,7 +371,7 @@ class PgnChecker():
 
     def fill_the_TT(self, root_node: Node):
         def visit(node: Node):
-            self.cache[fen(node)].TTed = node
+            self._record_position_in_TT(node)
 
         self._traverse(root_node, visit=visit)
 
@@ -581,8 +581,8 @@ class PgnChecker():
         db_moves = stats.get("moves", [])
         board2 = node.board()
         for m in db_moves[:3]:
-            board = node.board()
             move = chess.Move.from_uci(m['uci'])
+            board = node.board()
             board.push(move) # lichess_to_pgn?
             stats_m = self.query(fen(board), "db_lichess") 
             if stats_m['moves']:
@@ -591,7 +591,7 @@ class PgnChecker():
                     board.push(chess.Move.from_uci(most_popular_uci))
                     tr_move = self.find_transposition_move(board)
                     if tr_move:
-                        update_comment(node, f"Likely to transpose after {m['uci']} and {most_popular_uci}".upper())
+                        update_comment(node, f"Likely to transpose after {m['uci']} and {most_popular_uci}".upper()) # TODO: pass it further
                         return move
 
     def better_engine_move(self, node: Node) -> MoveChoice:
@@ -617,7 +617,7 @@ class PgnChecker():
     def generate_moves_us(self, node: Node) -> list[MoveChoice]:
         moves = []
         eval = self.query(fen(node), "eval").best_eval()
-        tr_move = self.find_transposition_move(node) or self.seek_transposition(node)
+        tr_move = self.find_transposition_move(node)
         if tr_move:
             board = node.board()
             board.push(tr_move)
@@ -629,6 +629,19 @@ class PgnChecker():
             else:
                 return [self.better_engine_move(node),
                         MoveChoice(tr_move, "tr", tr_eval, f"To transp, {eval:.2f} > {tr_eval:.2f}")]
+        to_tr_move = self.seek_transposition(node)
+
+        if to_tr_move: # TODO: abstract these two blocks
+            board = node.board()
+            board.push(to_tr_move)
+            to_tr_eval = self.query(fen(board), "eval").best_eval()
+            board.pop()
+            if to_tr_eval >= eval - 0.10:
+                eval = to_tr_eval
+                return [MoveChoice(to_tr_move, "to_tr", to_tr_eval)]
+            else:
+                return [self.better_engine_move(node),
+                        MoveChoice(to_tr_move, "to_tr", to_tr_eval, f"To transp, {eval:.2f} > {to_tr_eval:.2f}")]
         return [self.better_engine_move(node)]
     
     def generate_moves_them(self, node: Node, maybe_use_engine: bool = False) -> list[MoveChoice]:
@@ -751,7 +764,8 @@ class PgnChecker():
         return child
 
     def _record_position_in_TT(self, node): # TODO: when do we add?
-        self.cache[fen(node)].TTed = node
+        if not self.cache[fen(node)].TTed:
+            self.cache[fen(node)].TTed = node
 
 def update_comment(node: Node, message: str, debug=False):
     if not debug or (debug and DEBUG_MODE):
@@ -1129,7 +1143,7 @@ class FirstDifference(NamedTuple):
 def first_difference(n1: Node, n2: Node) -> Optional[FirstDifference]:
     """
     Compare two move sequences ending at `n1` and `n2` and return the first move
-    (from the root, i.e. earliest in the game) that differs in `n1`.
+    that differs in `n1`, together with the ply at which it occurs.
 
     If `n2` is a prefix of `n1`, returns the next move from `n1`.
     If there is no differing move in `n1` (identical lines, or `n1` is shorter),
