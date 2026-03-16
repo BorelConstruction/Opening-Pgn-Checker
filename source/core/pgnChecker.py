@@ -15,6 +15,8 @@ from collections.abc import Callable
 # from __future__ import annotations # to resolve PgnChecker<->EvalProvider... I'll just annotate with a str.
 from abc import ABC
 
+VisitResultT = TypeVar("VisitResultT")
+
 import berserk
 import berserk.exceptions
 import chess
@@ -106,7 +108,7 @@ class GapsInfo:
 class PosCache:
     def __init__(self, fen: str):
         self.fen = fen
-        self.TTed : bool = False # True means "seen in the relevant part of the pgn file"
+        self.TTed : Node = None # "seen in the relevant part of the pgn file"
         self._data = {}
 
     def get(self, label, query_fn):
@@ -134,7 +136,7 @@ class PosCache:
     @classmethod
     def from_dict(cls, checker: 'PgnChecker', payload: dict) -> "PosCache":
         pc = cls(payload["fen"])
-        pc.TTed = False
+        # pc.TTed = False
         data = payload.get("data", {})
         if "db_lichess" in data:
             pc._data["db_lichess"] = data["db_lichess"]
@@ -369,21 +371,21 @@ class PgnChecker():
 
     def fill_the_TT(self, root_node: Node):
         def visit(node: Node):
-            self.cache[fen(node)].TTed = True
+            self.cache[fen(node)].TTed = node
 
         self._traverse(root_node, visit=visit)
 
 
     def _traverse(self, node: Node,
-                    visit: Callable = None,
-                    post: Callable = None,
-                    reasons_to_stop: Callable = None):
+                    visit: Optional[Callable[[Node], VisitResultT]] = None,
+                    post: Optional[Callable] = None,
+                    reasons_to_stop: Optional[Callable[[Node, Optional[VisitResultT]], bool]] = None):
         '''Traverse the subtree rooted at node
         in a way consistent with self.options'''
         tp = TraversalPolicy(
-            start_ply = self.options.start_ply,
-            end_ply = self.options.end_ply,
-            check_alternatives = self.options.check_alternatives)
+            start_ply=self.options.start_ply,
+            end_ply=self.options.end_ply,
+            check_alternatives=self.options.check_alternatives)
         return _traverse(node, visit, post, reasons_to_stop, tp, self.options.side, self.progress)
 
     def init_client(self):
@@ -403,7 +405,7 @@ class PgnChecker():
             if fen(n).startswith(fen_essential_part(self.options.starting_pos)):
                 self.starting_node = n
                 return n
-        self._traverse(node, visit=visit, reasons_to_stop=lambda res: res is not None)
+        self._traverse(node, visit=visit, reasons_to_stop=lambda _, res: res is not None)
         if not hasattr(self, "starting_node"):
             raise ValueError(f"Starting position {self.options.starting_pos} not found in the PGN")
 
@@ -466,10 +468,7 @@ class PgnChecker():
         self.progress.reset()
         self.fill_gaps(gaps)
 
-    def find_local_gaps(self, node: Node) -> Optional[GapsInfo]:
-        if node.comment.startswith('tr') or node.comment.startswith('Tr'): # TODO: add to reasons_to_stop
-            return
-        
+    def find_local_gaps(self, node: Node) -> Optional[GapsInfo]:      
         pgn_ucis = [m.move.uci() for m in node.variations]
 
         if node.turn() == self.options.side:
@@ -499,8 +498,8 @@ class PgnChecker():
                 update_comment(log_node,"Move {} not found in the database".format(uci).upper(), True)
             pos_snap = PositionSnapshot(fen(log_node), log_node.ply(), last_move_uci=uci)
             self.report(CheckerReport(kind="position", position=pos_snap,
-                                    message=f"Filling gaps... \n" + f"{freq:.2f}% of {self.total_games(fen(log_node))} games" +
-                                    f"\nScore rate {self.score_rate_move(log_node, uci):.2f}%."))
+                                    message=f"Filling gaps... \n" + f"{100*freq:.0f}% of {self.total_games(fen(log_node))} games" +
+                                    f"\nScore rate {100*self.score_rate_move(log_node, uci):.0f}%."))
             comment += uci + ': ' + (str(freq)[:4]) + ', '
             # arrows.append([chess.parse_square(m_uci[:2]), chess.parse_square(m_uci[2:4])])
             arrows.append(arrow_from_uci(uci, color=color_from_freq(freq)))
@@ -527,7 +526,9 @@ class PgnChecker():
             if local_gaps:
                 all_gaps.append(local_gaps)
             return all_gaps
-        return self._traverse(game, post=post)
+        def reasons_to_stop(node, _): 
+            return node.comment.startswith('tr') or node.comment.startswith('Tr')
+        return self._traverse(game, post=post, reasons_to_stop=reasons_to_stop)
 
     def gaps_local(self, node: Node):
         gaps_info = self.find_local_gaps(node)
@@ -560,8 +561,9 @@ class PgnChecker():
         self._traverse(log_node, partial(PgnChecker.mark_move_local, self))
 
     @staticmethod
-    def annotate_transposition(node: Node):
-        update_comment(node, "Transp.")
+    def annotate_transposition(first_occurrence: Node, node: Node):
+        diff = first_difference(first_occurrence,node)
+        update_comment(node, f"Transp to {diff.ply}.{diff.move.uci()}")
 
     def find_transposition_move(self, board: Union[Node, chess.Board]) -> Optional[chess.Move]:
         if isinstance(board, Node):
@@ -667,7 +669,7 @@ class PgnChecker():
             our_move_choices = self.generate_moves_us(log_node)
             best_move_child = self._add_variation(log_node, our_move_choices[0].move, to_main=True)
             if our_move_choices[0].reason == "tr":
-                self.annotate_transposition(best_move_child)
+                self.annotate_transposition(self.cache[fen(best_move_child)].TTed, best_move_child)
                 return
             
             for m in our_move_choices[1:]:
@@ -749,7 +751,7 @@ class PgnChecker():
         return child
 
     def _record_position_in_TT(self, node): # TODO: when do we add?
-        self.cache[fen(node)].TTed = True
+        self.cache[fen(node)].TTed = node
 
 def update_comment(node: Node, message: str, debug=False):
     if not debug or (debug and DEBUG_MODE):
@@ -912,7 +914,7 @@ def _traverse(node: Node,
             progress.step()
             # node.comment += f"Step {s}"
 
-    if reasons_to_stop and reasons_to_stop(v_res):
+    if reasons_to_stop and reasons_to_stop(node, v_res):
         return child_results
 
     if node.ply() == end_ply:
@@ -1119,6 +1121,46 @@ def analyse_time_limit(engine, board: chess.Board, time_limit=0.1, multipv: int 
     return engine.analyse(board, chess.engine.Limit(time=time_limit), multipv=multipv)
 
 
+class FirstDifference(NamedTuple):
+    ply: int
+    move: chess.Move
+
+
+def first_difference(n1: Node, n2: Node) -> Optional[FirstDifference]:
+    """
+    Compare two move sequences ending at `n1` and `n2` and return the first move
+    (from the root, i.e. earliest in the game) that differs in `n1`.
+
+    If `n2` is a prefix of `n1`, returns the next move from `n1`.
+    If there is no differing move in `n1` (identical lines, or `n1` is shorter),
+    returns None.
+    """
+    stack1: list[chess.Move] = []
+    stack2: list[chess.Move] = []
+
+    cur = n1
+    while cur is not None and getattr(cur, "move", None) is not None:
+        stack1.append(cur.move)
+        cur = cur.parent
+
+    cur = n2
+    while cur is not None and getattr(cur, "move", None) is not None:
+        stack2.append(cur.move)
+        cur = cur.parent
+
+    stack1.reverse()
+    stack2.reverse()
+
+    common_len = min(len(stack1), len(stack2))
+    for i in range(common_len):
+        if stack1[i] != stack2[i]:
+            return FirstDifference(i + 1, stack1[i])
+
+    if len(stack1) > len(stack2):
+        i = len(stack2)
+        return FirstDifference(i + 1, stack1[i])
+
+    return None
 
 def gap_criterion(move: str, move_freq: float, freq_threshold: float, min_games: int = 0, pov: chess.Color = WHITE) -> int:
     if score_rate(move, pov) > 0.75: # we assume files don't need to consider moves that lose in practice
