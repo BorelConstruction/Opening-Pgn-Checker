@@ -540,18 +540,23 @@ class PgnChecker():
         self._traverse(node, partial(PgnChecker.gaps_local, self))
 
     def mark_move_local(self, log_node: Node):
-        pgn_moves = [n.move.uci() for n in log_node.variations]
-        games = self.query(fen(log_node), "db_lichess")
-        for m in games['moves']:
-            m_uci = m['uci']
-            freq = move_frequency(m, games)
-            if uci_from_lichess_to_pgn(m_uci) in pgn_moves:
-                move_obj = chess.Move.from_uci(uci_from_lichess_to_pgn(m_uci))
-                target_node = log_node.variation(move_obj)
-                if log_node.turn() == self.options.side:
-                    mark_based_on_freq_us(target_node, freq)
-                else:
-                    mark_based_on_freq_them(target_node, freq)
+        mark_fn = mark_based_on_freq_us if log_node.turn() == self.options.side else mark_based_on_freq_them
+        for n in log_node.variations:
+            freq = self.move_freq(log_node, n.move)
+            mark_fn(n, freq)
+            # if log_node.turn() == self.options.side:
+            #     mark_based_on_freq_us(n, freq)
+            # else:
+            #     mark_based_on_freq_them(n, freq)
+
+        # pgn_moves = [n.move.uci() for n in log_node.variations]
+        # games = self.query(fen(log_node), "db_lichess")
+        # for m in games['moves']:
+        #     m_uci = m['uci']
+        #     freq = move_frequency(m, games)
+        #     if uci_from_lichess_to_pgn(m_uci) in pgn_moves:
+        #         move_obj = chess.Move.from_uci(uci_from_lichess_to_pgn(m_uci))
+        #         target_node = log_node.variation(move_obj)
 
     def mark_moves(self, log_node):
         # TODO: if a move is frequent, promote it?
@@ -628,7 +633,7 @@ class PgnChecker():
                 return [MoveChoice(tr_move, "tr", tr_eval)]
             else:
                 return [self.better_engine_move(node),
-                        MoveChoice(tr_move, "tr", tr_eval, f"To transp, {eval:.2f} > {tr_eval:.2f}")]
+                        MoveChoice(tr_move, "tr", tr_eval, f"To transp, {eval:.2f} > {tr_eval:.2f}.")]
         to_tr_move = self.seek_transposition(node)
 
         if to_tr_move: # TODO: abstract these two blocks
@@ -997,7 +1002,6 @@ def uci_from_lichess_to_pgn(uci: str):
     return uci
 
 def uci_from_pgn_to_lichess(uci: str): 
-    # A convention for safety is to always operate with pgn's ucis, so this shouldn't be used
     if uci == 'e1g1':
         return 'e1h1'
     if uci == 'e8g8':
@@ -1009,7 +1013,7 @@ def uci_from_pgn_to_lichess(uci: str):
     return uci
 
 def stats_for_uci(games: dict, uci: str):
-    return next((m for m in games['moves'] if uci_from_lichess_to_pgn(m['uci']) == uci), None) # {}
+    return next((m for m in games['moves'] if m['uci'] == uci_from_pgn_to_lichess(uci)), None) # {}
 
 def arrow_from_uci(uci: str, *args, **kwargs) -> chess.svg.Arrow:
     return chess.svg.Arrow(ord(uci[0])-97 + 8*(int(uci[1])-1), ord(uci[2])-97 + 8*(int(uci[3])-1), *args, **kwargs)
