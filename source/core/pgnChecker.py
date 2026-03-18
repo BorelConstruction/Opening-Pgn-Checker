@@ -135,8 +135,8 @@ class PosCache:
     
     @classmethod
     def from_dict(cls, checker: 'PgnChecker', payload: dict) -> "PosCache":
+        payload["fen"] = fen(payload["fen"]) #####
         pc = cls(payload["fen"])
-        # pc.TTed = False
         data = payload.get("data", {})
         if "db_lichess" in data:
             pc._data["db_lichess"] = data["db_lichess"]
@@ -312,7 +312,7 @@ class PgnChecker():
                 move = board.move
             board = board.board()
         if move is None:
-            raise ValueError("Expectexed a move or a Node")
+            raise ValueError("Expected a move or a Node")
         stats = self.query(fen(board), "db_lichess")
         md = stats_for_uci(stats, move)
         if not md:
@@ -405,8 +405,9 @@ class PgnChecker():
             self.starting_node = node
             return node
         
+        self.options.starting_pos = fen(self.options.starting_pos)
         def visit(n: Node):
-            if fen(n).startswith(fen_essential_part(self.options.starting_pos)):
+            if fen(n).startswith(fen_essential_part(self.options.starting_pos)): # ==
                 self.starting_node = n
                 return n
         self._traverse(node, visit=visit, reasons_to_stop=lambda _, res: res is not None)
@@ -418,9 +419,6 @@ class PgnChecker():
         self.load_cache()
         try:
             self.init_client()
-
-
-            self.lines_added = 0
 
             with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
                 num = 0
@@ -434,8 +432,7 @@ class PgnChecker():
                     self.fill_the_TT(node)
                     
                     self.cache.enable_auto_save()
-                    cache_size_after_tt = len(self.cache)
-                    total = cache_size_after_tt # - cache_size_after_load
+                    total = sum(1 for _ in self.cache if self.cache[_].TTed)
                     self.progress.set_total(total)
                     output_game = node  # no need to copy they way it currently works
                     if node.headers["Event"] == '?':
@@ -454,7 +451,6 @@ class PgnChecker():
         except Exception as e:
             sys.stderr.write(f"Error: {traceback.format_exc()}\n")
             raise e
-            # close_engine(engine) # TODO: rewrite with "with" or something
 
         finally:
             try:
@@ -463,7 +459,7 @@ class PgnChecker():
                 sys.stderr.write(f"Failed to save cache: {exc}\n")
             self._finalizer()
 
-        return f"Added {self.lines_added} lines"
+        return f"Added {self.moves_added} moves"
     
     def find_fill_gaps(self, game_node: Node):
         self.report_message("Finding gaps...")
@@ -486,6 +482,7 @@ class PgnChecker():
                 not mc.move.uci() in pgn_ucis])
     
     def fill_gaps(self, gaps: list[GapsInfo]):
+        self.moves_added = 0
         for gaps_info in self.progress.iter(gaps):
             node = gaps_info.node
             self.act_on_gap_data_local(node, gaps_info)
@@ -509,16 +506,10 @@ class PgnChecker():
             arrows.append(arrow_from_uci(uci, color=color_from_freq(freq)))
             child = self._add_variation(log_node, uci)
             child.starting_comment = 'SUGGESTED LINE:'
-            self.lines_added += 1
             self.add_sample_line(child, depth=self.options.added_depth)
         if annotate:
             update_comment(log_node, comment)
             log_node.set_arrows(arrows)
-                # if report_state:
-                #     pos = PositionSnapshot(child.board().fen(), child.ply(), last_move_uci=move_uci)
-                #     report_state(CheckerReport(kind="gap position", position=pos,
-                #                               message=f"{game_amount} of {total_games(games)} games (" + str(game_amount/total_games(games))[2:4]
-                #                               + f"%) \n{self.lines_added} lines added"))
 
 
     def find_gaps(self, game: Node):
@@ -567,6 +558,7 @@ class PgnChecker():
         for move in board.legal_moves:
             board.push(move)
             cached = self.cache.get(fen(board))
+            # 'rnbqkb1r/pp3ppp/2p1pn2/3p4/2P5/1PN1PN2/P2P1PPP/R1BQKB1R b KQkq - 2 5'
             board.pop()
             if cached is not None and cached.TTed:
                 return move
@@ -655,9 +647,7 @@ class PgnChecker():
 
         # if no DB moves and option enabled, add an engine move
         if not moves and self.options.use_engine_for_them and maybe_use_engine:
-            self.N+=1
             engine_move = self.query(fen(node), "q-eval").move
-            sys.stderr.write(f"\n{self.N}:  {fen(node)}, adding engine move {engine_move.uci()}...\n")
             c = "" if DEBUG_MODE else "Engine".upper()
             moves.append(MoveChoice(engine_move, "eng", None, c)) 
 
@@ -735,7 +725,7 @@ class PgnChecker():
         if len(top_lines) < 2:
             return False
         eval1 = top_lines[0].eval
-        eval2, second_best_move = top_lines[1]
+        eval2 = top_lines[1].eval
         if (freq < 0.4 and
             eval1 - eval2 > 0.25 and
             eval1 - eval2 > 0.25*eval2):
@@ -757,6 +747,7 @@ class PgnChecker():
         else:
             child = node.add_variation(move)
         self._record_position_in_TT(child)
+        self.moves_added += 1
         return child
 
     def _record_position_in_TT(self, node): # TODO: when do we add?
@@ -767,10 +758,15 @@ def update_comment(node: Node, message: str, debug=False):
     if not debug or (debug and DEBUG_MODE):
         node.comment = (node.comment + " " + message).lstrip()
 
-def fen(node: Union[Node, chess.Board]) -> str:
-    if isinstance(node, chess.Board):
-        return node.fen()
-    return node.board().fen()
+def fen(board: Union[Node, chess.Board, str]) -> str:
+    # ALL FENS SHOULD COME FROM THIS FUNCTION
+    # or subtle bugs will arise
+    # good enough as long as it's a solo project
+    if isinstance(board, Node):
+        board = board.board()
+    if isinstance(board, chess.Board):
+        board = board.fen()
+    return fen_essential_part(board)
 
 def fen_essential_part(fen: str) -> str:
     return fen.rstrip(" -0123456789")
