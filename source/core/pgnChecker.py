@@ -55,7 +55,7 @@ speeds = ["blitz", "rapid", "classical"]
 ratings_n = ["1900", "2200"]
 speeds_n = ["blitz", "rapid", "classical"]
 
-DEBUG_MODE = True
+DEBUG_MODE = False
 
 STAT_SIGNIFICANCE_THRESHOLD = 20
 
@@ -304,11 +304,15 @@ class PgnChecker():
     def __exit__(self, exc_type, exc, tb):
         self.close()
 
-    def move_freq(self, board: Union[Node, chess.Board], move: Union[chess.Move, str]) -> float:
+    def move_freq(self, board: Union[Node, chess.Board], move: Optional[Union[chess.Move, str]] = None) -> float:
         if isinstance(move, chess.Move):
             move = move.uci()
         if isinstance(board, Node):
+            if move is None:
+                move = board.move
             board = board.board()
+        if move is None:
+            raise ValueError("Expectexed a move or a Node")
         stats = self.query(fen(board), "db_lichess")
         md = stats_for_uci(stats, move)
         if not md:
@@ -544,19 +548,6 @@ class PgnChecker():
         for n in log_node.variations:
             freq = self.move_freq(log_node, n.move)
             mark_fn(n, freq)
-            # if log_node.turn() == self.options.side:
-            #     mark_based_on_freq_us(n, freq)
-            # else:
-            #     mark_based_on_freq_them(n, freq)
-
-        # pgn_moves = [n.move.uci() for n in log_node.variations]
-        # games = self.query(fen(log_node), "db_lichess")
-        # for m in games['moves']:
-        #     m_uci = m['uci']
-        #     freq = move_frequency(m, games)
-        #     if uci_from_lichess_to_pgn(m_uci) in pgn_moves:
-        #         move_obj = chess.Move.from_uci(uci_from_lichess_to_pgn(m_uci))
-        #         target_node = log_node.variation(move_obj)
 
     def mark_moves(self, log_node):
         # TODO: if a move is frequent, promote it?
@@ -667,9 +658,6 @@ class PgnChecker():
             self.N+=1
             engine_move = self.query(fen(node), "q-eval").move
             sys.stderr.write(f"\n{self.N}:  {fen(node)}, adding engine move {engine_move.uci()}...\n")
-            self.report(CheckerReport(kind="position", position=PositionSnapshot(fen(node), node.ply(), last_move_uci=engine_move.uci()),
-                                    message="Quick-evaling"))
-            # time.sleep(5)
             c = "" if DEBUG_MODE else "Engine".upper()
             moves.append(MoveChoice(engine_move, "eng", None, c)) 
 
@@ -679,7 +667,7 @@ class PgnChecker():
         sys.stderr.write(f"\nAdding sample line for {fen(log_node)}...")
         leaf_node = True
         try:
-            self.query(fen(log_node), "eval").top(2) 
+            e = self.query(fen(log_node), "eval").top(2) 
             # TODO: ^ reliable way to know in advance how many lines we will know, so that we never call top(1) before top(2)
 
             self.set_question_marks(log_node)
@@ -702,6 +690,11 @@ class PgnChecker():
                 depth += 2
 
             if depth <= 0:  # even if depth was 0 we first add a move for ourselves
+                return
+
+            if e[0].eval > 2 and len(e) > 1 and e[1].eval > 2:
+                # if self.they_are_lost(node):
+                update_comment(best_move_child, f"Eval: {e[0].eval:.2f}", True)
                 return
            
             opponent_move_choices = self.generate_moves_them(best_move_child, maybe_use_engine=True)
@@ -735,19 +728,17 @@ class PgnChecker():
 
     def move_is_important(self, node: Node):
         p = node.parent
-        stats = self.query(fen(p), "db_lichess")
-        our_move_uci = node.move.uci()
-        our_move_freq = next((move_frequency(m,stats) for m in stats["moves"] 
-                               if uci_from_lichess_to_pgn(m["uci"])==our_move_uci), 0)
+        freq = self.move_freq(node)
+        if freq == -1:
+            return False # can't decide without db
         top_lines = self.query(fen(p), "eval").top(2)
         if len(top_lines) < 2:
             return False
         eval1 = top_lines[0].eval
         eval2, second_best_move = top_lines[1]
-        if (our_move_freq < 0.4 and
+        if (freq < 0.4 and
             eval1 - eval2 > 0.25 and
             eval1 - eval2 > 0.25*eval2):
-            # update_comment(node, f"eval {eval1:.2f}, second best move {second_best_move.uci()} has eval {eval2:.2f} and our move frequency is only {our_move_freq*100:.1f}%".upper())
             return True
         
         return False
