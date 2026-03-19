@@ -120,6 +120,8 @@ class PosCache:
         data = {}
         if "db_lichess" in self._data:
             data["db_lichess"] = self._data["db_lichess"]
+        if "db_masters" in self._data:
+            data["db_masters"] = self._data["db_masters"]
         if "eval" in self._data:
             eval_provider = self._data["eval"]
             if hasattr(eval_provider, "to_dict"):
@@ -140,6 +142,8 @@ class PosCache:
         data = payload.get("data", {})
         if "db_lichess" in data:
             pc._data["db_lichess"] = data["db_lichess"]
+        if "db_masters" in data:
+            pc._data["db_masters"] = data["db_masters"]
         if "eval" in data:
             pc._data["eval"] = EvalProvider.from_dict(checker, pc.fen, data["eval"])
         if "q-eval" in data:
@@ -260,6 +264,8 @@ class PgnChecker():
             # (as self.cache will then store the result relative to the old explorer)
             # If we expect this to happen, here and below such parameters have to be frozen (and not cached)
             "db_lichess": lambda fen: safe_get_games(self.opening_explorer, position=fen),
+
+            "db_masters": lambda fen: safe_get_games(self.opening_explorer, position=fen, lichess=False),
 
             "eval": lambda fen: EvalProvider(self, fen),
 
@@ -473,8 +479,6 @@ class PgnChecker():
 
         if node.turn() == self.options.side:
             if not pgn_ucis:
-                if True: # self.options.fill_gaps # 
-                    node.parent.variations.remove(node) # ideally this does not belong here
                 return GapsInfo(node.parent, [node.move.uci()])
             return
         
@@ -514,7 +518,7 @@ class PgnChecker():
 
     def find_gaps(self, game: Node):
         def post(node, child_results: list[GapsInfo]):
-            all_gaps = sum(child_results, [])
+            all_gaps = child_results
             if node.ply() < self.options.start_ply:
                 return all_gaps # only propagate the results
             local_gaps = self.find_local_gaps(node) 
@@ -558,7 +562,6 @@ class PgnChecker():
         for move in board.legal_moves:
             board.push(move)
             cached = self.cache.get(fen(board))
-            # 'rnbqkb1r/pp3ppp/2p1pn2/3p4/2P5/1PN1PN2/P2P1PPP/R1BQKB1R b KQkq - 2 5'
             board.pop()
             if cached is not None and cached.TTed:
                 return move
@@ -632,9 +635,8 @@ class PgnChecker():
                         MoveChoice(to_tr_move, "to_tr", to_tr_eval, f"To transp, {eval:.2f} > {to_tr_eval:.2f}")]
         return [self.better_engine_move(node)]
     
-    def generate_moves_them(self, node: Node, maybe_use_engine: bool = False) -> list[MoveChoice]:
+    def generate_moves_them_db(self, stats: dict) -> list[MoveChoice]:
         moves = []
-        stats = self.query(fen(node), "db_lichess")
         db_moves = stats.get("moves", [])
         for m in db_moves:
             crit = gap_criterion(m, move_frequency(m, stats), self.options.freq_threshold, 
@@ -644,6 +646,24 @@ class PgnChecker():
             if crit == 2:
                 c = f"well-scoring, ".upper() + str(score_rate(m, self.options.side))[:4] + f" in {total_games(m)} games"
                 moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "good", c))
+        return moves
+
+    def generate_moves_them(self, node: Node, maybe_use_engine: bool = False) -> list[MoveChoice]:
+        moves = []
+        stat_list = [self.query(fen(node), type) for type in self.options.db_types]
+        for stats in stat_list:
+            moves += self.generate_moves_them_db(stats)
+        moves = remove_duplicates(moves)
+        # stats = self.query(fen(node), "db_lichess")
+        # db_moves = stats.get("moves", [])
+        # for m in db_moves:
+        #     crit = gap_criterion(m, move_frequency(m, stats), self.options.freq_threshold, 
+        #                                 self.options.min_games, pov=self.options.side) 
+        #     if crit == 1:
+        #         moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "db"))
+        #     if crit == 2:
+        #         c = f"well-scoring, ".upper() + str(score_rate(m, self.options.side))[:4] + f" in {total_games(m)} games"
+        #         moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "good", c))
 
         # if no DB moves and option enabled, add an engine move
         if not moves and self.options.use_engine_for_them and maybe_use_engine:
@@ -769,7 +789,7 @@ def fen(board: Union[Node, chess.Board, str]) -> str:
     return fen_essential_part(board)
 
 def fen_essential_part(fen: str) -> str:
-    return fen.rstrip(" -0123456789")
+    return ' '.join(fen.strip().split()[:4])
 
 def side(fen: str) -> chess.Color:
     try:
@@ -931,8 +951,9 @@ def _traverse(node: Node,
         vars = vars[:1]
 
     for n in vars:
-        child_results.append(_traverse(n, visit, post,
-            reasons_to_stop, tp, side, progress))
+        child_results += _traverse(n, visit, post,
+            reasons_to_stop, tp, side, progress)
+        pass
 
     if post:
         if start_ply <= node.ply() <= end_ply:
@@ -941,14 +962,17 @@ def _traverse(node: Node,
         return post(node, child_results)
     return child_results
 
-def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attempts=5, base_delay=30.0, **kwargs):
+def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attempts=5, lichess=True, base_delay=30.0, **kwargs):
     '''Query the database, retrying if HTTP 429 is raised
         (which means we query too often)'''
     time.sleep(0.1)
     for attempt in range(max_attempts):
         try:
             sys.stderr.write("\n querying the DB...")
-            games = opening_explorer.get_lichess_games(*args, **kwargs, ratings=ratings, speeds=speeds)
+            if lichess:
+                games = opening_explorer.get_lichess_games(*args, **kwargs, ratings=ratings, speeds=speeds)
+            else:
+                games = opening_explorer.get_masters_games(*args, **kwargs)
             return games
 
         except berserk.exceptions.ResponseError as e:
@@ -957,9 +981,10 @@ def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attemp
                 delay = base_delay * (2 ** attempt)
                 time.sleep(delay)
                 sys.stderr.write(f"\n 429, {attempt}")
+            else:
+                raise
         except Exception as e:
-            # raise  # not a 429 → bubble up
-            sys.stderr.write(f"\n {e}, {attempt}")
+            raise  # not a 429 → bubble up
 
     raise RuntimeError("Too many 429s – giving up")
 
@@ -1178,6 +1203,15 @@ def gap_criterion(move: str, move_freq: float, freq_threshold: float, min_games:
         # TODO: before going into this, check if the most common response transposes into something known
         return 2
     return 0
+
+def remove_duplicates(lst: list) -> list:
+    seen = []
+    result = []
+    for item in lst:
+        if item not in seen:
+            seen.append(item)
+            result.append(item)
+    return result
 
 
 def close_engine(engine):

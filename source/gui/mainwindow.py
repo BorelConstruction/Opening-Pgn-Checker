@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QGroupBox
 )
 
 from ..core import pgnChecker as checker
@@ -162,6 +163,8 @@ class MainWindow(QWidget):
                     data[name] = field.type(widget.value())
                 elif isinstance(widget, QCheckBox):
                     data[name] = widget.isChecked()
+                elif isinstance(widget, QGroupBox):
+                    data[name] = widget.get_value()
                 else:
                     data[name] = widget.text()
         return self.options_class(**data)
@@ -250,6 +253,8 @@ class MainWindow(QWidget):
                     widget.setValue(f.default)
                 elif isinstance(widget, QCheckBox):
                     widget.setChecked(f.default)
+                elif isinstance(widget, QGroupBox):
+                    widget.set_value(f.default_factory())
                 else:
                     widget.setText(f.default)
 
@@ -339,7 +344,54 @@ def create_widget_for_field(field_info, current_value):
         widget.setValue(current_value)
         return widget
 
+    if v_type == list:
+        widget = create_selector(metadata["options"])
+        widget.set_value(current_value)
+        return widget
+
     # 5. Default: Text/Paths
     widget = QLineEdit()
     widget.setText(str(current_value))
     return widget
+
+def create_selector(options: dict, default_selected=None):
+    if default_selected is None:
+        default_selected = list(options.keys())[0]
+
+    container = QGroupBox("Select Databases")
+    layout = QHBoxLayout(container) # Horizontal looks better for small lists
+    
+    checkboxes = []
+
+    def on_checkbox_toggled():
+        checked_count = sum(1 for cb in checkboxes if cb.isChecked())
+        
+        # If only one checkbox is checked, disable it so it cannot be unchecked
+        if checked_count == 1:
+            for cb in checkboxes:
+                if cb.isChecked():
+                    cb.setEnabled(False)
+        else:
+            # Re-enable all if more than one is checked
+            for cb in checkboxes:
+                cb.setEnabled(True)
+
+    for name in options:
+        cb = QCheckBox(name)
+        # if name in default_selected:
+        #     cb.setChecked(True)
+        
+        # to force one of the checkboxes to be checked -- won't use now as it can be used w/o dbs at all, in theory
+        # cb.toggled.connect(on_checkbox_toggled)
+        checkboxes.append(cb)
+        layout.addWidget(cb)
+
+    # Initial validation run
+    on_checkbox_toggled()
+    
+    # we won't follow Qt's naming as 1. it is not pythonic 2. we emphasize this is monkey-patched
+    container.get_value = lambda: [options[cb.text()] for cb in checkboxes if cb.isChecked()]
+    container.set_value = lambda l: [cb.setChecked(True) for cb in checkboxes if options[cb.text()] in l]
+
+    
+    return container

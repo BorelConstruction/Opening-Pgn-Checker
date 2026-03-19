@@ -119,6 +119,11 @@ class Options:
         metadata={"label": "Output PGN Filename", "ui_hint": "save_file"}
     )
 
+    db_types: list = field(
+        default_factory=lambda: ["db_lichess"],
+        metadata={"label": "Database Types", "options": {"Lichess": "db_lichess", "Masters": "db_masters"}}
+    )
+
     _token: str = field(
         default="",
         metadata={"label": "Lichess API Token", "ui_hint": "password"}
@@ -139,6 +144,7 @@ def load_settings() -> Options:
         try:
             with open(CONFIG_FILE, "r") as f:
                 data = json.load(f)
+                print(Options(**data))
                 return Options(**data)
         except Exception as e:
             print(f"Error loading settings: {e}")
