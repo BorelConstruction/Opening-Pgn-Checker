@@ -354,9 +354,7 @@ def create_widget_for_field(field_info, current_value):
     widget.setText(str(current_value))
     return widget
 
-def create_selector(options: dict, default_selected=None):
-    if default_selected is None:
-        default_selected = list(options.keys())[0]
+def create_selector(options: dict):
 
     container = QGroupBox("Select Databases")
     layout = QHBoxLayout(container) # Horizontal looks better for small lists
@@ -387,7 +385,7 @@ def create_selector(options: dict, default_selected=None):
         layout.addWidget(cb)
 
     # Initial validation run
-    on_checkbox_toggled()
+    # on_checkbox_toggled()
     
     # we won't follow Qt's naming as 1. it is not pythonic 2. we emphasize this is monkey-patched
     container.get_value = lambda: [options[cb.text()] for cb in checkboxes if cb.isChecked()]

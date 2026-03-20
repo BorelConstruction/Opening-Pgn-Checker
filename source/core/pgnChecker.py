@@ -31,16 +31,11 @@ from .options import Options
 from .timer import clock
 from .caching import CacheDict
 
-# TODO: trim obvious moves (don't add the last move if it's forced)
 # TODO: identify unobvious moves
 # TODO: exclaims for their moves (if it doesn't drop the eval while the most popular one does?)
 # TODO: min games depends on ply
 
-# TODO: node_count accounting for us only considering main lines
-
 # TODO: cap freq from above
-
-# TODO: let the engine play where no moves are found in the DB
 
 # TODO: similar positions
 
@@ -526,7 +521,7 @@ class PgnChecker():
                 all_gaps.append(local_gaps)
             return all_gaps
         def reasons_to_stop(node, _): 
-            return node.comment.startswith('tr') or node.comment.startswith('Tr')
+            return node.comment.startswith(('tr ', 'Tr ', 'Transp ', 'transp ', 'Transposes', 'transposes'))
         return self._traverse(game, post=post, reasons_to_stop=reasons_to_stop)
 
     def gaps_local(self, node: Node):
@@ -554,7 +549,7 @@ class PgnChecker():
     @staticmethod
     def annotate_transposition(first_occurrence: Node, node: Node):
         diff = first_difference(first_occurrence,node)
-        update_comment(node, f"Transp to {diff.ply}.{diff.move.uci()}")
+        update_comment(node, f"Tr to {whole_move_from_ply(diff.ply)}{diff.move}")
 
     def find_transposition_move(self, board: Union[Node, chess.Board]) -> Optional[chess.Move]:
         if isinstance(board, Node):
@@ -644,7 +639,7 @@ class PgnChecker():
             if crit == 1:
                 moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "db"))
             if crit == 2:
-                c = f"well-scoring, ".upper() + str(score_rate(m, self.options.side))[:4] + f" in {total_games(m)} games"
+                c = f"well-scoring, ".upper() + str(score_rate(m, self.options.side))[:4] + f" in {total_games(m)} games" if DEBUG_MODE else ""
                 moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "good", c))
         return moves
 
@@ -653,22 +648,12 @@ class PgnChecker():
         stat_list = [self.query(fen(node), type) for type in self.options.db_types]
         for stats in stat_list:
             moves += self.generate_moves_them_db(stats)
-        moves = remove_duplicates(moves)
-        # stats = self.query(fen(node), "db_lichess")
-        # db_moves = stats.get("moves", [])
-        # for m in db_moves:
-        #     crit = gap_criterion(m, move_frequency(m, stats), self.options.freq_threshold, 
-        #                                 self.options.min_games, pov=self.options.side) 
-        #     if crit == 1:
-        #         moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "db"))
-        #     if crit == 2:
-        #         c = f"well-scoring, ".upper() + str(score_rate(m, self.options.side))[:4] + f" in {total_games(m)} games"
-        #         moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "good", c))
+        moves = remove_duplicates(moves, equality_rel=lambda m:m.move)
 
         # if no DB moves and option enabled, add an engine move
         if not moves and self.options.use_engine_for_them and maybe_use_engine:
             engine_move = self.query(fen(node), "q-eval").move
-            c = "" if DEBUG_MODE else "Engine".upper()
+            c = "Engine".upper() if DEBUG_MODE else ""
             moves.append(MoveChoice(engine_move, "eng", None, c)) 
 
         return moves
@@ -726,7 +711,7 @@ class PgnChecker():
         pp = node.parent.parent
         if pp is None:
             return
-        eval_was = self.query(fen(pp), eval_query).best_eval() # TODO
+        eval_was = self.query(fen(pp), eval_query).best_eval()
         eval_became = self.query(fen(node), eval_query).best_eval()
         node.nags.update(compute_question_marks(eval_was, eval_became))
 
@@ -940,8 +925,9 @@ def _traverse(node: Node,
             progress.step()
             # node.comment += f"Step {s}"
 
-    if reasons_to_stop and reasons_to_stop(node, v_res):
-        return child_results
+    if reasons_to_stop:
+        if reasons_to_stop(node, v_res):
+            return child_results
 
     if node.ply() == end_ply:
         return child_results
@@ -1153,7 +1139,8 @@ def analyse_time_limit(engine, board: chess.Board, time_limit=0.1, multipv: int 
 
 class FirstDifference(NamedTuple):
     ply: int
-    move: chess.Move
+    # move: chess.Move
+    move: str
 
 
 def first_difference(n1: Node, n2: Node) -> Optional[FirstDifference]:
@@ -1170,12 +1157,12 @@ def first_difference(n1: Node, n2: Node) -> Optional[FirstDifference]:
 
     cur = n1
     while cur is not None and getattr(cur, "move", None) is not None:
-        stack1.append(cur.move)
+        stack1.append(move_san(cur))
         cur = cur.parent
 
     cur = n2
     while cur is not None and getattr(cur, "move", None) is not None:
-        stack2.append(cur.move)
+        stack2.append(move_san(cur))
         cur = cur.parent
 
     stack1.reverse()
@@ -1192,6 +1179,10 @@ def first_difference(n1: Node, n2: Node) -> Optional[FirstDifference]:
 
     return None
 
+def move_san(n: Node) -> str:
+    b = n.parent.board()
+    return b.san(n.move)
+
 def gap_criterion(move: str, move_freq: float, freq_threshold: float, min_games: int = 0, pov: chess.Color = WHITE) -> int:
     if score_rate(move, pov) > 0.75: # we assume files don't need to consider moves that lose in practice
         return 0
@@ -1204,14 +1195,19 @@ def gap_criterion(move: str, move_freq: float, freq_threshold: float, min_games:
         return 2
     return 0
 
-def remove_duplicates(lst: list) -> list:
+def remove_duplicates(lst: list, equality_rel: Optional[Callable] = lambda x:x) -> list:
     seen = []
     result = []
     for item in lst:
-        if item not in seen:
-            seen.append(item)
+        if equality_rel(item) not in seen:
+            seen.append(equality_rel(item))
             result.append(item)
     return result
+
+def whole_move_from_ply(ply: int) -> str:
+    if ply % 2 == 0:
+        return str(ply // 2) + "."
+    return str(ply // 2) + "..."
 
 
 def close_engine(engine):

@@ -3,22 +3,6 @@ import chess
 import json
 import os
 
-# @dataclass(frozen=True)
-# class Defaults:
-#     min_depth: int = 10
-#     max_depth: int = 20
-#     engine_path: str = "C:\\Users\\Vadim\\Downloads\\stockfish-windows-x86-64-avx2.exe"
-#     side: chess.Color = chess.WHITE
-#     start_ply: int = 10
-#     end_ply: int = 40
-#     freq_threshold: float = 0.3
-#     obv_threshold: float = 0.8
-#     add_nag: bool = True
-#     trim_obvious_moves: bool = True
-#     output_pgn: str = "Output.pgn"
-    
-#     # enable_tablebases: bool = False
-#     # threads: int = 4
 
 CONFIG_FILE = "settings.json"
 
@@ -31,12 +15,12 @@ class Options:
 
     # --- ENGINE GROUP ---
     min_depth: int = field(
-        default=12,
-        metadata={"label": "Minimum Engine Depth", "min": 1, "max": 40, "group": "Engine Settings", "order": 1}
+        default=28,
+        metadata={"label": "Minimum Engine Depth", "min": 1, "max": 60, "group": "Engine Settings", "order": 1}
     )
     max_depth: int = field(
-        default=30,
-        metadata={"label": "Maximum Engine Depth", "min": 1, "max": 60, "group": "Engine Settings", "order": 2}
+        default=40,
+        metadata={"label": "Maximum Engine Depth", "min": 1, "max": 80, "group": "Engine Settings", "order": 2}
     )
 
     # --- MOVE CHOICE ---
@@ -54,7 +38,6 @@ class Options:
         metadata={"label": "Length of Suggested Lines", "min": 1, "max": 20}
     )
 
-    # File paths - needs a "Browse" button in GUI
     # engine_path: str = field(    # not really an "option"
     #     default="C:\\Users\\Vadim\\Downloads\\stockfish-windows-x86-64-avx2.exe",
     #     metadata={"label": "Engine Path", "ui_hint": "file_path"}
@@ -64,11 +47,11 @@ class Options:
     # Game phase constraints - Range or SpinBox
     start_ply: int = field(
         default=10,
-        metadata={"label": "Start Analysis at Ply", "min": 0, "max": 60}
+        metadata={"label": "Start Analysis at Ply", "min": 2, "max": 60}
     )
     end_ply: int = field(
         default=40,
-        metadata={"label": "End Analysis at Ply", "min": 0, "max": 60}
+        metadata={"label": "End Analysis at Ply", "min": 2, "max": 80}
     )
 
     # Choice/Enum - needs a ComboBox/Dropdown, but we implement this via checkbox
@@ -79,14 +62,6 @@ class Options:
             # "ui_hint": "dropdown",
             # "options": {"White": chess.WHITE, "Black": chess.BLACK}
         }
-    )
-
-    obv_threshold: float = field(
-        default=0.8,
-        metadata={
-            "label": "Obviousness Threshold", 
-            "ui_hint": "percentage", 
-            "min": 0.0, "max": 1.0, "step": 0.05}
     )
 
     # Booleans - simple Checkboxes
@@ -144,7 +119,6 @@ def load_settings() -> Options:
         try:
             with open(CONFIG_FILE, "r") as f:
                 data = json.load(f)
-                print(Options(**data))
                 return Options(**data)
         except Exception as e:
             print(f"Error loading settings: {e}")
