@@ -30,6 +30,7 @@ from chess import BLACK
 from .options import Options
 from .timer import clock
 from .caching import CacheDict
+from .database import safe_get_games
 
 # TODO: identify unobvious moves
 # TODO: exclaims for their moves (if it doesn't drop the eval while the most popular one does?)
@@ -43,12 +44,6 @@ from .caching import CacheDict
 
 # sys.stdout.reconfigure(encoding='utf-8')
 
-
-ratings = ["2200", "2500"] # TODO: make parameters
-speeds = ["blitz", "rapid", "classical"]
-
-ratings_n = ["1900", "2200"]
-speeds_n = ["blitz", "rapid", "classical"]
 
 DEBUG_MODE = False
 
@@ -948,31 +943,6 @@ def _traverse(node: Node,
         return post(node, child_results)
     return child_results
 
-def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attempts=5, lichess=True, base_delay=30.0, **kwargs):
-    '''Query the database, retrying if HTTP 429 is raised
-        (which means we query too often)'''
-    time.sleep(0.1)
-    for attempt in range(max_attempts):
-        try:
-            sys.stderr.write("\n querying the DB...")
-            if lichess:
-                games = opening_explorer.get_lichess_games(*args, **kwargs, ratings=ratings, speeds=speeds)
-            else:
-                games = opening_explorer.get_masters_games(*args, **kwargs)
-            return games
-
-        except berserk.exceptions.ResponseError as e:
-            if e.response is not None and e.response.status_code == 429:
-                # exponential backoff
-                delay = base_delay * (2 ** attempt)
-                time.sleep(delay)
-                sys.stderr.write(f"\n 429, {attempt}")
-            else:
-                raise
-        except Exception as e:
-            raise  # not a 429 → bubble up
-
-    raise RuntimeError("Too many 429s – giving up")
 
 def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1) -> list[EngineEval]:
     # TODO: make a separate function for this processing?
