@@ -22,13 +22,15 @@ from typing import Callable
 import networkx as nx
 from pyvis.network import Network
 
+from .traversal import traverse, TraversalPolicy
+
 
 # Type aliases
 Board       = chess.Board
 Move        = chess.Move
 Node        = chess.pgn.GameNode
 DbStats     = dict[Move, int]
-GetChildren = Callable[[Node, Board], list[Move]]
+GetChildren = Callable[[Node, Board], list[Node]]
 GetDbStats  = Callable[[Node], DbStats]
 
 
@@ -59,40 +61,38 @@ class InclusionGraph:
     # Building
     # ------------------------------------------------------------------
 
-    def build(self, root: Node, depth: int) -> None:
+    def build(self, root: Node, start: int, end : int) -> None:
         """
         Traverse the opening tree from root up to depth half-moves,
         accumulating edge observations.
         """
         self._edge_observations.clear()
         self.graph.clear()
-        self._traverse(root, depth)
+        self._traverse(root, start, end)
         self._finalize_edges()
 
-    def _traverse(self, node: Node, depth: int) -> None:
-        if depth == 0:
-            return
+    def _traverse(self, node: Node, start_ply, end_ply) -> None:
+        def visit(node: Node) -> None:
+            for ma in self.get_children(node):
+                # --- record edges ma -> mb for every response mb in DB ---
+                response_stats: DbStats = self.get_db_stats(ma)
+                response_total = sum(response_stats.values()) if response_stats else 0
 
-        moves: list[Move] = self.get_children(node)
-        if not moves:
-            return
+                if response_total > 0:
+                    for mb, mb_count in response_stats.items():
+                        conditional_freq = mb_count / response_total
+                        self._edge_observations[
+                            (ma.move.uci(), mb.uci())
+                        ].append(conditional_freq)
 
-        stats: DbStats = self.get_db_stats(node)
+        tp = TraversalPolicy(
+            start_ply=start_ply,
+            end_ply=end_ply,
+            check_alternatives=False, # can do true
+            get_children=self.get_children
+        )
 
-        for ma in moves:
-            na = get_or_create_child(node, ma)
-            # --- record edges ma -> mb for every response mb in DB ---
-            response_stats: DbStats = self.get_db_stats(na)
-            response_total = sum(response_stats.values()) if response_stats else 0
-
-            if response_total > 0:
-                for mb, mb_count in response_stats.items():
-                    conditional_freq = mb_count / response_total
-                    self._edge_observations[
-                        (ma.uci(), mb.uci())
-                    ].append(conditional_freq)
-
-            self._traverse(na, depth - 1)
+        traverse(node, visit, tp=tp)
 
     def _finalize_edges(self) -> None:
         """Average observations and populate the networkx graph."""
@@ -175,16 +175,10 @@ def make_get_db_stats(
 
     The berserk response looks like:
       {"moves": [{"uci": "e2e4", "white": 100, "draws": 50, "black": 30}, ...]}
-
-    We sum white+draws+black as the game count for each move.
     """
     def get_db_stats(node: Node) -> dict[Move, int]:
-        fen = node.board.fen()
-        try:
-            response = safe_get_games(opening_explorer, position=fen, **kwargs)
-        except Exception as e:
-            print(f"DB query failed for {fen}: {e}")
-            return {}
+        fen = node.board().fen()
+        response = safe_get_games(opening_explorer, position=fen, **kwargs)
 
         result = {}
         for entry in response.get("moves", []):
@@ -208,7 +202,6 @@ def build_inclusion_graph(
     pgn_path: str,
     opening_explorer: berserk.clients.OpeningExplorer,
     safe_get_games,
-    start_fen: str,
     start_ply: int,
     end_ply: int,
     **db_kwargs,
@@ -227,7 +220,7 @@ def build_inclusion_graph(
     **db_kwargs       Passed to safe_get_games (e.g. ratings, speeds).
     """
 
-    get_children = lambda node: [v.move for v in node.variations]
+    get_children = lambda node: node.variations
     get_db_stats  = make_get_db_stats(opening_explorer, safe_get_games, **db_kwargs)
 
     with open(pgn_path, encoding="utf-8") as pgnFile:
@@ -237,8 +230,8 @@ def build_inclusion_graph(
 
     depth = end_ply - start_ply #############
 
-    print(f"Building graph (depth={depth})...")
-    graph.build(root, depth=depth)
+    print(f"Building graph...")
+    graph.build(root, start_ply, end_ply)
     print(f"  {graph.graph.number_of_nodes()} nodes, {graph.graph.number_of_edges()} edges.")
 
     return graph
@@ -253,13 +246,12 @@ if __name__ == "__main__":
 
     # --- configuration ---
     INPUT_PATH = "C:/Users/Vadim/Downloads/PgnChecker/input pgns/BenoniToCheck.pgn"
-    START_FEN  = None               # None = standard starting position
     START_PLY  = 10
-    END_PLY    = 40
+    END_PLY    = 30
 
 
     # --- berserk client ---
-    token = '' # delete before pushing
+    token = 'lip_DN24dwO4RmnsBw9FBG3x' # delete before pushing
     session = berserk.TokenSession(token)
     client  = berserk.Client(session)
 
@@ -267,7 +259,6 @@ if __name__ == "__main__":
         pgn_path=INPUT_PATH,
         opening_explorer=client.opening_explorer,
         safe_get_games=safe_get_games,   # assumed imported / in scope
-        start_fen=START_FEN,
         start_ply=START_PLY,
         end_ply=END_PLY,
     )
