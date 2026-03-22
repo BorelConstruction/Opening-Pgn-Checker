@@ -1,5 +1,5 @@
 """
-Builds and visualises a move-relationship graph for identifying
+Builds and visualizes a move-relationship graph for identifying
 recurrent inclusions.
 
 Nodes  : moves (UCI strings)
@@ -26,10 +26,17 @@ from pyvis.network import Network
 # Type aliases
 Board       = chess.Board
 Move        = chess.Move
+Node        = chess.pgn.GameNode
 DbStats     = dict[Move, int]
-GetChildren = Callable[[Board], list[Move]]
-GetDbStats  = Callable[[Board], DbStats]
+GetChildren = Callable[[Node, Board], list[Move]]
+GetDbStats  = Callable[[Node], DbStats]
 
+
+def get_or_create_child(node, move):
+    for child in node.variations:
+        if child.move == move:
+            return child
+    return node.add_variation(move)
 
 class InclusionGraph:
 
@@ -52,32 +59,30 @@ class InclusionGraph:
     # Building
     # ------------------------------------------------------------------
 
-    def build(self, start_board: Board, depth: int) -> None:
+    def build(self, root: Node, depth: int) -> None:
         """
-        Traverse the opening tree from start_board up to depth half-moves,
+        Traverse the opening tree from root up to depth half-moves,
         accumulating edge observations.
         """
         self._edge_observations.clear()
         self.graph.clear()
-        self._traverse(start_board, depth)
-        self._finalise_edges()
+        self._traverse(root, depth)
+        self._finalize_edges()
 
-    def _traverse(self, board: Board, depth: int) -> None:
+    def _traverse(self, node: Node, depth: int) -> None:
         if depth == 0:
             return
 
-        children: list[Move] = self.get_children(board)
-        if not children:
+        moves: list[Move] = self.get_children(node)
+        if not moves:
             return
 
-        stats: DbStats = self.get_db_stats(board)
-        total = sum(stats.values()) if stats else 0
+        stats: DbStats = self.get_db_stats(node)
 
-        for ma in children:
-            board.push(ma)
-
+        for ma in moves:
+            na = get_or_create_child(node, ma)
             # --- record edges ma -> mb for every response mb in DB ---
-            response_stats: DbStats = self.get_db_stats(board)
+            response_stats: DbStats = self.get_db_stats(na)
             response_total = sum(response_stats.values()) if response_stats else 0
 
             if response_total > 0:
@@ -87,10 +92,9 @@ class InclusionGraph:
                         (ma.uci(), mb.uci())
                     ].append(conditional_freq)
 
-            self._traverse(board, depth - 1)
-            board.pop()
+            self._traverse(na, depth - 1)
 
-    def _finalise_edges(self) -> None:
+    def _finalize_edges(self) -> None:
         """Average observations and populate the networkx graph."""
         for (ma_uci, mb_uci), freqs in self._edge_observations.items():
             weight = sum(freqs) / len(freqs)
@@ -100,11 +104,11 @@ class InclusionGraph:
     # Visualisation
     # ------------------------------------------------------------------
 
-    def visualise(
+    def visualize(
         self,
         output_path: str = "inclusion_graph.html",
         min_weight: float = 0.0,
-        min_observations: int = 1,
+        min_observations: int = 4,
     ) -> None:
         """
         Write an interactive pyvis graph to output_path.
@@ -157,63 +161,6 @@ from .database import safe_get_games
 def _strip_clocks(fen: str) -> str:
     return " ".join(fen.split()[:4])
 
-
-def build_pgn_index(
-    pgn_path: str,
-    start_ply: int = 0,
-    end_ply: int = 999,
-) -> dict[str, set[chess.Move]]:
-    """
-    Parse all games (and variations) in the PGN, recording for each position
-    (identified by stripped FEN) which moves appear, filtered to the ply range.
-
-    Returns dict: stripped_fen -> set of chess.Move
-    """
-    index: dict[str, set[chess.Move]] = collections.defaultdict(set)
-
-    with open(pgn_path, encoding="utf-8") as f:
-        while True:
-            game = chess.pgn.read_game(f)
-            if game is None:
-                break
-            _index_node(game, index, start_ply, end_ply)
-
-    return dict(index)
-
-
-def _index_node(
-    node: chess.pgn.GameNode,
-    index: dict[str, set[chess.Move]],
-    start_ply: int,
-    end_ply: int,
-) -> None:
-    """Recursively walk all variations in a PGN game node."""
-    board = node.board()
-    ply = board.ply()
-
-    for child in node.variations:
-        move = child.move
-        # if start_ply <= ply < end_ply:
-        key = _strip_clocks(board.fen())
-        index[key].add(move)
-        _index_node(child, index, start_ply, end_ply)
-
-
-# ---------------------------------------------------------------------------
-# Concrete get_children
-# ---------------------------------------------------------------------------
-
-def make_get_children(pgn_index: dict[str, set[chess.Move]]) -> GetChildren:
-    """
-    Returns a get_children function that looks up the PGN index.
-    """
-    def get_children(board: chess.Board) -> list[chess.Move]:
-        key = _strip_clocks(board.fen())
-        return list(pgn_index.get(key, []))
-
-    return get_children
-
-
 # ---------------------------------------------------------------------------
 # Concrete get_db_stats
 # ---------------------------------------------------------------------------
@@ -231,8 +178,8 @@ def make_get_db_stats(
 
     We sum white+draws+black as the game count for each move.
     """
-    def get_db_stats(board: chess.Board) -> dict[chess.Move, int]:
-        fen = board.fen()
+    def get_db_stats(node: Node) -> dict[Move, int]:
+        fen = node.board.fen()
         try:
             response = safe_get_games(opening_explorer, position=fen, **kwargs)
         except Exception as e:
@@ -242,7 +189,7 @@ def make_get_db_stats(
         result = {}
         for entry in response.get("moves", []):
             try:
-                move = chess.Move.from_uci(entry["uci"])
+                move = Move.from_uci(entry["uci"])
                 count = entry.get("white", 0) + entry.get("draws", 0) + entry.get("black", 0)
                 if count > 0:
                     result[move] = count
@@ -279,20 +226,19 @@ def build_inclusion_graph(
     end_ply           Only include PGN moves before this ply.
     **db_kwargs       Passed to safe_get_games (e.g. ratings, speeds).
     """
-    print("Indexing PGN...")
-    pgn_index = build_pgn_index(pgn_path, start_ply=start_ply, end_ply=end_ply)
-    print(f"  {len(pgn_index)} positions indexed.")
 
-    get_children = make_get_children(pgn_index)
+    get_children = lambda node: [v.move for v in node.variations]
     get_db_stats  = make_get_db_stats(opening_explorer, safe_get_games, **db_kwargs)
+
+    with open(pgn_path, encoding="utf-8") as pgnFile:
+        root = chess.pgn.read_game(pgnFile)
 
     graph = InclusionGraph(get_children=get_children, get_db_stats=get_db_stats)
 
-    start_board = chess.Board(start_fen) if start_fen else chess.Board()
-    depth = end_ply - start_ply
+    depth = end_ply - start_ply #############
 
     print(f"Building graph (depth={depth})...")
-    graph.build(start_board, depth=depth)
+    graph.build(root, depth=depth)
     print(f"  {graph.graph.number_of_nodes()} nodes, {graph.graph.number_of_edges()} edges.")
 
     return graph
@@ -326,7 +272,7 @@ if __name__ == "__main__":
         end_ply=END_PLY,
     )
 
-    g.visualise(
+    g.visualize(
         output_path="benoni_inclusion_graph.html",
         min_weight=0.1,
         min_observations=2,

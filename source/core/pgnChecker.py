@@ -21,8 +21,6 @@ import berserk
 import berserk.exceptions
 import chess
 from chess.pgn import GameNode as Node
-# import chess.pgn
-# import chess.svg
 from chess import WHITE
 from chess import BLACK
 
@@ -30,7 +28,8 @@ from chess import BLACK
 from .options import Options
 from .timer import clock
 from .caching import CacheDict
-from .database import safe_get_games
+from .database import *
+from .traversal import traverse, TraversalPolicy
 
 # TODO: identify unobvious moves
 # TODO: exclaims for their moves (if it doesn't drop the eval while the most popular one does?)
@@ -379,14 +378,16 @@ class PgnChecker():
     def _traverse(self, node: Node,
                     visit: Optional[Callable[[Node], VisitResultT]] = None,
                     post: Optional[Callable] = None,
-                    reasons_to_stop: Optional[Callable[[Node, Optional[VisitResultT]], bool]] = None):
+                    reasons_to_stop: Optional[Callable[[Node, Optional[VisitResultT]], bool]] = None,
+                    get_children: Optional[Callable[[Node], list[Node]]] = lambda n: n.variations):
         '''Traverse the subtree rooted at node
         in a way consistent with self.options'''
         tp = TraversalPolicy(
             start_ply=self.options.start_ply,
             end_ply=self.options.end_ply,
-            check_alternatives=self.options.check_alternatives)
-        return _traverse(node, visit, post, reasons_to_stop, tp, self.options.side, self.progress)
+            check_alternatives=self.options.check_alternatives,
+            get_children=get_children)
+        return traverse(node, visit, post, reasons_to_stop, tp, self.options.side, self.progress)
 
     def init_client(self):
         token = getattr(self.options, "_token", None)
@@ -894,54 +895,7 @@ def checkpoint_pgn(game, output_path: str):
 
     os.replace(tmp.name, output_path)
 
-TraversalPolicy = namedtuple("TraversalPolicy", ["start_ply", "end_ply", "check_alternatives"], defaults=(0, 1000, False))
 
-# @dataclass
-# class TraversalPolicy:
-#     start_ply : int = 0
-#     end_ply : int = 1000
-#     check_alternatives: bool = False
-
-def _traverse(node: Node,
-                visit: Callable = None,
-                post: Callable = None,
-                reasons_to_stop: Callable = None,
-                tp: TraversalPolicy = TraversalPolicy(),
-                side: chess.Color = WHITE,
-                progress = None):
-    start_ply, end_ply, check_alternatives = tp
-
-    child_results = []
-
-    v_res = None
-    if visit and start_ply <= node.ply() <= end_ply:
-        v_res = visit(node)
-        if progress:
-            progress.step()
-            # node.comment += f"Step {s}"
-
-    if reasons_to_stop:
-        if reasons_to_stop(node, v_res):
-            return child_results
-
-    if node.ply() == end_ply:
-        return child_results
-
-    vars = node.variations
-    if node.turn()==side and not check_alternatives:
-        vars = vars[:1]
-
-    for n in vars:
-        child_results += _traverse(n, visit, post,
-            reasons_to_stop, tp, side, progress)
-        pass
-
-    if post:
-        if start_ply <= node.ply() <= end_ply:
-            if progress:
-                progress.step()
-        return post(node, child_results)
-    return child_results
 
 
 def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1) -> list[EngineEval]:
@@ -1000,38 +954,11 @@ def mark_based_on_freq_us(node: Node, freq: float):
         node.set_arrows([mark])
 
 
-def total_games(game_data: dict):
-    return game_data['white'] + game_data['draws'] + game_data['black']
-
-def total_decisive_games(game_data: dict):
-    return game_data['white'] + game_data['black']
-
-def score_rate(game_data: dict, side: Union[str, chess.Color]):
-    if isinstance(side, chess.Color):
-        side = 'white' if side == WHITE else 'black'
-    return (game_data[side] + 0.5 * game_data['draws']) / total_games(game_data)
-
-def win_rate(game_data: dict, side: Union[str, chess.Color]):
-    if isinstance(side, chess.Color):
-        side = 'white' if side == WHITE else 'black'
-    return game_data[side]/total_decisive_games(game_data)
-
-def move_frequency(move_data: dict, games: dict):
-    return total_games(move_data)/total_games(games)
-
-def move_freq_str(move_data: dict, games: dict):
-    return total_games(move_data), total_games(games)
 
 def only_move_criterion(eval1: float, eval2: float):
     if eval1 - eval2 > max(1, eval1*0.5):
         return True
     return False
-
-def get_or_create_child(log_node, move):
-    for child in log_node.variations:
-        if child.move == move:
-            return child
-    return log_node.add_variation(move)
 
 
 def initialize_engine(exePath, conf=None):
