@@ -47,6 +47,7 @@ from .traversal import traverse, TraversalPolicy
 DEBUG_MODE = False
 
 STAT_SIGNIFICANCE_THRESHOLD = 20
+FREQ_MARK_THRESHOLD = 10
 
 # output_pgns = ['Output.pgn']
 
@@ -407,7 +408,9 @@ class PgnChecker():
             if fen(n).startswith(fen_essential_part(self.options.starting_pos)): # ==
                 self.starting_node = n
                 return n
-        self._traverse(node, visit=visit, reasons_to_stop=lambda _, res: res is not None)
+        tp = TraversalPolicy(check_alternatives=True) # we do it "manually" so that the start pos can be found in
+        # a nonmain line even if we check alternatives is set false by user
+        traverse(node, visit=visit, tp=tp, reasons_to_stop=lambda _, res: res is not None)
         if not hasattr(self, "starting_node"):
             raise ValueError(f"Starting position {self.options.starting_pos} not found in the PGN")
 
@@ -532,6 +535,8 @@ class PgnChecker():
     def mark_move_local(self, log_node: Node):
         mark_fn = mark_based_on_freq_us if log_node.turn() == self.options.side else mark_based_on_freq_them
         for n in log_node.variations:
+            if self.total_games(n) < FREQ_MARK_THRESHOLD:
+                continue
             freq = self.move_freq(log_node, n.move)
             mark_fn(n, freq)
 
@@ -558,10 +563,15 @@ class PgnChecker():
                 return move
         return None
     
-    def seek_transposition(self, node: Node) -> Optional[chess.Move]:
+    def seek_transposition(self, node: Node) -> Optional[tuple[chess.Move, str]]:
+        '''
+        Try to find a move that likely transposes back into the files.
+        Currently very naive.
+        
+        Returns move and comment.
+        '''
         stats = self.query(fen(node), "db_lichess")
         db_moves = stats.get("moves", [])
-        board2 = node.board()
         for m in db_moves[:3]:
             move = chess.Move.from_uci(m['uci'])
             board = node.board()
@@ -573,8 +583,11 @@ class PgnChecker():
                     board.push(chess.Move.from_uci(most_popular_uci))
                     tr_move = self.find_transposition_move(board)
                     if tr_move:
-                        update_comment(node, f"Likely to transpose after {m['uci']} and {most_popular_uci}".upper()) # TODO: pass it further
-                        return move
+                        move2 = board.san(tr_move)
+                        board.pop()
+                        move1 = uci_to_san(most_popular_uci, board)
+                        c = f"Likely Tr after {move1} and {move2}".upper()
+                        return (move, c)
 
     def better_engine_move(self, node: Node) -> MoveChoice:
         top2 = self.query(fen(node), "eval").top(2) # we'll also need top(2) later for nags
@@ -610,20 +623,21 @@ class PgnChecker():
                 return [MoveChoice(tr_move, "tr", tr_eval)]
             else:
                 return [self.better_engine_move(node),
-                        MoveChoice(tr_move, "tr", tr_eval, f"To transp, {eval:.2f} > {tr_eval:.2f}.")]
-        to_tr_move = self.seek_transposition(node)
+                        MoveChoice(tr_move, "tr", tr_eval, f"To Tr, {eval:.2f} > {tr_eval:.2f}..")]
+        to_tr = self.seek_transposition(node)
 
-        if to_tr_move: # TODO: abstract these two blocks
+        if to_tr: # TODO: abstract these two blocks
+            to_tr_move, comment = to_tr
             board = node.board()
             board.push(to_tr_move)
             to_tr_eval = self.query(fen(board), "eval").best_eval()
             board.pop()
             if to_tr_eval >= eval - 0.10:
                 eval = to_tr_eval
-                return [MoveChoice(to_tr_move, "to_tr", to_tr_eval)]
+                return [MoveChoice(to_tr_move, "to_tr", to_tr_eval, comment)]
             else:
                 return [self.better_engine_move(node),
-                        MoveChoice(to_tr_move, "to_tr", to_tr_eval, f"To transp, {eval:.2f} > {to_tr_eval:.2f}")]
+                        MoveChoice(to_tr_move, "to_tr", to_tr_eval, f"To Tr, {eval:.2f} > {to_tr_eval:.2f}")]
         return [self.better_engine_move(node)]
     
     def generate_moves_them_db(self, stats: dict) -> list[MoveChoice]:
@@ -1054,12 +1068,12 @@ def first_difference(n1: Node, n2: Node) -> Optional[FirstDifference]:
 
     cur = n1
     while cur is not None and getattr(cur, "move", None) is not None:
-        stack1.append(move_san(cur))
+        stack1.append(node_san(cur))
         cur = cur.parent
 
     cur = n2
     while cur is not None and getattr(cur, "move", None) is not None:
-        stack2.append(move_san(cur))
+        stack2.append(node_san(cur))
         cur = cur.parent
 
     stack1.reverse()
@@ -1076,9 +1090,12 @@ def first_difference(n1: Node, n2: Node) -> Optional[FirstDifference]:
 
     return None
 
-def move_san(n: Node) -> str:
+def node_san(n: Node) -> str:
     b = n.parent.board()
     return b.san(n.move)
+
+def uci_to_san(uci: str, board: chess.Board) -> str:
+    return board.san(chess.Move.from_uci(uci))
 
 def gap_criterion(move: str, move_freq: float, freq_threshold: float, min_games: int = 0, pov: chess.Color = WHITE) -> int:
     if score_rate(move, pov) > 0.75: # we assume files don't need to consider moves that lose in practice
@@ -1103,8 +1120,8 @@ def remove_duplicates(lst: list, equality_rel: Optional[Callable] = lambda x:x) 
 
 def whole_move_from_ply(ply: int) -> str:
     if ply % 2 == 0:
-        return str(ply // 2) + "."
-    return str(ply // 2) + "..."
+        return str(ply // 2) + "..."
+    return str(ply // 2) + "."
 
 
 def close_engine(engine):
