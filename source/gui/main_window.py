@@ -56,7 +56,6 @@ class FilePickerWidget(QWidget):
         # FORCE A SIZE FOR DEBUGGING
         self.setMinimumHeight(40)
         self.setMinimumWidth(200)
-        self.setStyleSheet("background-color: yellow; border: 1px solid black;")
         
         self.line_edit = QLineEdit()
         self.line_edit.setPlaceholderText(f"Select {label}...")
@@ -116,7 +115,6 @@ class MainWindow(QWidget):
         self.progress_bar.setMinimum(0)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(False)
-        options_layout.addWidget(self.progress_bar)
         self.progress_bar.setFormat("%v / %m") # to show absolute values
 
         # board
@@ -147,7 +145,6 @@ class MainWindow(QWidget):
             }
             """)
         
-        # 2. FEATURE SELECTOR
         self.feature_selector = QComboBox()
         self.feature_selector.addItems([FEATURE_NAMES[f] for f in feature_list])
         index = feature_list.index(self.options_class)
@@ -172,8 +169,11 @@ class MainWindow(QWidget):
 
         options_layout.addWidget(self.stack)
 
+        # lower part
         options_layout.addWidget(reset)
         options_layout.addWidget(run)
+        options_layout.addWidget(self.progress_bar)
+
 
         # options_layout.addLayout(form_layout)
         right_layout = QVBoxLayout()
@@ -224,7 +224,6 @@ class MainWindow(QWidget):
     def switch_feature(self, index):
         self.options_class = feature_list[index]
 
-        print(index)
         if index not in self.pages:
             self.options, _ = load_settings(self.options_class)
             w = self.create_group_for_options(self.options_class)
@@ -238,7 +237,6 @@ class MainWindow(QWidget):
 
         self.stack.setCurrentIndex(index)
 
-        print(OPT_TO_FEATURE[self.options_class])
 
     def get_current_options(self):
         """Helper to extract the data back into a Options object"""
@@ -267,7 +265,6 @@ class MainWindow(QWidget):
         self.progress_bar.setValue(0)
         self.show_runtime_widgets()
 
-        # side = chess.WHITE if self.white_radio.isChecked() else chess.BLACK # TODO: get rid of chess import?
         self.options.validate()
 
         self.setEnabled(False)
@@ -314,7 +311,11 @@ class MainWindow(QWidget):
         self.board.setVisible(True)
         self.feedback.setVisible(True)
         if report.position:
-            self.board.show_report(report, orientation=chess.WHITE if self.options.play_white else chess.BLACK)
+            if hasattr(self.options, "play_white"):
+                orientation=chess.WHITE if self.options.play_white else chess.BLACK
+            else:
+                orientation=chess.WHITE
+            self.board.show_report(report, orientation=orientation)
         # sys.stderr.write(str(report.message))
         self.feedback.setPlainText(report.message)
 
@@ -410,13 +411,11 @@ def create_widget_for_field(field_info, current_value, label=None):
         return widget
     
     if hint == "file_path":
-
-        # Pull specific file info from metadata
         f_filter = metadata.get("file_filter", "PGN files (*.pgn)")
         f_dir = metadata.get("initial_dir", "input_pgn")
         
-        # This is now a single widget, which can be added to a QGridLayout!
         widget = FilePickerWidget(label or field_info.name, f_filter, f_dir)
+        widget.setText(current_value)
         return widget
 
     if v_type is bool:

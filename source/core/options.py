@@ -1,11 +1,11 @@
 from dataclasses import dataclass, field, asdict, fields
-import chess
 import json
 import os
 
 
 CONFIG_FILE = "settings.json"
 
+DEBUG_MODE = False
 
 @dataclass
 class CoreOptions:
@@ -50,6 +50,79 @@ class CoreOptions:
         if self.min_depth > self.max_depth:
             raise ValueError("min_depth must be ≤ max_depth")
         
+
+
+@dataclass
+class CheckerOptions(CoreOptions):
+    input_pgn: str = field(
+        default='',  # so it doesn't complain if we try to initialize an "empty" one
+        metadata={
+            "ui_hint": "file_path",
+            "label": "Input PGN",
+            "file_filter": "PGN files (*.pgn)",
+            "initial_dir": "input pgns"
+        }
+    )
+
+    play_white: bool = field(
+        default=True,
+        metadata={
+            "label": "Play As White",
+            # "ui_hint": "dropdown",
+            # "options": {"White": chess.WHITE, "Black": chess.BLACK}
+        }
+    )
+
+    # --- MOVE CHOICE ---
+    min_games: int = field(  # book cutoff
+        default=10,
+        metadata={"label": "Minimum Number of Games", "min": 1, "max": 500}
+    )
+    freq_threshold: float = field(
+        default=0.15,
+        metadata={"label": "Frequency Threshold", "ui_hint": "percentage", "min": 0.0, "max": 1.0, "step": 0.025}
+    )
+
+    added_depth: int = field(
+        default=5,
+        metadata={"label": "Length of Suggested Lines", "min": 1, "max": 20}
+    )
+
+    # Game phase constraints - Range or SpinBox
+    start_ply: int = field(
+        default=10,
+        metadata={"label": "Start Analysis at Ply", "min": 2, "max": 60}
+    )
+    end_ply: int = field(
+        default=40,
+        metadata={"label": "End Analysis at Ply", "min": 2, "max": 80}
+    )
+
+    # Booleans - simple Checkboxes
+    add_nag: bool = field(
+        default=True,
+        metadata={"label": "Add NAG Annotations (+-, !?, etc.)"}
+    )
+    trim_obvious_moves: bool = field(
+        default=True,
+        metadata={"label": "Trim Obvious Moves"}
+    )
+
+    use_engine_for_them: bool = field(
+        default=False,
+        metadata={"label": "Engine for Opponent's Move"}
+    )
+
+    output_pgn: str = field(
+        default="Output.pgn",
+        metadata={"label": "Output PGN Filename", "ui_hint": "save_file"}
+    )
+
+    def validate(self):
+        super().validate()
+        if not self.input_pgn:
+            raise ValueError("No opening PGN selected")
+
 @dataclass
 class GraphOptions(CoreOptions):
     # def __post_init__(self):
@@ -75,78 +148,10 @@ class GraphOptions(CoreOptions):
         metadata={"label": "Starting Position (FEN)"}
     )
 
-
-@dataclass
-class CheckerOptions(CoreOptions):
-    input_pgn: str = field(
-        default='',  # so it doesn't complain if we try to initialize an "empty" one
-        metadata={
-            "ui_hint": "file_path",
-            "label": "Input PGN",
-            "file_filter": "PGN files (*.pgn)",
-            "initial_dir": "input pgns"
-        }
+    min_observations: int = field(
+        default=3,
+        metadata={"label": "Min edge weight to be shown", "min": 1, "max": 100}
     )
-
-    play_white: bool = field(
-        default=True,
-        metadata={
-            "label": "Play As White",
-            # "ui_hint": "dropdown",
-            # "options": {"White": chess.WHITE, "Black": chess.BLACK}
-        }
-    )
-
-        # --- MOVE CHOICE ---
-    min_games: int = field(  # book cutoff
-        default=10,
-        metadata={"label": "Minimum Number of Games", "min": 1, "max": 500}
-    )
-    freq_threshold: float = field(
-        default=0.15,
-        metadata={"label": "Frequency Threshold", "ui_hint": "percentage", "min": 0.0, "max": 1.0, "step": 0.025}
-    )
-
-    added_depth: int = field(
-        default=5,
-        metadata={"label": "Length of Suggested Lines", "min": 1, "max": 20}
-    )
-
-        # Game phase constraints - Range or SpinBox
-    start_ply: int = field(
-        default=10,
-        metadata={"label": "Start Analysis at Ply", "min": 2, "max": 60}
-    )
-    end_ply: int = field(
-        default=40,
-        metadata={"label": "End Analysis at Ply", "min": 2, "max": 80}
-    )
-
-    # Booleans - simple Checkboxes
-    add_nag: bool = field(
-        default=True,
-        metadata={"label": "Add NAG Annotations (+-, !?, etc.)"}
-    )
-    trim_obvious_moves: bool = field(
-        default=True,
-        metadata={"label": "Trim Obvious Moves"}
-    )
-
-    use_engine_for_them: bool = field(
-        default=False,
-        metadata={"label": "Engine for Opponent's Move"}
-    )
-
-        # Output file - another file path, but for saving
-    output_pgn: str = field(
-        default="Output.pgn",
-        metadata={"label": "Output PGN Filename", "ui_hint": "save_file"}
-    )
-
-    def validate(self):
-        super().validate()
-        if not self.input_pgn:
-            raise ValueError("No opening PGN selected")
 
 feature_list = [CheckerOptions, GraphOptions]
 
@@ -169,7 +174,6 @@ def save_settings(options_obj, options_class):
 
     print(feature_to_save)
 
-    # 2. Update the shared Core and the specific Feature entry
     full_config["Core"] = core_to_save
     full_config[options_class.__name__] = feature_to_save
 
@@ -195,20 +199,12 @@ def load_settings(options_class = None):
         class_index = data.get("feature_used", DEFAULT_CLASS_INDEX)
         options_class = feature_list[class_index]
 
-    # 2. Extract the two relevant parts
     core_data = data.get("Core", {})
     feature_data = data.get(options_class.__name__, {})
 
-    # 3. Merge them (Feature data overwrites Core if there's a collision)
-    # This is safe because FeatureOptions inherits from CoreOptions
     combined_data = {**core_data, **feature_data}
 
-    # 4. Filter the data to only include fields that exist in the class
-    # This prevents crashes if you rename a field in your code later
     valid_fields = {f.name for f in fields(options_class)}
     final_params = {k: v for k, v in combined_data.items() if k in valid_fields}
 
-    # 5. Build and return the object
     return options_class(**final_params), options_class
-    
-    return cls() # Fallback to hardcoded defaults

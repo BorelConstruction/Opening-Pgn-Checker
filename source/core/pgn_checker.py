@@ -1,33 +1,24 @@
-from collections import namedtuple
-import copy
 import datetime
-import json
 import os
 import sys
 import tempfile
-import time
 import traceback
-import weakref
 from dataclasses import dataclass, field
 from functools import partial  # for currying
 from typing import Callable, NamedTuple, Optional, Union, TypeVar
 from collections.abc import Callable
 # from __future__ import annotations # to resolve Runner<->EvalProvider... I'll just annotate with a str.
-from abc import ABC, abstractmethod
 
 VisitResultT = TypeVar("VisitResultT")
 
-import berserk
-import berserk.exceptions
 import chess
 from chess.pgn import GameNode as Node
 from chess import WHITE
 from chess import BLACK
 
 
-from .options import CoreOptions, CheckerOptions
+from .options import CoreOptions, CheckerOptions, DEBUG_MODE
 from .timer import clock
-from .caching import CacheDict
 from .database import *
 from .traversal import traverse, TraversalPolicy
 from .runner import *
@@ -42,10 +33,6 @@ from .runner import *
 
 # TODO: remember settings for every input file
 
-# sys.stdout.reconfigure(encoding='utf-8')
-
-
-DEBUG_MODE = False
 
 STAT_SIGNIFICANCE_THRESHOLD = 15 # TODO: smarter choice
 FREQ_MARK_THRESHOLD = 10
@@ -114,7 +101,14 @@ class PgnChecker(Runner):
         if not hasattr(self, "starting_node"):
             raise ValueError(f"Starting position {self.options.starting_pos} not found in the PGN")
 
-        
+    
+    def _default_cache_path(self) -> str:
+        base = "cache"
+        name = "cache"
+        if self.options.input_pgn:
+            name = os.path.splitext(os.path.basename(self.options.input_pgn))[0]
+        return os.path.join(base, f"{name}.json")
+    
     @clock
     def run(self):
         try:
@@ -231,10 +225,6 @@ class PgnChecker(Runner):
         gaps_info = self.find_gaps_local(node)
         if gaps_info:
             self.act_on_gap_data_local(node, gaps_info)
-
-    def traverse_and_fill_gaps(self, node: Node,
-            report_state=None) -> bool:
-        self._traverse(node, partial(Runner.gaps_local, self))
 
     def mark_move_local(self, log_node: Node):
         mark_fn = mark_based_on_freq_us if log_node.turn() == self.options.side else mark_based_on_freq_them

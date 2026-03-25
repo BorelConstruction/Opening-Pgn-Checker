@@ -17,16 +17,18 @@ Abstract dependencies (injected at construction):
 """
 
 import sys
+import os
 
 import chess
 import collections
 from typing import Callable, Union
+from hashlib import sha1
 
 import networkx as nx
 from pyvis.network import Network
 
 from .traversal import traverse, TraversalPolicy
-from .pgn_checker import Runner, fen
+from .runner import Runner, fen
 
 
 # Type aliases
@@ -189,12 +191,18 @@ class InclusionGraphRunner(Runner):
         g.build(root, end=depth, progress=self.progress)
         return g
     
+    def _default_cache_path(self) -> str:
+        base = os.path.join("cache", "graph")
+        name = sha1(self.options.starting_pos.encode()).hexdigest()[:10]
+        print(name)
+        return os.path.join(base, f"{name}.json")
+    
     def run(self):
         try:
             g = self.make_inclusion_graph(self.options.freq_threshold, self.options.min_games, self.options.depth)
             g.visualize(        output_path="inclusion_graph.html",
                 min_weight=0.1,
-                min_observations=10,)
+                min_observations=self.options.min_observations,)
         finally:
             try:
                 self.save_cache()

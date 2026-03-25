@@ -1,15 +1,7 @@
-from collections import namedtuple
 import copy
-import datetime
-import json
-import os
 import sys
-import tempfile
-import time
-import traceback
 import weakref
-from dataclasses import dataclass, field
-from functools import partial  # for currying
+from dataclasses import dataclass
 from typing import Callable, NamedTuple, Optional, Union, TypeVar
 from collections.abc import Callable
 # from __future__ import annotations # to resolve Runner<->EvalProvider... I'll just annotate with a str.
@@ -18,38 +10,20 @@ from abc import ABC, abstractmethod
 VisitResultT = TypeVar("VisitResultT")
 
 import berserk
-import berserk.exceptions
 import chess
 from chess.pgn import GameNode as Node
 from chess import WHITE
 from chess import BLACK
 
 
-from .options import CoreOptions, CheckerOptions
+from .options import CoreOptions, DEBUG_MODE
 from .timer import clock
 from .caching import CacheDict
 from .database import *
 from .traversal import traverse, TraversalPolicy
-
-# TODO: identify unobvious moves
-# TODO: exclaims for their moves (if it doesn't drop the eval while the most popular one does?)
-# TODO: min games depends on ply
-
-# TODO: cap freq from above
-
-# TODO: similar positions
-
-# TODO: remember settings for every input file
+from .boardtools import *
 
 # sys.stdout.reconfigure(encoding='utf-8')
-
-
-DEBUG_MODE = False
-
-STAT_SIGNIFICANCE_THRESHOLD = 15 # TODO: smarter choice
-FREQ_MARK_THRESHOLD = 10
-
-# output_pgns = ['Output.pgn']
 
 sf_path = "C:\\Users\\Vadim\\Downloads\\stockfish-windows-x86-64-avx2.exe"
 
@@ -291,12 +265,13 @@ class Runner(ABC):
             sys.stderr.write(f"Using cache for {fen}\n")
         return self.cache[fen].get(type, self._queries[type])
 
+    @abstractmethod
     def _default_cache_path(self) -> str:
-        base = "cache"
-        name = "cache"
-        # if self.options.input_pgn:
-        #     name = os.path.splitext(os.path.basename(self.options.input_pgn))[0]
-        return os.path.join(base, f"{name}.json")
+        pass
+
+    @abstractmethod
+    def run(self):
+        pass
     
     def load_cache(self, path: Optional[str] = None) -> bool:
         self.report_message("Loading cache...")
@@ -328,6 +303,41 @@ class Runner(ABC):
     def __exit__(self, exc_type, exc, tb):
         self.close()
 
+    @property # we want to start the engine if it is needed, but we also don't want to restart it every time
+    def engine(self):
+        if self._engine is None:
+            self._engine = init_engine(self.engine_path)
+        return self._engine
+    
+    def engine_eval(self, fen: str, multipv: int = 1):
+        return evaluate_position(self.engine, fen, pov=self.options.side, options=self.options,
+                                     adaptive=self.options.adaptive_an, multipv=multipv) # TODO
+        
+
+    def init_client(self):
+        token = getattr(self.options, "_token", None)
+        if token:
+            lichessClient = berserk.Client(session=berserk.TokenSession(token))
+        else:
+            lichessClient = berserk.Client()
+        self.opening_explorer = lichessClient.opening_explorer
+
+    def _traverse(self, node: Node,
+                    visit: Optional[Callable[[Node], VisitResultT]] = None,
+                    post: Optional[Callable] = None,
+                    reasons_to_stop: Optional[Callable[[Node, Optional[VisitResultT]], bool]] = None,
+                    get_children: Optional[Callable[[Node], list[Node]]] = lambda n: n.variations):
+        '''Traverse the subtree rooted at node
+        in a way consistent with self.options'''
+        tp = TraversalPolicy(
+            start_ply=self.options.start_ply,
+            end_ply=self.options.end_ply,
+            check_alternatives=self.options.check_alternatives,
+            get_children=get_children)
+        return traverse(node, visit, post, reasons_to_stop, tp, self.options.side, self.progress)
+    
+    
+    # ============ Universal helper functions ============
     def move_freq(self, board: Union[Node, chess.Board], move: Optional[Union[chess.Move, str]] = None) -> float:
         if isinstance(move, chess.Move):
             move = move.uci()
@@ -386,79 +396,16 @@ class Runner(ABC):
             return -0.5
         return score_rate(md, self.options.side)
 
-    @property # we want to start the engine if it is needed, but we also don't want to restart it every time
-    def engine(self):
-        if self._engine is None:
-            self._engine = init_engine(self.engine_path)
-        return self._engine
-    
-    def engine_eval(self, fen: str, multipv: int = 1):
-        return evaluate_position(self.engine, fen, pov=self.options.side, options=self.options,
-                                     adaptive=self.options.adaptive_an, multipv=multipv) # TODO
-        
-    @abstractmethod
-    def run(self):
-        pass
-
-
     def count_nodes(self, root_node):
         count = 0
-
         def visit(ply):
             nonlocal count
             count += 1
-
         self._traverse(root_node, 0, visit)
         return count
 
 
-    def _traverse(self, node: Node,
-                    visit: Optional[Callable[[Node], VisitResultT]] = None,
-                    post: Optional[Callable] = None,
-                    reasons_to_stop: Optional[Callable[[Node, Optional[VisitResultT]], bool]] = None,
-                    get_children: Optional[Callable[[Node], list[Node]]] = lambda n: n.variations):
-        '''Traverse the subtree rooted at node
-        in a way consistent with self.options'''
-        tp = TraversalPolicy(
-            start_ply=self.options.start_ply,
-            end_ply=self.options.end_ply,
-            check_alternatives=self.options.check_alternatives,
-            get_children=get_children)
-        return traverse(node, visit, post, reasons_to_stop, tp, self.options.side, self.progress)
-
-    def init_client(self):
-        token = getattr(self.options, "_token", None)
-        if token:
-            lichessClient = berserk.Client(session=berserk.TokenSession(token))
-        else:
-            lichessClient = berserk.Client()
-        self.opening_explorer = lichessClient.opening_explorer
-
-
-def update_comment(node: Node, message: str, debug=False):
-    if not debug or (debug and DEBUG_MODE):
-        node.comment = (node.comment + " " + message).lstrip()
-
-def fen(board: Union[Node, chess.Board, str]) -> str:
-    # ALL FENS SHOULD COME FROM THIS FUNCTION
-    # or subtle bugs will arise
-    # good enough as long as it's a solo project
-    if isinstance(board, Node):
-        board = board.board()
-    if isinstance(board, chess.Board):
-        board = board.fen()
-    return fen_essential_part(board)
-
-def fen_essential_part(fen: str) -> str:
-    return ' '.join(fen.strip().split()[:4])
-
-def side(fen: str) -> chess.Color:
-    try:
-        side = fen.split(' ')[1]
-        return WHITE if side == 'w' else BLACK
-    except IndexError:
-        return "Invalid FEN format"
-    
+  
 def init_engine(exe_path: str, conf=None):
     sys.stderr.write(f"Initializing {exe_path}\n")
     engine = chess.engine.SimpleEngine.popen_uci(exe_path)
@@ -532,12 +479,6 @@ def analyse_time_limit(engine, board: chess.Board, time_limit=0.1, multipv: int 
     return engine.analyse(board, chess.engine.Limit(time=time_limit), multipv=multipv)
 
 
-def whole_move_from_ply(ply: int) -> str:
-    if ply % 2 == 0:
-        return str(ply // 2) + "..."
-    return str(ply // 2) + "."
-
-
 def close_engine(engine):
     print("\nClosing the engine...")
     if engine is not None: # hasattr?
@@ -550,9 +491,6 @@ def close_engine(engine):
 
 def stats_for_uci(games: dict, uci: str):
     return next((m for m in games['moves'] if m['uci'] == uci_from_pgn_to_lichess(uci)), None) # {}
-
-def arrow_from_uci(uci: str, *args, **kwargs) -> chess.svg.Arrow:
-    return chess.svg.Arrow(ord(uci[0])-97 + 8*(int(uci[1])-1), ord(uci[2])-97 + 8*(int(uci[3])-1), *args, **kwargs)
 
 
 def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1) -> list[EngineEval]:
@@ -568,25 +506,3 @@ def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1) 
     
     infos = analyse_time_limit(engine, board, time_limit=0.1, multipv=multipv)
     return process_engine_output(infos, board, pov)[0] # for now only return one EngineEval
-
-def uci_from_lichess_to_pgn(uci: str) -> str:
-    if uci == 'e1h1':
-        return 'e1g1'
-    if uci == 'e8h8':
-        return 'e8g8'
-    if uci == 'e1a1':
-        return 'e1c1'
-    if uci == 'e8a8':
-        return 'e8c8'
-    return uci
-
-def uci_from_pgn_to_lichess(uci: str) -> str:
-    if uci == 'e1g1':
-        return 'e1h1'
-    if uci == 'e8g8':
-        return 'e8h8'
-    if uci == 'e1c1':
-        return 'e1a1'
-    if uci == 'e8c8':
-        return 'e8a8'
-    return uci
