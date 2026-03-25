@@ -35,7 +35,7 @@ def traverse(node: Node,
     if node.ply() == end_ply:
         return child_results
 
-    vars = node.variations
+    vars = get_children(node)
     if node.turn()==side and not check_alternatives:
         vars = vars[:1]
 

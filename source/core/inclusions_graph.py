@@ -12,43 +12,55 @@ Abstract dependencies (injected at construction):
       frequency, or exactly the moves in an opening file.
 
   get_db_stats(board) -> dict[chess.Move, int]
-      Raw game counts for each move played from this position in the DB.
+       Raw game counts for each move played from this position in the DB.
+       (Keys are UCI strings.)
 """
+
+import sys
 
 import chess
 import collections
-from typing import Callable
+from typing import Callable, Union
 
 import networkx as nx
 from pyvis.network import Network
 
 from .traversal import traverse, TraversalPolicy
+from .pgn_checker import Runner, fen
 
 
 # Type aliases
 Board       = chess.Board
 Move        = chess.Move
 Node        = chess.pgn.GameNode
-DbStats     = dict[Move, int]
+DbStats     = dict[Union[str, Move], int]
 GetChildren = Callable[[Node, Board], list[Node]]
 GetDbStats  = Callable[[Node], DbStats]
 
 
-def get_or_create_child(node, move):
+def get_or_create_child(node, move: Union[str, Move]):
+    if isinstance(move, str):
+        move = chess.Move.from_uci(move)
     for child in node.variations:
         if child.move == move:
             return child
     return node.add_variation(move)
 
-class InclusionGraph:
 
+
+class InclusionGraph():
+    '''
+    Raw logic of the inclusion graph building process. 
+    '''
     def __init__(
         self,
-        get_children: GetChildren,
-        get_db_stats:  GetDbStats,
+        get_children: GetChildren = None,
+        get_db_stats:  GetDbStats = None,
+        report: Callable = None
     ):
         self.get_children = get_children
         self.get_db_stats  = get_db_stats
+        self.report = report
 
         # For each edge (ma, mb): list of conditional frequencies observed
         # at each position where ma was a traversed child.
@@ -61,17 +73,20 @@ class InclusionGraph:
     # Building
     # ------------------------------------------------------------------
 
-    def build(self, root: Node, start: int, end : int) -> None:
+    def build(self, root: Node, start: int = 0, end : int = None, progress=None) -> None:
         """
         Traverse the opening tree from root up to depth half-moves,
         accumulating edge observations.
         """
         self._edge_observations.clear()
         self.graph.clear()
-        self._traverse(root, start, end)
+        self._traverse(root, start, end, progress=progress)
+        sys.stderr.write("\n Finalizing edges...\n")
         self._finalize_edges()
+        sys.stderr.write("\n Done...\n")
+        
 
-    def _traverse(self, node: Node, start_ply, end_ply) -> None:
+    def _traverse(self, node: Node, start_ply, end_ply, progress=None) -> None:
         def visit(node: Node) -> None:
             for ma in self.get_children(node):
                 # --- record edges ma -> mb for every response mb in DB ---
@@ -79,11 +94,14 @@ class InclusionGraph:
                 response_total = sum(response_stats.values()) if response_stats else 0
 
                 if response_total > 0:
-                    for mb, mb_count in response_stats.items():
+                    for mb_uci, mb_count in response_stats.items():
                         conditional_freq = mb_count / response_total
                         self._edge_observations[
-                            (ma.move.uci(), mb.uci())
+                            (ma.move.uci(), mb_uci)
                         ].append(conditional_freq)
+                
+                if progress and progress.done % 10 == 0:
+                    self.report(node, f"{response_total} games.")
 
         tp = TraversalPolicy(
             start_ply=start_ply,
@@ -92,7 +110,7 @@ class InclusionGraph:
             get_children=self.get_children
         )
 
-        traverse(node, visit, tp=tp)
+        traverse(node, visit, tp=tp, progress=progress)
 
     def _finalize_edges(self) -> None:
         """Average observations and populate the networkx graph."""
@@ -138,6 +156,51 @@ class InclusionGraph:
         net.show(output_path, notebook=False)
         print(f"Graph written to {output_path}")
 
+class InclusionGraphRunner(Runner):
+    '''
+    Manages InclusionGraph building and visualisation.
+    '''
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def make_inclusion_graph(self, freq_thresh: float, min_game_num: int, depth: int) -> InclusionGraph:
+
+        def get_db_stats(node: chess.pgn.GameNode) -> dict[str, int]:
+            raw = self.query(fen(node), "db_lichess")
+            ucis = [m.get("uci") for m in raw.get("moves", [])]
+            return {uci: self.total_games_move(node, uci) for uci in ucis}
+
+        def get_children(node: chess.pgn.GameNode) -> list[chess.pgn.GameNode]:
+            raw = self.query(fen(node), "db_lichess")
+            children = []
+            for move_entry in raw.get("moves", []):
+                uci = move_entry["uci"]
+                freq = self.move_freq(node, uci)
+                count = self.total_games_move(node, uci)
+                if freq >= freq_thresh and count >= min_game_num:
+                    child = get_or_create_child(node, uci)
+                    children.append(child)
+            return children
+
+        root = chess.pgn.Game()
+        root.setup(self.options.starting_pos)
+
+        g = InclusionGraph(get_children=get_children, get_db_stats=get_db_stats, report=self.report_position)
+        g.build(root, end=depth, progress=self.progress)
+        return g
+    
+    def run(self):
+        try:
+            g = self.make_inclusion_graph(self.options.freq_threshold, self.options.min_games, self.options.depth)
+            g.visualize(        output_path="inclusion_graph.html",
+                min_weight=0.1,
+                min_observations=10,)
+        finally:
+            try:
+                self.save_cache()
+            except Exception as exc:
+                print(f"Failed to save cache: {exc}\n")
+            self._finalizer()
     
     """
 inclusion_graph_lichess.py
@@ -158,8 +221,6 @@ import berserk
 
 from .database import safe_get_games
 
-def _strip_clocks(fen: str) -> str:
-    return " ".join(fen.split()[:4])
 
 # ---------------------------------------------------------------------------
 # Concrete get_db_stats
@@ -176,14 +237,14 @@ def make_get_db_stats(
     The berserk response looks like:
       {"moves": [{"uci": "e2e4", "white": 100, "draws": 50, "black": 30}, ...]}
     """
-    def get_db_stats(node: Node) -> dict[Move, int]:
+    def get_db_stats(node: Node) -> dict[str, int]:
         fen = node.board().fen()
         response = safe_get_games(opening_explorer, position=fen, **kwargs)
 
         result = {}
         for entry in response.get("moves", []):
             try:
-                move = Move.from_uci(entry["uci"])
+                move = entry["uci"]
                 count = entry.get("white", 0) + entry.get("draws", 0) + entry.get("black", 0)
                 if count > 0:
                     result[move] = count

@@ -21,25 +21,77 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
-    QGroupBox
+    QGroupBox,
+    QStackedWidget
 )
 
-from ..core import pgnChecker as checker
-from ..core.options import Options, load_settings, save_settings
-from ..core.pgnChecker import CheckerReport
+from ..core.pgn_checker import PgnChecker as checker
+from ..core.pgn_checker import RunnerReport
+from ..core.inclusions_graph import InclusionGraphRunner as grapher
+from ..core.options import *
 from os import getenv
 
 # from core.engine import run_engine
 
 MAX_ROWS = 7
 
+FEATURE_NAMES = {
+    CheckerOptions: "Pgn Checker",
+    GraphOptions: "Inclusion Graph",
+}
+
+# Introduce feature specs if this grows
+OPT_TO_FEATURE = {
+    CheckerOptions: checker,
+    GraphOptions: grapher
+}
+
+
+class FilePickerWidget(QWidget):
+    def __init__(self, label, file_filter="All Files (*.*)", initial_dir="."):
+        super().__init__()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0) # Keep it tight for the grid
+
+        # FORCE A SIZE FOR DEBUGGING
+        self.setMinimumHeight(40)
+        self.setMinimumWidth(200)
+        self.setStyleSheet("background-color: yellow; border: 1px solid black;")
+        
+        self.line_edit = QLineEdit()
+        self.line_edit.setPlaceholderText(f"Select {label}...")
+        
+        self.browse_btn = QPushButton("Browse...")
+        self.browse_btn.clicked.connect(self._do_browse)
+        
+        self.file_filter = file_filter
+        self.initial_dir = initial_dir
+        self.label = label
+
+        layout.addWidget(self.line_edit)
+        layout.addWidget(self.browse_btn)
+
+    def _do_browse(self):
+        # Resolve path relative to project root if needed
+        start_path = str(Path(__file__).resolve().parents[2] / self.initial_dir)
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Select {self.label}", start_path, self.file_filter
+        )
+        if path:
+            self.line_edit.setText(path)
+
+    # Standardize the getter name to match QLineEdit
+    def text(self):
+        return self.line_edit.text()
+        
+    def setText(self, value):
+        self.line_edit.setText(value)
 
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.options = load_settings()
+        self.options, self.options_class = load_settings()
         self.setWindowTitle("Opening Tool")
-        self.options_class = Options
         self.widgets = {}  # Store widgets to retrieve values later
         self.init_ui()
         # QCoreApplication.instance().aboutToQuit.connect(self.controller.shutdown)
@@ -49,38 +101,15 @@ class MainWindow(QWidget):
     def init_ui(self):
         main_layout = QHBoxLayout()
         options_layout = QVBoxLayout()
-        self.grid_layout = QGridLayout()
-        options_layout.addLayout(self.grid_layout)
         # form_layout = QFormLayout()
-
-        # input pgn
-        row = QHBoxLayout()
-        row.addStretch(1)
-
-        label = QLabel("Input PGN:")
-        self.input_pgn_path = QLineEdit()
-        self.input_pgn_path.setPlaceholderText("Select a PGN file…")
-        if self.options.input_pgn:
-            self.input_pgn_path.setText(self.options.input_pgn)
-        browse = QPushButton("Browse…")
-        browse.clicked.connect(self.browse_opening)
-
-
-        row.addWidget(label)
-        row.addWidget(browse)
-        row.addWidget(self.input_pgn_path)
-        # options_layout.addLayout(self.opening_path)
-        options_layout.addLayout(row)
 
         # run
         run = QPushButton("Run")
         run.clicked.connect(self.on_run)
-        options_layout.addWidget(run)
 
         # reset settings
         reset = QPushButton("Reset")
         reset.clicked.connect(self.reset_to_defaults)
-        options_layout.addWidget(reset)
 
         # progress bar
         self.progress_bar = QProgressBar()
@@ -117,28 +146,35 @@ class MainWindow(QWidget):
                 padding: 4px;
             }
             """)
+        
+        # 2. FEATURE SELECTOR
+        self.feature_selector = QComboBox()
+        self.feature_selector.addItems([FEATURE_NAMES[f] for f in feature_list])
+        index = feature_list.index(self.options_class)
+        self.feature_selector.setCurrentIndex(index)
+        self.feature_selector.currentIndexChanged.connect(self.switch_feature)
+        options_layout.addWidget(self.feature_selector)
 
 
-        i = 0
-        for field in fields(self.options_class):
-            if field.metadata.get("ui_hint") == "manually":
-                continue
+        self.stack = QStackedWidget()
+        for _ in range(self.feature_selector.count()):
+            self.stack.addWidget(QWidget())
 
-            name = field.name
-            val = getattr(self.options, field.name)
-            label = field.metadata.get("label", field.name.replace("_", " ").title())
-            widget = create_widget_for_field(field, val)
+        self.pages = {} # Map: Feature -> Widget
 
-            col = i // MAX_ROWS
-            row = (i % MAX_ROWS) * 2
-            self.grid_layout.addWidget(QLabel(label), row, col)
-            self.grid_layout.addWidget(widget, row+1, col)
-            self.widgets[field.name] = widget
+        # load pages lazily; initially one only
+        w = self.create_group_for_options(self.options_class)
+        self.stack.removeWidget(self.stack.widget(index))
+        self.stack.insertWidget(index, w)
+        self.stack.setCurrentIndex(index)
 
-            # form_layout.addRow(name.replace("_", " ").title(), widget)
-            self.widgets[name] = widget
+        self.pages[index] = w
 
-            i += 1
+        options_layout.addWidget(self.stack)
+
+        options_layout.addWidget(reset)
+        options_layout.addWidget(run)
+
         # options_layout.addLayout(form_layout)
         right_layout = QVBoxLayout()
         right_layout.addWidget(self.board)
@@ -151,6 +187,58 @@ class MainWindow(QWidget):
         main_layout.addWidget(options_widget, stretch=0)
         main_layout.addWidget(self.right_widget, stretch=1)
         self.setLayout(main_layout)
+
+    def create_group_for_options(self, options_class, exclude_core=False):
+        page_widget = QWidget()
+        grid = QGridLayout(page_widget)
+        
+        core_fields = {f.name for f in fields(CoreOptions)}
+        
+        i = 0
+        for field in fields(options_class):
+            if field.metadata.get("ui_hint") == "manually":
+                continue
+
+            name = field.name
+            val = getattr(self.options, field.name)
+            label = field.metadata.get("label", field.name.replace("_", " ").title())
+            widget = create_widget_for_field(field, val, label=label)
+
+            i += 1
+            if exclude_core and field.name in core_fields:
+                continue  # Skip options already shown in the Core section
+
+            col = i // MAX_ROWS
+            row = (i % MAX_ROWS) * 2
+            grid.addWidget(QLabel(label), row, col)
+            grid.addWidget(widget, row+1, col)
+            self.widgets[field.name] = widget
+
+            # form_layout.addRow(name.replace("_", " ").title(), widget)
+            self.widgets[name] = widget
+
+        grid.setRowStretch(row, 1)
+            
+        return page_widget
+
+    def switch_feature(self, index):
+        self.options_class = feature_list[index]
+
+        print(index)
+        if index not in self.pages:
+            self.options, _ = load_settings(self.options_class)
+            w = self.create_group_for_options(self.options_class)
+
+            self.stack.removeWidget(self.stack.widget(index))
+            self.stack.insertWidget(index, w)
+
+            self.pages[index] = w
+        else:
+            self.options = self.get_current_options()
+
+        self.stack.setCurrentIndex(index)
+
+        print(OPT_TO_FEATURE[self.options_class])
 
     def get_current_options(self):
         """Helper to extract the data back into a Options object"""
@@ -165,35 +253,28 @@ class MainWindow(QWidget):
                     data[name] = widget.isChecked()
                 elif isinstance(widget, QGroupBox):
                     data[name] = widget.get_value()
+                elif hasattr(widget, "text"): 
+                    data[name] = widget.text()
                 else:
                     data[name] = widget.text()
         return self.options_class(**data)
 
-    def browse_opening(self):
-        project_root = Path(__file__).resolve().parents[2]
-        start_dir = project_root / "input pgns"
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select opening PGN", str(start_dir), "PGN files (*.pgn)"
-        )
-        if path:
-            self.input_pgn_path.setText(path)
 
     def on_run(self):
+        self.options = self.get_current_options()
+        self.save_settings()
+
         self.progress_bar.setValue(0)
         self.show_runtime_widgets()
 
-
-        self.options = self.get_current_options()
-        if self.input_pgn_path.text():
-            self.options.input_pgn = self.input_pgn_path.text()
         # side = chess.WHITE if self.white_radio.isChecked() else chess.BLACK # TODO: get rid of chess import?
         self.options.validate()
-        save_settings(self.options)
 
         self.setEnabled(False)
 
         self.thread = QThread(self)
-        self.worker = EngineWorker(self.options)
+        runner = OPT_TO_FEATURE[self.options_class]
+        self.worker = EngineWorker(self.options, runner)
         if not getenv("APP_DEBUG") == "1":
             self.worker.moveToThread(self.thread)
 
@@ -212,6 +293,8 @@ class MainWindow(QWidget):
         self.thread.start()
         # self.thread.run()
 
+    def save_settings(self):
+        save_settings(self.options, self.options_class)
 
     def on_finished(self, report: str):
         self.hide_runtime_widgets()
@@ -227,7 +310,7 @@ class MainWindow(QWidget):
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(current)
 
-    def on_engine_report(self, report: CheckerReport):
+    def on_engine_report(self, report: RunnerReport):
         self.board.setVisible(True)
         self.feedback.setVisible(True)
         if report.position:
@@ -246,7 +329,8 @@ class MainWindow(QWidget):
         self.right_widget.setVisible(True)
 
     def reset_to_defaults(self):
-        for f in fields(Options):
+        active_feature = feature_list[self.stack.currentIndex()]
+        for f in fields(active_feature):
             if f.name in self.widgets:
                 widget = self.widgets[f.name]
                 if isinstance(widget, QSpinBox) or isinstance(widget, QDoubleSpinBox):
@@ -265,21 +349,23 @@ class EngineWorker(QObject):
     progress = Signal(int, int)
     report = Signal(object)
 
-    def __init__(self, options):
+    def __init__(self, options, runner_cls):
         super().__init__()
         self.options = options
+        self.runner_cls = runner_cls
 
     @Slot()
     def run(self):
         try:
-            c = checker.PgnChecker(self.options, self.progress.emit, self.report.emit)
-            report = c.run()
+            r = self.runner_cls(self.options, self.progress.emit, self.report.emit)
+            print(self.options)
+            report = r.run()
             # test.test(self.options)
-            c.close()
+            r.close()
             self.finished.emit(report)
         except Exception as e:
             self.error.emit(str(e))
-            c.close()
+            r.close()
             return
     
 
@@ -288,7 +374,7 @@ class BoardWidget(QSvgWidget):
         super().__init__(parent)
         self.setMinimumSize(300, 300)
 
-    def show_report(self, report : CheckerReport, orientation=chess.WHITE):
+    def show_report(self, report : RunnerReport, orientation=chess.WHITE):
         if not report.position:
             self.setVisible(False)
             return
@@ -307,7 +393,7 @@ class BoardWidget(QSvgWidget):
     #     self.set_board(board)
 
 
-def create_widget_for_field(field_info, current_value):
+def create_widget_for_field(field_info, current_value, label=None):
     metadata = field_info.metadata
     v_type = field_info.type
     hint = metadata.get("ui_hint")
@@ -322,21 +408,28 @@ def create_widget_for_field(field_info, current_value):
         index = widget.findData(current_value)
         widget.setCurrentIndex(index)
         return widget
+    
+    if hint == "file_path":
 
-    # 2. Handle Booleans
+        # Pull specific file info from metadata
+        f_filter = metadata.get("file_filter", "PGN files (*.pgn)")
+        f_dir = metadata.get("initial_dir", "input_pgn")
+        
+        # This is now a single widget, which can be added to a QGridLayout!
+        widget = FilePickerWidget(label or field_info.name, f_filter, f_dir)
+        return widget
+
     if v_type is bool:
         widget = QCheckBox()
         widget.setChecked(current_value)
         return widget
 
-    # 3. Handle Integers
     if v_type is int:
         widget = QSpinBox()
         widget.setRange(metadata.get("min", 0), metadata.get("max", 999))
         widget.setValue(current_value)
         return widget
 
-    # 4. Handle Floats (Thresholds)
     if v_type is float:
         widget = QDoubleSpinBox()
         widget.setRange(metadata.get("min", 0.0), metadata.get("max", 1.0))
@@ -349,10 +442,19 @@ def create_widget_for_field(field_info, current_value):
         widget.set_value(current_value)
         return widget
 
-    # 5. Default: Text/Paths
+    # Default: Text/Paths
     widget = QLineEdit()
     widget.setText(str(current_value))
     return widget
+
+def browse_file(widget, dir: str):
+    project_root = Path(__file__).resolve().parents[2]
+    start_dir = project_root / dir
+    path, _ = QFileDialog.getOpenFileName(
+        widget, "Select opening PGN", str(start_dir), "PGN files (*.pgn)"
+    )
+    if path:
+        widget.setText(path)
 
 def create_selector(options: dict):
 

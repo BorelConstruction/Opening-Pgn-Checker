@@ -10,10 +10,10 @@ import traceback
 import weakref
 from dataclasses import dataclass, field
 from functools import partial  # for currying
-from typing import Callable, NamedTuple, Optional, Union, TypeVar, Generic
+from typing import Callable, NamedTuple, Optional, Union, TypeVar
 from collections.abc import Callable
-# from __future__ import annotations # to resolve PgnChecker<->EvalProvider... I'll just annotate with a str.
-from abc import ABC
+# from __future__ import annotations # to resolve Runner<->EvalProvider... I'll just annotate with a str.
+from abc import ABC, abstractmethod
 
 VisitResultT = TypeVar("VisitResultT")
 
@@ -25,11 +25,12 @@ from chess import WHITE
 from chess import BLACK
 
 
-from .options import Options
+from .options import CoreOptions, CheckerOptions
 from .timer import clock
 from .caching import CacheDict
 from .database import *
 from .traversal import traverse, TraversalPolicy
+from .runner import *
 
 # TODO: identify unobvious moves
 # TODO: exclaims for their moves (if it doesn't drop the eval while the most popular one does?)
@@ -46,28 +47,9 @@ from .traversal import traverse, TraversalPolicy
 
 DEBUG_MODE = False
 
-STAT_SIGNIFICANCE_THRESHOLD = 20
+STAT_SIGNIFICANCE_THRESHOLD = 15 # TODO: smarter choice
 FREQ_MARK_THRESHOLD = 10
 
-# output_pgns = ['Output.pgn']
-
-sf_path = "C:\\Users\\Vadim\\Downloads\\stockfish-windows-x86-64-avx2.exe"
-
-def add_debug_comment(node, message):
-    if DEBUG_MODE:
-        update_comment(node, message)
-
-@dataclass(frozen=True)
-class PositionSnapshot:
-    fen: str
-    ply: int
-    last_move_uci: Optional[str] = None
-
-@dataclass(frozen=True)
-class CheckerReport:
-    kind: str                    # "gap", "node", "warning"
-    position: Optional[PositionSnapshot] = None
-    message: Optional[str] = None
 
 @dataclass
 class MoveChoice:
@@ -94,147 +76,15 @@ class GapsInfo:
 
     def __iter__(self):
         return iter(self.gaps)
-
-class PosCache:
-    def __init__(self, fen: str):
-        self.fen = fen
-        self.TTed : Node = None # "seen in the relevant part of the pgn file"
-        self._data = {}
-
-    def get(self, label, query_fn):
-        if label not in self._data:
-            self._data[label] = query_fn(self.fen)
-        return self._data[label]
-
-    def to_dict(self) -> dict:
-        data = {}
-        if "db_lichess" in self._data:
-            data["db_lichess"] = self._data["db_lichess"]
-        if "db_masters" in self._data:
-            data["db_masters"] = self._data["db_masters"]
-        if "eval" in self._data:
-            eval_provider = self._data["eval"]
-            if hasattr(eval_provider, "to_dict"):
-                data["eval"] = eval_provider.to_dict()
-        if "q-eval" in self._data:
-            data["q-eval"] = self._data["q-eval"].to_dict()
-        return {
-            "fen": self.fen,
-            # "TTed": self.TTed, # we don't want to cache this, this is cheap.
-            # We actually want it to reset between runs, or we may find undexpected transpositions
-            "data": data,
-        }
     
-    @classmethod
-    def from_dict(cls, checker: 'PgnChecker', payload: dict) -> "PosCache":
-        payload["fen"] = fen(payload["fen"]) #####
-        pc = cls(payload["fen"])
-        data = payload.get("data", {})
-        if "db_lichess" in data:
-            pc._data["db_lichess"] = data["db_lichess"]
-        if "db_masters" in data:
-            pc._data["db_masters"] = data["db_masters"]
-        if "eval" in data:
-            pc._data["eval"] = EvalProvider.from_dict(checker, pc.fen, data["eval"])
-        if "q-eval" in data:
-            pc._data["q-eval"] = EngineEval.from_dict(data["q-eval"])
-        return pc
+class PgnChecker(Runner):
+    def __init__(self, options: CheckerOptions, progress_cb=None, report_cb=None):
+        super().__init__(options, progress_cb, report_cb)
 
-class QueryResult(ABC):
-    """
-    Lazy result of a query(node, kind).
-    Concrete subclasses decide how and when computation happens.
-    """
-    pass
-
-
-class EngineEval(NamedTuple):
-    eval: float
-    move: str
-
-    def to_dict(self) -> dict:
-        move = self.move.uci() if isinstance(self.move, chess.Move) else self.move
-        return {"eval": self.eval, "move": move}
-
-    @classmethod
-    def from_dict(cls, payload: dict) -> "EngineEval":
-        move = payload["move"]
-        if isinstance(move, str):
-            move = chess.Move.from_uci(move)
-        return cls(payload["eval"], move)
-
-class EvalProvider(QueryResult):
-    def __init__(self, checker: 'PgnChecker', fen: str):
-        self._checker = checker   # gives access to engine, options, cache helpers
-        self._fen = fen
-        
-        # TODO: remember depths
-
-        self._multipvs = {}    # dict[int, list[EngineEval]]
-
-    def to_dict(self) -> dict:
-        multipvs = {}
-        for amount, lines in self._multipvs.items():
-            multipvs[str(amount)] = [self._engine_eval_to_dict(line) for line in lines]
-        return {"multipvs": multipvs}
-
-    @classmethod
-    def from_dict(cls, checker: 'PgnChecker', fen: str, payload: dict) -> "EvalProvider":
-        ev = cls(checker, fen)
-        multipvs = {}
-        for amount, lines in payload.get("multipvs", {}).items():
-            try:
-                key = int(amount)
-            except (TypeError, ValueError):
-                continue
-            multipvs[key] = [cls._engine_eval_from_dict(line) for line in lines]
-        ev._multipvs = multipvs
-        return ev
-
-    @staticmethod
-    def _engine_eval_to_dict(line: EngineEval) -> dict:
-        move = line.move
-        if isinstance(move, chess.Move):
-            move = move.uci()
-        return {"eval": line.eval, "move": move}
-
-    @staticmethod
-    def _engine_eval_from_dict(payload: dict) -> EngineEval:
-        move = payload["move"]
-        if isinstance(move, str):
-            move = chess.Move.from_uci(move)
-        return EngineEval(payload["eval"], move)
-
-    def top(self, amount: int) -> list[EngineEval]:
-        if amount not in self._multipvs:
-            result = self._checker.engine_eval(self._fen, multipv=amount)
-            for n in range(1, amount + 1):
-                if n not in self._multipvs:
-                    self._multipvs[n] = result[:n] # will make cache heavier, so make push this to retrieval if that becomes a problem
-        return self._multipvs[amount]
-    
-    def best_move(self) -> str:
-        return self.top(1)[0].move
-    
-    def best_eval(self) -> float:
-        return self.top(1)[0].eval
-
-
-class PgnChecker():
-    def __init__(self, options: Options, progress_cb=None, report_cb=None):
-        options.validate()
-        self.N = 0
-        self.options = copy.copy(options)
-        self.options.side = WHITE if self.options.play_white else BLACK 
+        self.options.side = WHITE if self.options.play_white else BLACK
+        self.options.starting_pos = fen(self.options.starting_pos) # all fens are normalized
         self.options.adaptive_an = True # TODO
-        self.engine_path = sf_path
-        self._engine = None
-        self._finalizer = weakref.finalize(self, self._cleanup)
-        self.progress = Progress(progress_cb)
-        self.report = report_cb or (lambda *_: None)
-        self.cache = CacheDict(lambda fen: PosCache(fen))
 
-        self.init_queries()
         self.set_output_pgn()
         
 
@@ -247,156 +97,6 @@ class PgnChecker():
             output_dir,
             f"{input_stem} -- {timestamp}.pgn",
         )
-
-    def init_queries(self):
-        self._queries = {
-            # NOTE: will be a bug is self.opening_explorer changes
-            # (as self.cache will then store the result relative to the old explorer)
-            # If we expect this to happen, here and below such parameters have to be frozen (and not cached)
-            "db_lichess": lambda fen: safe_get_games(self.opening_explorer, position=fen),
-
-            "db_masters": lambda fen: safe_get_games(self.opening_explorer, position=fen, lichess=False),
-
-            "eval": lambda fen: EvalProvider(self, fen),
-
-            # if we don't cache quick evals, results will be different every time
-            "q-eval": lambda fen: quick_eval(self.engine, fen, pov=self.options.side)
-        }
-
-    def query(self, fen: str, type: str):
-        return self.cache[fen].get(type, self._queries[type])
-
-    def _default_cache_path(self) -> str:
-        base = "cache"
-        name = "cache"
-        if self.options.input_pgn:
-            name = os.path.splitext(os.path.basename(self.options.input_pgn))[0]
-        return os.path.join(base, f"{name}.json")
-    
-    def load_cache(self, path: Optional[str] = None) -> bool:
-        self.report_message("Loading cache...")
-        path = path or self._default_cache_path()
-        pos_cache_factory = lambda payload: PosCache.from_dict(self, payload)
-        self.cache = CacheDict.from_dict(path, pos_cache_factory)
-
-    def save_cache(self, path: Optional[str] = None):
-        path = path or self._default_cache_path()
-        self.cache.serialize(path)
-
-    def report_message(self, msg: str):
-        self.report(CheckerReport(kind = "msg", message=msg))
-
-    def _cleanup(self):
-        if self._engine is not None:
-            close_engine(self._engine)
-        self._engine = None
-
-    def close(self):
-        self._finalizer()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.close()
-
-    def move_freq(self, board: Union[Node, chess.Board], move: Optional[Union[chess.Move, str]] = None) -> float:
-        if isinstance(move, chess.Move):
-            move = move.uci()
-        if isinstance(board, Node):
-            if move is None:
-                move = board.move
-            board = board.board()
-        if move is None:
-            raise ValueError("Expected a move or a Node")
-        stats = self.query(fen(board), "db_lichess")
-        md = stats_for_uci(stats, move)
-        if not md:
-            return -1
-        return move_frequency(md, stats)
-    
-    def total_games(self, board: Union[Node, chess.Board, str]) -> int:
-        if isinstance(board, Node):
-            board = board.board()
-        if isinstance(board, chess.Board):
-            board = fen(board)
-        stats = self.query(board, "db_lichess")
-        return total_games(stats)
-
-    def score_rate_pos(self, board: Union[Node, chess.Board, str]) -> float:
-        if isinstance(board, Node):
-            board = board.board()
-        if isinstance(board, chess.Board):
-            board = fen(board)
-        stats = self.query(board, "db_lichess")
-        if not stats:
-            sys.stderr.write(f"No stats for {board}\n")
-            return -0.5 # TODO
-        return score_rate(stats, self.options.side)
-    
-    def score_rate_move(self, board: Union[Node, chess.Board, str], move: Union[chess.Move, str]) -> float:
-        if isinstance(move, chess.Move):
-            move = move.uci()
-        if isinstance(board, Node):
-            board = board.board()
-        if isinstance(board, chess.Board):
-            board = fen(board)
-        stats = self.query(board, "db_lichess")
-        md = stats_for_uci(stats, move)
-        if not md:
-            sys.stderr.write(f"No stats for {board} with move {move}\n")
-            return -0.5
-        return score_rate(md, self.options.side)
-
-    @property # we want to start the engine if it is needed, but we also don't want to restart it every time
-    def engine(self):
-        if self._engine is None:
-            self._engine = chess.engine.SimpleEngine.popen_uci(self.engine_path)
-        return self._engine
-    
-    def engine_eval(self, fen: str, multipv: int = 1):
-        return evaluate_position(self.engine, fen, pov=self.options.side, options=self.options,
-                                     adaptive=self.options.adaptive_an, multipv=multipv) # TODO
-        
-
-    def count_nodes(self, root_node):
-        count = 0
-
-        def visit(ply):
-            nonlocal count
-            count += 1
-
-        self._traverse(root_node, 0, visit)
-        return count
-
-    def fill_the_TT(self, root_node: Node):
-        def visit(node: Node):
-            self._record_position_in_TT(node)
-
-        self._traverse(root_node, visit=visit)
-
-
-    def _traverse(self, node: Node,
-                    visit: Optional[Callable[[Node], VisitResultT]] = None,
-                    post: Optional[Callable] = None,
-                    reasons_to_stop: Optional[Callable[[Node, Optional[VisitResultT]], bool]] = None,
-                    get_children: Optional[Callable[[Node], list[Node]]] = lambda n: n.variations):
-        '''Traverse the subtree rooted at node
-        in a way consistent with self.options'''
-        tp = TraversalPolicy(
-            start_ply=self.options.start_ply,
-            end_ply=self.options.end_ply,
-            check_alternatives=self.options.check_alternatives,
-            get_children=get_children)
-        return traverse(node, visit, post, reasons_to_stop, tp, self.options.side, self.progress)
-
-    def init_client(self):
-        token = getattr(self.options, "_token", None)
-        if token:
-            lichessClient = berserk.Client(session=berserk.TokenSession(token))
-        else:
-            lichessClient = berserk.Client()
-        self.opening_explorer = lichessClient.opening_explorer
 
     def set_starting_pos(self, node: Node):
         if not self.options.starting_pos:
@@ -414,12 +114,10 @@ class PgnChecker():
         if not hasattr(self, "starting_node"):
             raise ValueError(f"Starting position {self.options.starting_pos} not found in the PGN")
 
+        
     @clock
     def run(self):
-        self.load_cache()
         try:
-            self.init_client()
-
             with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
                 num = 0
                 while True:
@@ -461,6 +159,12 @@ class PgnChecker():
 
         return f"Added {self.moves_added} moves"
     
+    def fill_the_TT(self, root_node: Node):
+        def visit(node: Node):
+            self._record_position_in_TT(node)
+
+        self._traverse(root_node, visit=visit)
+
     def find_fill_gaps(self, game_node: Node):
         self.report_message("Finding gaps...")
         gaps = self.find_gaps(game_node)
@@ -468,7 +172,7 @@ class PgnChecker():
         self.progress.reset()
         self.fill_gaps(gaps)
 
-    def find_local_gaps(self, node: Node) -> Optional[GapsInfo]:      
+    def find_gaps_local(self, node: Node) -> Optional[GapsInfo]:      
         pgn_ucis = [m.move.uci() for m in node.variations]
 
         if node.turn() == self.options.side:
@@ -496,7 +200,7 @@ class PgnChecker():
             if freq < 0:
                 update_comment(log_node,"Move {} not found in the database".format(uci).upper(), True)
             pos_snap = PositionSnapshot(fen(log_node), log_node.ply(), last_move_uci=uci)
-            self.report(CheckerReport(kind="position", position=pos_snap,
+            self.report(RunnerReport(kind="position", position=pos_snap,
                                     message=f"Filling gaps... \n" + f"{100*freq:.0f}% of {self.total_games(fen(log_node))} games" +
                                     f"\nScore rate {100*self.score_rate_move(log_node, uci):.0f}%."))
             comment += uci + ': ' + (str(freq)[:4]) + ', '
@@ -515,7 +219,7 @@ class PgnChecker():
             all_gaps = child_results
             if node.ply() < self.options.start_ply:
                 return all_gaps # only propagate the results
-            local_gaps = self.find_local_gaps(node) 
+            local_gaps = self.find_gaps_local(node) 
             if local_gaps:
                 all_gaps.append(local_gaps)
             return all_gaps
@@ -524,13 +228,13 @@ class PgnChecker():
         return self._traverse(game, post=post, reasons_to_stop=reasons_to_stop)
 
     def gaps_local(self, node: Node):
-        gaps_info = self.find_local_gaps(node)
+        gaps_info = self.find_gaps_local(node)
         if gaps_info:
             self.act_on_gap_data_local(node, gaps_info)
 
     def traverse_and_fill_gaps(self, node: Node,
             report_state=None) -> bool:
-        self._traverse(node, partial(PgnChecker.gaps_local, self))
+        self._traverse(node, partial(Runner.gaps_local, self))
 
     def mark_move_local(self, log_node: Node):
         mark_fn = mark_based_on_freq_us if log_node.turn() == self.options.side else mark_based_on_freq_them
@@ -542,15 +246,18 @@ class PgnChecker():
 
     def mark_moves(self, log_node):
         # TODO: if a move is frequent, promote it?
-        self.report(CheckerReport(kind="position", position=PositionSnapshot("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 0)))
+        self.report(RunnerReport(kind="position", position=PositionSnapshot("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 0)))
         self.report_message("Marking moves...")
         self.progress.reset()
-        self._traverse(log_node, partial(PgnChecker.mark_move_local, self))
+        self._traverse(log_node, partial(Runner.mark_move_local, self))
 
     @staticmethod
     def annotate_transposition(first_occurrence: Node, node: Node):
-        diff = first_difference(first_occurrence,node)
-        update_comment(node, f"Tr to {whole_move_from_ply(diff.ply)}{diff.move}")
+        diff = first_difference(first_occurrence, node)
+        if diff is not None:
+            update_comment(node, f"Tr to {whole_move_from_ply(diff.ply)}{diff.move}")
+        else:
+            update_comment(node, "Two branches with the same move -- fix this")
 
     def find_transposition_move(self, board: Union[Node, chess.Board]) -> Optional[chess.Move]:
         if isinstance(board, Node):
@@ -764,88 +471,9 @@ class PgnChecker():
         self._record_position_in_TT(child)
         self.moves_added += 1
         return child
-
     def _record_position_in_TT(self, node): # TODO: when do we add?
         if not self.cache[fen(node)].TTed:
             self.cache[fen(node)].TTed = node
-
-def update_comment(node: Node, message: str, debug=False):
-    if not debug or (debug and DEBUG_MODE):
-        node.comment = (node.comment + " " + message).lstrip()
-
-def fen(board: Union[Node, chess.Board, str]) -> str:
-    # ALL FENS SHOULD COME FROM THIS FUNCTION
-    # or subtle bugs will arise
-    # good enough as long as it's a solo project
-    if isinstance(board, Node):
-        board = board.board()
-    if isinstance(board, chess.Board):
-        board = board.fen()
-    return fen_essential_part(board)
-
-def fen_essential_part(fen: str) -> str:
-    return ' '.join(fen.strip().split()[:4])
-
-def side(fen: str) -> chess.Color:
-    try:
-        side = fen.split(' ')[1]
-        return WHITE if side == 'w' else BLACK
-    except IndexError:
-        return "Invalid FEN format"
-
-class Progress:
-    def __init__(self, emit=None, step_len=0.02):
-        self.emit = emit or (lambda *_: None)
-
-        self.done = 0
-        self.total = None
-        self.step_len = step_len
-
-    # ---------- loop / cyclic progress ----------
-
-    def iter(self, items):
-        total = len(items)
-        old_total = self.total
-        old_done = self.done
-
-        self.total = total
-        self.done = 0
-
-        self._emit()
-        try:
-            for item in items:
-                yield item
-                self.done += 1
-                self._emit()
-        finally:
-            self.total = old_total
-            self.done = old_done
-
-    # ---------- traversal / step-based progress ----------
-
-    def step(self, n=1):
-        self.done += n
-        self._emit()
-        return self.done
-
-    def set_total(self, n):
-        self.reset()
-        self.total = n
-
-    def reset(self):
-        self.done = 0
-        self._emit()
-
-    # ---------- internal ----------
-
-    def _emit(self):
-        if self.total:
-            step_absolute = int(self.total * 0.02) + 1
-            if self.done % step_absolute == 0:
-                self.emit(self.done, self.total)
-        else:
-            # indeterminate progress; emit activity pulse
-            self.emit(0, 0) # TODO
 
 def color_from_freq(freq) -> str:
     '''returns the color for an arrow, depending on
@@ -911,49 +539,6 @@ def checkpoint_pgn(game, output_path: str):
 
 
 
-
-def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1) -> list[EngineEval]:
-    # TODO: make a separate function for this processing?
-    if isinstance(position, str):
-            board = chess.Board(position)
-    elif isinstance(position, chess.Board):
-            board = position
-    else:
-        raise TypeError("position must be a FEN string or chess.Board")
-    
-    sys.stderr.write(f"\n Quick eval for {fen(board)}")
-    
-    infos = analyse_time_limit(engine, board, time_limit=0.1, multipv=multipv)
-    return process_engine_output(infos, board, pov)[0] # for now only return one EngineEval
-
-def uci_from_lichess_to_pgn(uci: str):
-    if uci == 'e1h1':
-        return 'e1g1'
-    if uci == 'e8h8':
-        return 'e8g8'
-    if uci == 'e1a1':
-        return 'e1c1'
-    if uci == 'e8a8':
-        return 'e8c8'
-    return uci
-
-def uci_from_pgn_to_lichess(uci: str): 
-    if uci == 'e1g1':
-        return 'e1h1'
-    if uci == 'e8g8':
-        return 'e8h8'
-    if uci == 'e1c1':
-        return 'e1a1'
-    if uci == 'e8c8':
-        return 'e8a8'
-    return uci
-
-def stats_for_uci(games: dict, uci: str):
-    return next((m for m in games['moves'] if m['uci'] == uci_from_pgn_to_lichess(uci)), None) # {}
-
-def arrow_from_uci(uci: str, *args, **kwargs) -> chess.svg.Arrow:
-    return chess.svg.Arrow(ord(uci[0])-97 + 8*(int(uci[1])-1), ord(uci[2])-97 + 8*(int(uci[3])-1), *args, **kwargs)
-
 def mark_based_on_freq_them(node: Node, freq: float): # should also depend on the number of games
     if 0.55 < freq <= 0.76:         # above that consider the move obious and don't mark
         mark = chess.svg.Arrow(node.move.to_square, node.move.to_square, color="red") # yes that's how you mark squares with this library clownface.png
@@ -974,78 +559,6 @@ def only_move_criterion(eval1: float, eval2: float):
         return True
     return False
 
-
-def initialize_engine(exePath, conf=None):
-    sys.stderr.write(f"Initializing {exePath}\n")
-    engine = chess.engine.SimpleEngine.popen_uci("C:\\Users\\Vadim\\Downloads\\stockfish-windows-x86-64-avx2.exe")
-    return engine
-
-
-def evaluate_position(engine: chess.engine.SimpleEngine,
-                      position: Union[str, chess.Board],
-                      pov: chess.Color = None,
-                      multipv: int = 1,
-                      options=None,
-                      adaptive=True,
-                      time_limit=0.1) -> EngineEval:
-    """
-    Args:
-        fen_string (str): The position in Forsyth-Edwards Notation (FEN).
-        time_limit (float): The time (in seconds) the engine spends analyzing.
-
-    Returns:
-        float: The evaluation score in pawn units (by default relative to the side to move, because we
-        expect that the engine plays on our side).
-    """
-    if isinstance(position, str):
-            board = chess.Board(position)
-    elif isinstance(position, chess.Board):
-            board = position
-    else:
-        raise TypeError("position must be a FEN string or chess.Board")
-    
-    sys.stderr.write(f"\n Evaluating the position... {fen(board)}")
-    # Use 'with' statement for proper engine startup and cleanup
-    # with chess.engine.SimpleEngine.popen_uci("C:\\Users\\Vadim\\Downloads\\stockfish-windows-x86-64-avx2.exe") as engine:
-    if adaptive:
-        infos = analyse_adaptive(engine, board, min_depth=options.min_depth, max_depth=options.max_depth, multipv=multipv)
-    else:
-        infos = analyse_time_limit(engine, board, time_limit=time_limit, multipv=multipv)
-    # Get the list of EngineEval objects
-    return process_engine_output(infos, board, pov)
-
-def process_engine_output(infos, board, pov=WHITE):
-    lines = []
-    for info in infos:
-        score = info["score"].pov(pov)
-        pv = info["pv"]
-
-        evaluation_cp = score.score(mate_score=100000)
-        evaluation_pawns = evaluation_cp / 100.0
-        
-        lines.append(EngineEval(evaluation_pawns, pv[0]))
-    return lines
-
-def analyse_adaptive(engine, board: chess.Board, min_depth=8, max_depth=14, multipv: int = 1) -> list:
-    last_score = None
-
-    for depth in range(min_depth, max_depth + 1):
-        info = engine.analyse(board, chess.engine.Limit(depth=depth)) # we want to adapt based on the best move's eval, so multipv=1
-        score = info["score"].white().score(mate_score=100000)
-
-        if last_score is not None and abs(score - last_score) < 15:
-            break
-
-        last_score = score
-
-    if multipv == 1:
-        return [info]
-    else:
-        info = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=multipv)
-        return info
-    
-def analyse_time_limit(engine, board: chess.Board, time_limit=0.1, multipv: int = 1) -> list:
-    return engine.analyse(board, chess.engine.Limit(time=time_limit), multipv=multipv)
 
 
 class FirstDifference(NamedTuple):
@@ -1097,14 +610,14 @@ def node_san(n: Node) -> str:
 def uci_to_san(uci: str, board: chess.Board) -> str:
     return board.san(chess.Move.from_uci(uci))
 
-def gap_criterion(move: str, move_freq: float, freq_threshold: float, min_games: int = 0, pov: chess.Color = WHITE) -> int:
-    if score_rate(move, pov) > 0.75: # we assume files don't need to consider moves that lose in practice
+def gap_criterion(move_data: dict, move_freq: float, freq_threshold: float, min_games: int = 0, pov: chess.Color = WHITE) -> int:
+    if score_rate(move_data, pov) > 0.75: # _datawe assume files don't need to consider moves that lose in practice
         return 0
-    if total_games(move) < min_games:
+    if total_games(move_data) < min_games or total_games(move_data) < min_games:
         return 0
     if move_freq >= freq_threshold:
         return 1
-    if score_rate(move, pov) <= 0.4 and move_freq >= freq_threshold/3: # if a move scores well, consider it even if it is not very frequent
+    if score_rate(move_data, pov) <= 0.4 and move_freq >= freq_threshold/3: # if a move scores well, consider it even if it is not very frequent
         # TODO: before going into this, check if the most common response transposes into something known
         return 2
     return 0
@@ -1118,20 +631,6 @@ def remove_duplicates(lst: list, equality_rel: Optional[Callable] = lambda x:x) 
             result.append(item)
     return result
 
-def whole_move_from_ply(ply: int) -> str:
-    if ply % 2 == 0:
-        return str(ply // 2) + "..."
-    return str(ply // 2) + "."
-
-
-def close_engine(engine):
-    print("\nClosing the engine...")
-    if engine is not None: # hasattr?
-        try:
-            engine.close()
-        except Exception as e:
-            sys.stderr.write("Failed to close engine\n")
-            sys.stderr.write(str(e))
 
 if __name__ == "__main__":
     pass
