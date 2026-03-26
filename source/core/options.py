@@ -19,15 +19,15 @@ class CoreOptions:
         metadata={"label": "Maximum Engine Depth", "min": 1, "max": 80, "group": "Engine Settings", "order": 2}
     )
 
-    # engine_path: str = field(    # not really an "option"
-    #     default="C:\\Users\\Vadim\\Downloads\\stockfish-windows-x86-64-avx2.exe",
-    #     metadata={"label": "Engine Path", "ui_hint": "file_path"}
-    # )
-
+    engine_path: str = field(
+        default="",
+        metadata={"label": "Engine Path", "ui_hint": "file_path",
+            "file_filter": "EXE files (*.exe)",}
+    )
 
     check_alternatives: bool = field(
         default=False,
-        metadata={"label": "Check Alternatives"}
+        metadata={"label": "Check Our Alternatives"}
     )
 
     starting_pos: str = field(
@@ -57,8 +57,8 @@ class CheckerOptions(CoreOptions):
     input_pgn: str = field(
         default='',  # so it doesn't complain if we try to initialize an "empty" one
         metadata={
-            "ui_hint": "file_path",
             "label": "Input PGN",
+            "ui_hint": "file_path",
             "file_filter": "PGN files (*.pgn)",
             "initial_dir": "input pgns"
         }
@@ -68,8 +68,6 @@ class CheckerOptions(CoreOptions):
         default=True,
         metadata={
             "label": "Play As White",
-            # "ui_hint": "dropdown",
-            # "options": {"White": chess.WHITE, "Black": chess.BLACK}
         }
     )
 
@@ -171,8 +169,6 @@ def save_settings(options_obj, options_class):
     
     core_to_save = {k: v for k, v in current_data.items() if k in core_field_names}
     feature_to_save = {k: v for k, v in current_data.items() if k not in core_field_names}
-
-    print(feature_to_save)
 
     full_config["Core"] = core_to_save
     full_config[options_class.__name__] = feature_to_save
