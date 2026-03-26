@@ -5,19 +5,28 @@ from collections.abc import Callable
 
 import chess
 from chess.pgn import GameNode as Node
-from chess import WHITE
 
-TraversalPolicy = namedtuple("TraversalPolicy", ["start_ply", "end_ply", "check_alternatives", "get_children"], 
-                             defaults=(0, 1000, False, lambda n: n.variations))
+
+def default_children(node):
+    return node.variations
+
+def mainline_children(sides: tuple[chess.Color]) -> Callable[[Node], list[Node]]:
+    def get_children(node):
+        if node.turn() in sides:
+            return node.variations[:1]
+        return node.variations
+    return get_children
+
+TraversalPolicy = namedtuple("TraversalPolicy", ["start_ply", "end_ply", "get_children"], 
+                             defaults=(0, 1000, default_children))
 
 def traverse(node: Node,
                 visit: Callable = None,
                 post: Callable = None,
                 reasons_to_stop: Callable = None,
                 tp: TraversalPolicy = TraversalPolicy(),
-                side: chess.Color = WHITE,
                 progress = None):
-    start_ply, end_ply, check_alternatives, get_children = tp
+    start_ply, end_ply, get_children = tp
 
     child_results = []
 
@@ -36,12 +45,10 @@ def traverse(node: Node,
         return child_results
 
     vars = get_children(node)
-    if node.turn()==side and not check_alternatives:
-        vars = vars[:1]
 
     for n in vars:
         child_results += traverse(n, visit, post,
-            reasons_to_stop, tp, side, progress)
+            reasons_to_stop, tp, progress)
         pass
 
     if post:

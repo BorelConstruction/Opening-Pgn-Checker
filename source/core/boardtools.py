@@ -6,6 +6,7 @@ from chess import WHITE
 from chess import BLACK
 
 
+from .traversal import traverse
 from .options import DEBUG_MODE
 
 def update_comment(node: Node, message: str, debug=False):
@@ -61,3 +62,16 @@ def uci_from_pgn_to_lichess(uci: str) -> str:
     if uci == 'e8c8':
         return 'e8a8'
     return uci
+
+def find_node_by_position(node: Node, fen: str) -> Node:
+    def visit(n: Node):
+        if fen(n).startswith(fen_essential_part(fen)): # ==
+            return n
+        
+    n = traverse(node, visit=visit, reasons_to_stop=lambda _, res: res is not None, post=visit)
+    if not n:
+        raise ValueError(f"Starting position {fen} not found in the tree")
+    return n
+
+def opposite_side(side: chess.Color) -> chess.Color:
+    return WHITE if side == BLACK else BLACK
