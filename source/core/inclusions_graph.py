@@ -3,15 +3,18 @@ Builds and visualizes a move-relationship graph for identifying
 recurrent inclusions.
 
 Nodes  : moves (UCI strings)
-Edges  : ma -> mb, weighted by the average conditional frequency of mb
+Edges  : ma -> mb, weighted by the average weight assigned to mb
          following ma, across all positions in the traversal where ma appears.
 
 Abstract dependencies (implemented by subclasses):
   get_children(node) -> list[chess.pgn.GameNode]
-      Which child nodes to traverse from the current node.
+       Which child nodes to traverse from the current node.
 
   get_db_stats(node) -> dict[str, int]
       Raw game counts for each response move (UCI) from this node.
+
+  get_edge_weights(node, stats) -> dict[str, float] (optional)
+      Assign edge weights for response moves; default is 1.0.
 """
 
 import sys
@@ -21,7 +24,6 @@ import chess
 import chess.pgn
 import collections
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Callable, Union, Optional, Any
 from hashlib import sha1
 
@@ -40,6 +42,8 @@ Node        = chess.pgn.GameNode
 DbStats     = dict[str, int]
 GetChildrenFunc = Callable[[Node], list[Node]]
 GetDbStatsFunc  = Callable[[Node], DbStats]
+EdgeWeights = dict[str, float]
+GetEdgeWeightsFunc = Callable[[Node, DbStats], EdgeWeights]
 EdgeFilterFunc  = Callable[[str, str, dict[str, Any]], bool]
 EdgeWidthFunc   = Callable[[str, str, dict[str, Any]], float]
 
@@ -52,19 +56,6 @@ def get_or_create_child(node, move: Union[str, Move]):
             return child
     return node.add_variation(move)
 
-
-
-@dataclass(frozen=True)
-class MoveStat:
-    uci: str
-    count: int
-    total: int
-    conditional_freq: float
-
-
-EdgeObservationWeightFunc = Callable[[Node, MoveStat], float]
-
-
 class InclusionGraph(ABC):
     """
     Raw logic of the inclusion graph building process.
@@ -76,18 +67,18 @@ class InclusionGraph(ABC):
     def __init__(
         self,
         report: Optional[Callable[[Node, str], None]] = None,
-        edge_observation_weight: Optional[EdgeObservationWeightFunc] = None,
+        edge_weights: Optional[GetEdgeWeightsFunc] = None,
+        side: Optional[chess.Color] = chess.WHITE # only for color now, but the symmetry may break anyway in the future
     ):
         self.report = report
-        self._edge_observation_weight: EdgeObservationWeightFunc = (
-            edge_observation_weight or (lambda _node, move_stat: move_stat.conditional_freq)
-        )
+        self._get_edge_weights: Optional[GetEdgeWeightsFunc] = edge_weights
+        self.side = side
 
         # Cache of positions already counted during traversal (fen-essentials).
         self._position_cache: set[str] = set()
 
-        # For each edge (ma, mb): list of conditional frequencies observed
-        # at each position where ma was a traversed child.
+        # For each edge (ma, mb): list of observed edge weights at each
+        # position where ma was a traversed child.
         self._edge_observations: dict[tuple[str, str], list[float]] = \
             collections.defaultdict(list)
 
@@ -100,6 +91,11 @@ class InclusionGraph(ABC):
     @abstractmethod
     def get_db_stats(self, node: Node) -> DbStats:
         raise NotImplementedError
+
+    def get_edge_weights(self, node: Node, stats: DbStats) -> EdgeWeights:
+        if self._get_edge_weights is None:
+            return {}
+        return self._get_edge_weights(node, stats)
 
     # ------------------------------------------------------------------
     # Building
@@ -128,34 +124,24 @@ class InclusionGraph(ABC):
                     continue
                 self._position_cache.add(pos)
 
-                # --- record edges ma -> mb for every response mb in DB ---
-                response_stats: DbStats = self.get_db_stats(ma)
-                response_total = sum(response_stats.values()) if response_stats else 0
+                response_stats = self.get_db_stats(ma)
+                if response_stats:
+                    weights = self.get_edge_weights(ma, response_stats)
+                    for mb_uci in response_stats:
+                        w = weights.get(mb_uci, 1.0) if weights else 1.0
+                        self._edge_observations[(ma.move.uci(), mb_uci)].append(w)
 
-                if response_total > 0:
-                    for mb_uci, mb_count in response_stats.items():
-                        conditional_freq = mb_count / response_total
-                        move_stat = MoveStat(
-                            uci=mb_uci,
-                            count=mb_count,
-                            total=response_total,
-                            conditional_freq=conditional_freq,
-                        )
-                        self._edge_observations[
-                            (ma.move.uci(), mb_uci)
-                        ].append(self._edge_observation_weight(ma, move_stat))
-
-                        our_move = node.turn() == WHITE # opposite_color
+                        our_move = (node.turn() == opposite_side(self.side))
                         colors = ["red", "blue"] if our_move else ["blue", "red"]
 
                         self.graph.add_node(ma.move.uci(), color=colors[0])
                         self.graph.add_node(mb_uci, color=colors[1])
 
                         
-                
+                 
                 if progress and progress.done % 10 == 0:
                     if self.report:
-                        self.report(node, f"{response_total} games.")
+                        self.report(node, f"{sum(response_stats.values())} games.")
 
         tp = TraversalPolicy(
             start_ply=start_ply,
@@ -212,16 +198,12 @@ class PgnInclusionGraph(InclusionGraph):
 
     def __init__(
         self,
-        *,
         get_children: GetChildrenFunc,
         get_db_stats: GetDbStatsFunc,
-        report: Optional[Callable[[Node, str], None]] = None,
-        edge_observation_weight: Optional[EdgeObservationWeightFunc] = None,
+        *args,
+        **kwargs,
     ):
-        super().__init__(
-            report=report,
-            edge_observation_weight=edge_observation_weight or (lambda _node, _move_stat: 1.0),
-        )
+        super().__init__(*args, **kwargs)
         self._get_children = get_children
         self._get_db_stats = get_db_stats
 
@@ -274,37 +256,68 @@ class DBInclusionGraph(InclusionGraph):
 
     def __init__(
         self,
-        *,
-        list_moves: Callable[[Node], list[str]],
-        move_freq: Callable[[Node, str], float],
-        total_games_move: Callable[[Node, str], int],
+        get_games: Callable[[Node], dict[str, Any]],
         frequency_threshold: float,
         min_games: int = 0,
-        report: Optional[Callable[[Node, str], None]] = None,
-        edge_observation_weight: Optional[EdgeObservationWeightFunc] = None,
+        *args,
+        **kwargs,
     ):
-        super().__init__(report=report, edge_observation_weight=edge_observation_weight)
-        self._list_moves = list_moves
-        self._move_freq = move_freq
-        self._total_games_move = total_games_move
+        super().__init__(*args,**kwargs)
+        self._get_games = get_games
         self.frequency_threshold = frequency_threshold
         self.min_games = min_games
+        self._cache: dict[str, tuple[DbStats, EdgeWeights]] = {}
 
     def get_db_stats(self, node: Node) -> DbStats:
-        ucis = self._list_moves(node)
-        return {uci: self._total_games_move(node, uci) for uci in ucis}
+        pos = fen(node)
+        cached = self._cache.get(pos)
+        if cached is not None:
+            return cached[0]
+
+        games = self._get_games(node)
+        moves = games.get("moves", []) if isinstance(games, dict) else []
+
+        total = 0
+        try:
+            total = int(games.get("white", 0) + games.get("draws", 0) + games.get("black", 0))
+        except Exception:
+            total = 0
+
+        stats: DbStats = {}
+        weights: EdgeWeights = {}
+
+        for entry in moves:
+            try:
+                uci = entry.get("uci")
+                if not uci:
+                    continue
+                count = int(entry.get("white", 0) + entry.get("draws", 0) + entry.get("black", 0))
+            except Exception:
+                continue
+
+            if count > 0:
+                stats[uci] = count
+                if total > 0:
+                    weights[uci] = count / total
+
+        self._cache[pos] = (stats, weights)
+        return stats
+
+    def get_edge_weights(self, node: Node, stats: DbStats) -> EdgeWeights:
+        cached = self._cache.get(fen(node))
+        return cached[1] if cached is not None else {}
 
     def get_children(self, node: Node) -> list[Node]:
+        stats = self.get_db_stats(node)
+        weights = self.get_edge_weights(node, stats)
+
         children: list[Node] = []
-        for uci in self._list_moves(node):
-            freq = self._move_freq(node, uci)
-            if freq < self.frequency_threshold:
+        for uci, count in stats.items():
+            if weights.get(uci, 0.0) < self.frequency_threshold:
                 continue
-            count = self._total_games_move(node, uci)
             if count < self.min_games:
                 continue
-            child = get_or_create_child(node, uci)
-            children.append(child)
+            children.append(get_or_create_child(node, uci))
         return children
 
     def visualize(
@@ -353,35 +366,32 @@ class InclusionGraphRunner(Runner):
             return self.make_graph_db(freq_thresh, min_game_num, depth)
         
     def make_graph_db(self, freq_thresh: float, min_game_num: int, depth: int) -> InclusionGraph:
-
-        def list_moves(node: chess.pgn.GameNode) -> list[str]:
-            raw = self.query(fen(node), "db_lichess")
-            return [m.get("uci") for m in raw.get("moves", []) if m.get("uci")]
-
+ 
+        def get_games(node: chess.pgn.GameNode) -> dict[str, Any]:
+            return self.query(fen(node), "db_lichess")
+ 
         root = chess.pgn.Game()
         root.setup(self.options.starting_pos)
-
+ 
         g = DBInclusionGraph(
-            list_moves=list_moves,
-            move_freq=self.move_freq,
-            total_games_move=self.total_games_move,
+            get_games=get_games,
             frequency_threshold=freq_thresh,
+            side=self.options.side,
             min_games=min_game_num,
             report=self.report_position,
         )
         g.build(root, end=depth, progress=self.progress)
         return g
-    
+     
     def make_graph_pgn(self, depth: int) -> InclusionGraph:
-        
-        def get_db_stats(node: chess.pgn.GameNode) -> dict[str, int]:
-            ucis = [m.uci() for m in node.variations]
-            return {uci: 1 for uci in ucis}
-
+         
+        def get_db_stats(node: chess.pgn.GameNode) -> DbStats:
+            return {child.move.uci(): 1 for child in node.variations}
+ 
         with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
             node = chess.pgn.read_game(pgnFile)
             self.set_starting_pos(node)
-
+ 
         g = PgnInclusionGraph(get_children=default_children, get_db_stats=get_db_stats, report=self.report_position)
         g.build(self.starting_node, end=depth+self.starting_node.ply(), progress=self.progress)
         return g
@@ -441,17 +451,17 @@ def make_get_db_stats(
     The berserk response looks like:
       {"moves": [{"uci": "e2e4", "white": 100, "draws": 50, "black": 30}, ...]}
     """
-    def get_db_stats(node: Node) -> dict[str, int]:
-        fen = node.board().fen()
-        response = safe_get_games(opening_explorer, position=fen, **kwargs)
+    def get_db_stats(node: Node) -> DbStats:
+        pos = node.board().fen()
+        response = safe_get_games(opening_explorer, position=pos, **kwargs)
 
-        result = {}
+        result: DbStats = {}
         for entry in response.get("moves", []):
             try:
-                move = entry["uci"]
+                uci = entry["uci"]
                 count = entry.get("white", 0) + entry.get("draws", 0) + entry.get("black", 0)
                 if count > 0:
-                    result[move] = count
+                    result[uci] = int(count)
             except Exception:
                 continue
         return result
@@ -486,12 +496,19 @@ def build_inclusion_graph(
     """
 
     get_children = lambda node: node.variations
-    get_db_stats  = make_get_db_stats(opening_explorer, safe_get_games, **db_kwargs)
+    get_db_stats = make_get_db_stats(opening_explorer, safe_get_games, **db_kwargs)
+
+    def get_edge_weights(_node: Node, stats: DbStats) -> EdgeWeights:
+        total = sum(stats.values())
+        if total <= 0:
+            return {}
+        inv_total = 1.0 / float(total)
+        return {uci: count * inv_total for uci, count in stats.items()}
 
     with open(pgn_path, encoding="utf-8") as pgnFile:
         root = chess.pgn.read_game(pgnFile)
 
-    graph = PgnInclusionGraph(get_children=get_children, get_db_stats=get_db_stats)
+    graph = PgnInclusionGraph(get_children=get_children, get_db_stats=get_db_stats, edge_weights=get_edge_weights)
 
     depth = end_ply - start_ply #############
 
