@@ -20,7 +20,7 @@ from .options import CoreOptions, DEBUG_MODE
 from .timer import clock
 from .caching import CacheDict
 from .database import *
-from .traversal import traverse, TraversalPolicy
+from .traversal import traverse, TraversalPolicy, mainline_children
 from .boardtools import *
 
 # sys.stdout.reconfigure(encoding='utf-8')
@@ -237,6 +237,8 @@ class Runner(ABC):
         self.progress = Progress(progress_cb)
         self.report = report_cb or (lambda *_: None)
 
+        self.normalize_fens() # has to be done before cache loading
+
         self.cache = CacheDict(lambda fen: PosCache(fen))
         self.load_cache()
 
@@ -244,6 +246,11 @@ class Runner(ABC):
         self._engine = None
         self.init_client()
         self.init_queries()
+
+
+    def normalize_fens(self):
+        if hasattr(self.options, "starting_pos"):
+            self.options.starting_pos = fen(self.options.starting_pos)
 
     def init_queries(self):
         self._queries = {
@@ -329,12 +336,13 @@ class Runner(ABC):
                     get_children: Optional[Callable[[Node], list[Node]]] = lambda n: n.variations):
         '''Traverse the subtree rooted at node
         in a way consistent with self.options'''
+        mainline_sides = () if self.options.check_alternatives else (self.options.side,)
+        get_children = mainline_children(mainline_sides)
         tp = TraversalPolicy(
             start_ply=self.options.start_ply,
             end_ply=self.options.end_ply,
-            check_alternatives=self.options.check_alternatives,
             get_children=get_children)
-        return traverse(node, visit, post, reasons_to_stop, tp, self.options.side, self.progress)
+        return traverse(node, visit, post, reasons_to_stop, tp, self.progress)
     
     
     # ============ Universal helper functions ============
@@ -396,12 +404,19 @@ class Runner(ABC):
             return -0.5
         return score_rate(md, self.options.side)
 
+    
+    def set_starting_pos(self, game: chess.pgn.GameNode):
+        if self.options.starting_pos:
+            self.starting_node = find_node_by_position(game, self.options.starting_pos)
+        else:
+            self.starting_node = game
+
     def count_nodes(self, root_node):
         count = 0
         def visit(ply):
             nonlocal count
             count += 1
-        self._traverse(root_node, 0, visit)
+        self._traverse(root_node, visit)
         return count
 
 

@@ -17,10 +17,9 @@ from chess import WHITE
 from chess import BLACK
 
 
-from .options import CoreOptions, CheckerOptions, DEBUG_MODE
+from .options import CheckerOptions, DEBUG_MODE
 from .timer import clock
 from .database import *
-from .traversal import traverse, TraversalPolicy
 from .runner import *
 
 # TODO: identify unobvious moves
@@ -85,23 +84,6 @@ class PgnChecker(Runner):
             f"{input_stem} -- {timestamp}.pgn",
         )
 
-    def set_starting_pos(self, node: Node):
-        if not self.options.starting_pos:
-            self.starting_node = node
-            return node
-        
-        self.options.starting_pos = fen(self.options.starting_pos)
-        def visit(n: Node):
-            if fen(n).startswith(fen_essential_part(self.options.starting_pos)): # ==
-                self.starting_node = n
-                return n
-        tp = TraversalPolicy(check_alternatives=True) # we do it "manually" so that the start pos can be found in
-        # a nonmain line even if we check alternatives is set false by user
-        traverse(node, visit=visit, tp=tp, reasons_to_stop=lambda _, res: res is not None)
-        if not hasattr(self, "starting_node"):
-            raise ValueError(f"Starting position {self.options.starting_pos} not found in the PGN")
-
-    
     def _default_cache_path(self) -> str:
         base = "cache"
         name = "cache"
@@ -239,7 +221,7 @@ class PgnChecker(Runner):
         self.report(RunnerReport(kind="position", position=PositionSnapshot("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 0)))
         self.report_message("Marking moves...")
         self.progress.reset()
-        self._traverse(log_node, partial(Runner.mark_move_local, self))
+        self._traverse(log_node, partial(PgnChecker.mark_move_local, self))
 
     @staticmethod
     def annotate_transposition(first_occurrence: Node, node: Node):

@@ -17,6 +17,11 @@ def mainline_children(sides: tuple[chess.Color]) -> Callable[[Node], list[Node]]
         return node.variations
     return get_children
 
+def propagator_post(node, child_results):
+    for i in child_results:
+        if i:
+            return i
+
 TraversalPolicy = namedtuple("TraversalPolicy", ["start_ply", "end_ply", "get_children"], 
                              defaults=(0, 1000, default_children))
 
@@ -39,21 +44,20 @@ def traverse(node: Node,
 
     if reasons_to_stop:
         if reasons_to_stop(node, v_res):
-            return child_results
+            return v_res
 
     if node.ply() == end_ply:
-        return child_results
+        return v_res
 
-    vars = get_children(node)
+    variations = get_children(node)
 
-    for n in vars:
-        child_results += traverse(n, visit, post,
-            reasons_to_stop, tp, progress)
-        pass
+    for n in variations:
+        child_results.append(traverse(n, visit, post,
+            reasons_to_stop, tp, progress))
 
     if post:
         if start_ply <= node.ply() <= end_ply:
             if progress:
                 progress.step()
         return post(node, child_results)
-    return child_results
+    return v_res

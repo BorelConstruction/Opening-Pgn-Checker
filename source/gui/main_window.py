@@ -367,6 +367,7 @@ class EngineWorker(QObject):
         except Exception as e:
             self.error.emit(str(e))
             r.close()
+            raise e
             return
     
 

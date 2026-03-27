@@ -151,6 +151,17 @@ class GraphOptions(CoreOptions):
         metadata={"label": "Min edge weight to be shown", "min": 1, "max": 100}
     )
 
+    input_pgn: str = field(
+        default='',
+        metadata={
+            "label": "Input PGN",
+            "ui_hint": "file_path",
+            "file_filter": "PGN files (*.pgn)",
+            "initial_dir": "input pgns"
+        }
+    )
+
+
 feature_list = [CheckerOptions, GraphOptions]
 
 def save_settings(options_obj, options_class):
@@ -178,7 +189,7 @@ def save_settings(options_obj, options_class):
     with open(CONFIG_FILE, "w") as f:
         json.dump(full_config, f, indent=4)
 
-DEFAULT_CLASS_INDEX = 0
+DEFAULT_FEATURE_INDEX = 0
 
 def load_settings(options_class = None):
     if os.path.exists(CONFIG_FILE):
@@ -192,7 +203,7 @@ def load_settings(options_class = None):
         data = {}
 
     if not options_class:
-        class_index = data.get("feature_used", DEFAULT_CLASS_INDEX)
+        class_index = data.get("feature_used", DEFAULT_FEATURE_INDEX)
         options_class = feature_list[class_index]
 
     core_data = data.get("Core", {})
