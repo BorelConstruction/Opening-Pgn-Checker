@@ -191,13 +191,13 @@ class PgnChecker(Runner):
 
 
     def find_gaps(self, game: Node):
-        def post(node, child_results: list[GapsInfo]):
-            all_gaps = child_results
+        def post(node, child_results: list[GapsInfo], v_res):
+            all_gaps = sum([c for c in child_results if c is not None], [])
             if node.ply() < self.options.start_ply:
                 return all_gaps # only propagate the results
-            local_gaps = self.find_gaps_local(node) 
-            if local_gaps:
-                all_gaps.append(local_gaps)
+            gaps_local = self.find_gaps_local(node)
+            if gaps_local:
+                all_gaps.append(gaps_local)
             return all_gaps
         def reasons_to_stop(node, _): 
             return node.comment.startswith(('tr ', 'Tr ', 'Transp ', 'transp ', 'Transposes', 'transposes'))

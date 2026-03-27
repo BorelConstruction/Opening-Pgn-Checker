@@ -8,6 +8,7 @@ from collections.abc import Callable
 from abc import ABC, abstractmethod
 
 VisitResultT = TypeVar("VisitResultT")
+PostResultT = TypeVar("PostResultT")
 
 import berserk
 import chess
@@ -331,8 +332,8 @@ class Runner(ABC):
 
     def _traverse(self, node: Node,
                     visit: Optional[Callable[[Node], VisitResultT]] = None,
-                    post: Optional[Callable] = None,
-                    reasons_to_stop: Optional[Callable[[Node, Optional[VisitResultT]], bool]] = None,
+                    post: Optional[Callable[[Node, list, VisitResultT], PostResultT]] = None,
+                    reasons_to_stop: Optional[Callable[[Node, VisitResultT], bool]] = None,
                     get_children: Optional[Callable[[Node], list[Node]]] = lambda n: n.variations):
         '''Traverse the subtree rooted at node
         in a way consistent with self.options'''

@@ -17,7 +17,7 @@ def mainline_children(sides: tuple[chess.Color]) -> Callable[[Node], list[Node]]
         return node.variations
     return get_children
 
-def propagator_post(node, child_results):
+def propagator_post(node, child_results, v_res):
     for i in child_results:
         if i:
             return i
@@ -52,12 +52,17 @@ def traverse(node: Node,
     variations = get_children(node)
 
     for n in variations:
-        child_results.append(traverse(n, visit, post,
-            reasons_to_stop, tp, progress))
+        t = traverse(n, visit, post,
+            reasons_to_stop, tp, progress)
+        child_results.append(t)
+                            #  raverse(n, visit, post,
+            # reasons_to_stop, tp, progress))
 
     if post:
         if start_ply <= node.ply() <= end_ply:
             if progress:
                 progress.step()
-        return post(node, child_results)
+        p = post(node, child_results, v_res)
+        return p
+    # ost(node, child_results)
     return v_res
