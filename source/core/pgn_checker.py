@@ -66,11 +66,6 @@ class GapsInfo:
         return iter(self.gaps)
 
 
-@dataclass(frozen=True)
-class MoveCouplingEntry:
-    node: Node          # position where it's our turn to move
-    reply_uci: str      # a move that exists as a child variation from that node
-    
 class PgnChecker(Runner):
     def __init__(self, options: CheckerOptions, progress_cb=None, report_cb=None):
         super().__init__(options, progress_cb, report_cb)
@@ -127,7 +122,7 @@ class PgnChecker(Runner):
 
                     sys.stderr.write('starting to traverse...')
                     self.make_move_coupling_dict(node)
-                    self.seek_response_consistency(eval_eps=0.15, sleep_s=1.0)
+                    self.seek_response_consistency(self.move_coupling, eval_eps=0.15, sleep_s=1.0)
                     # self.find_fill_gaps(node)
                     # self.mark_moves(node)
                     print(output_game, file=open(self.options.output_pgn, "a", encoding="utf-8"), end="\n\n") # "a" for adding
@@ -444,16 +439,18 @@ class PgnChecker(Runner):
         return only_move_criterion(evals[0].eval, evals[1].eval)
     
     def make_move_coupling_dict(self, node: Node):
-        self.move_coupling: dict[str, list[MoveCouplingEntry]] = defaultdict(list)
+        # Key: previous move UCI (i.e., node.move at positions where it's our turn).
+        # Value: reply nodes (children) that result from different replies in that position.
+        self.move_coupling: dict[str, list[Node]] = defaultdict(list)
         def visit(n: Node):
             if n.turn() != self.options.side or n.move is None:
                 return
             key = n.move.uci()
             for child in self.variations(n):
-                self.move_coupling[key].append(MoveCouplingEntry(node=n, reply_uci=child.move.uci()))
+                self.move_coupling[key].append(child)
         self._traverse(node, visit)
 
-    def seek_response_consistency(self, *, eval_eps: float = 0.15, sleep_s: float = 2.0):
+    def seek_response_consistency(self, move_coupling: dict[str, list[Node]], *, eval_eps: float = 0.15, sleep_s: float = 2.0):
         """
         Try to make replies more same for same opponent moves.
 
@@ -462,59 +459,52 @@ class PgnChecker(Runner):
         as a respose to A. If so, try replacing B with other moves suggested in the file.
         (Thus moving closer to the dream rule "always play this if they play that")
         """
-        node_replacemenes = []
-        for prev_move_uci, entries in self.move_coupling.items():
-            if len(entries) <= 1:
+        move_replacements = []
+        for prev_move_uci, responses in move_coupling.items():
+            if len(responses) <= 1:
                 continue
 
-            reply_ucis = [e.reply_uci for e in entries]
+            reply_ucis = [child.move.uci() for child in responses]
             counts = Counter(reply_ucis)
             unique_replies = [uci for uci, c in counts.items() if c == 1]
             if not unique_replies:
                 continue
 
-            other_replies = [uci for uci in counts.keys()]
+            all_replies = [uci for uci in counts.keys()]
 
             for unique_reply_uci in unique_replies:
-                base_entry = next((e for e in entries if e.reply_uci == unique_reply_uci), None)
-                if base_entry is None:
-                    continue
+                unique_node = next(
+                    (child for child in responses if child.move and child.move.uci() == unique_reply_uci),
+                    None,
+                )
 
-                node = base_entry.node
-                board = node.board()
+                base_eval = self.query(fen(unique_node), "q-eval").eval
 
-                unique_reply = chess.Move.from_uci(unique_reply_uci)
-                board.push(unique_reply) # TODO: move_eval function
-                base_after_fen = fen(board)
-                base_eval = self.query(base_after_fen, "q-eval").eval
-                board.pop()
+                parent = unique_node.parent
 
-                c = f"Trying alternatives to {unique_reply_uci}... \n"
+                c = f"prev {prev_move_uci} | unique {unique_reply_uci} | "
                 self.report_position(
-                    node,
+                    parent,
                     message=(
-                        f"{c}(bucket size {len(entries)}). "
+                        f"{c}(bucket size {len(responses)}). "
                         f"q-eval after {unique_reply_uci}: {base_eval:+.2f}"
                     )
                 )
 
-                for alt_reply_uci in other_replies:
+                board = parent.board()
+                for alt_reply_uci in all_replies:
                     if alt_reply_uci == unique_reply_uci:
                         continue
-                    try:
-                        alt_move = chess.Move.from_uci(alt_reply_uci)
-                    except ValueError:
-                        self.report_position(node, message=f"Bad alt reply UCI {alt_reply_uci!r}.")
-                        continue
+                    alt_move = chess.Move.from_uci(alt_reply_uci)
 
                     if alt_move not in board.legal_moves:
                         self.report_position(
-                            node,
+                            parent,
                             message=f"{c}Try {alt_reply_uci}: illegal here (skipped).",
                         )
                         continue
 
-                    board.push(alt_move)
+                    board.push(alt_move) # TODO: eval_move fnc
                     alt_after_fen = fen(board)
                     alt_eval = self.query(alt_after_fen, "q-eval").eval
                     board.pop()
@@ -522,21 +512,20 @@ class PgnChecker(Runner):
                     diff = abs(alt_eval - base_eval)
                     status = "Replaceable" if diff <= eval_eps else ""
                     self.report_position(
-                        node,
+                        parent,
                         message=(
                             f"{c}Try {alt_reply_uci}: q-eval {alt_eval:+.2f} (diff {diff:.2f}) {status}".rstrip()
                         ),
                     )
+                    if status=="Replaceable":
+                        move_replacements.append((parent, alt_move))
+                        time.sleep(10)
+                        break # only try to replace with one alternative
 
-                    if status == "Replaceable":
-                        move_replacemenes += (node, alt_move)
-                        time.sleep(20)
-                        break  # no need to try other alts if we already found a good one
 
                 if sleep_s and sleep_s > 0:
                     time.sleep(sleep_s)
-                    
-        return node_replacemenes
+        return move_replacements
 
 
     def _add_variation(self, node: Node, move: Union[str, chess.Board], to_main: bool = False):

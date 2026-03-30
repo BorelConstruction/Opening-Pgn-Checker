@@ -10,8 +10,10 @@ DEBUG_MODE = False
 '''
     CoreOptions are the options that we expect to stay constant throughout the program.
     Note that this is is not the same as common options. For example,
-    two features may both use input_pgn/starting positions different ones,
+    two features may both use input_pgn/starting positions but different ones,
     and we want to keep them separate.
+    # TODO: just make each feature remember its own options? Then "feature 1. start_pos != feature 2. start_pos",
+    # and by default we can populate from other feature's options if they exist.
 '''
 
 @dataclass
