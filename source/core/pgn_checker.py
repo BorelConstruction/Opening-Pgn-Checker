@@ -1,7 +1,9 @@
+from collections import defaultdict, Counter
 import datetime
 import os
 import sys
 import tempfile
+import time
 import traceback
 from dataclasses import dataclass, field
 from functools import partial  # for currying
@@ -62,6 +64,12 @@ class GapsInfo:
 
     def __iter__(self):
         return iter(self.gaps)
+
+
+@dataclass(frozen=True)
+class MoveCouplingEntry:
+    node: Node          # position where it's our turn to move
+    reply_uci: str      # a move that exists as a child variation from that node
     
 class PgnChecker(Runner):
     def __init__(self, options: CheckerOptions, progress_cb=None, report_cb=None):
@@ -118,8 +126,10 @@ class PgnChecker(Runner):
                     node = self.starting_node
 
                     sys.stderr.write('starting to traverse...')
-                    self.find_fill_gaps(node)
-                    self.mark_moves(node)
+                    self.make_move_coupling_dict(node)
+                    self.seek_response_consistency(eval_eps=0.15, sleep_s=1.0)
+                    # self.find_fill_gaps(node)
+                    # self.mark_moves(node)
                     print(output_game, file=open(self.options.output_pgn, "a", encoding="utf-8"), end="\n\n") # "a" for adding
 
         except Exception as e:
@@ -133,7 +143,7 @@ class PgnChecker(Runner):
                 sys.stderr.write(f"Failed to save cache: {exc}\n")
             self._finalizer()
 
-        return f"Added {self.moves_added} moves"
+        # return f"Added {self.moves_added} moves"
     
     def fill_the_TT(self, root_node: Node):
         def visit(node: Node):
@@ -432,6 +442,102 @@ class PgnChecker(Runner):
         if len(evals) < 2:
             return True
         return only_move_criterion(evals[0].eval, evals[1].eval)
+    
+    def make_move_coupling_dict(self, node: Node):
+        self.move_coupling: dict[str, list[MoveCouplingEntry]] = defaultdict(list)
+        def visit(n: Node):
+            if n.turn() != self.options.side or n.move is None:
+                return
+            key = n.move.uci()
+            for child in self.variations(n):
+                self.move_coupling[key].append(MoveCouplingEntry(node=n, reply_uci=child.move.uci()))
+        self._traverse(node, visit)
+
+    def seek_response_consistency(self, *, eval_eps: float = 0.15, sleep_s: float = 2.0):
+        """
+        Try to make replies more same for same opponent moves.
+
+        Technically:
+        For each move A of opponent, see if there is a move B that is suggested only once
+        as a respose to A. If so, try replacing B with other moves suggested in the file.
+        (Thus moving closer to the dream rule "always play this if they play that")
+        """
+        node_replacemenes = []
+        for prev_move_uci, entries in self.move_coupling.items():
+            if len(entries) <= 1:
+                continue
+
+            reply_ucis = [e.reply_uci for e in entries]
+            counts = Counter(reply_ucis)
+            unique_replies = [uci for uci, c in counts.items() if c == 1]
+            if not unique_replies:
+                continue
+
+            other_replies = [uci for uci in counts.keys()]
+
+            for unique_reply_uci in unique_replies:
+                base_entry = next((e for e in entries if e.reply_uci == unique_reply_uci), None)
+                if base_entry is None:
+                    continue
+
+                node = base_entry.node
+                board = node.board()
+
+                unique_reply = chess.Move.from_uci(unique_reply_uci)
+                board.push(unique_reply) # TODO: move_eval function
+                base_after_fen = fen(board)
+                base_eval = self.query(base_after_fen, "q-eval").eval
+                board.pop()
+
+                c = f"Trying alternatives to {unique_reply_uci}... \n"
+                self.report_position(
+                    node,
+                    message=(
+                        f"{c}(bucket size {len(entries)}). "
+                        f"q-eval after {unique_reply_uci}: {base_eval:+.2f}"
+                    )
+                )
+
+                for alt_reply_uci in other_replies:
+                    if alt_reply_uci == unique_reply_uci:
+                        continue
+                    try:
+                        alt_move = chess.Move.from_uci(alt_reply_uci)
+                    except ValueError:
+                        self.report_position(node, message=f"Bad alt reply UCI {alt_reply_uci!r}.")
+                        continue
+
+                    if alt_move not in board.legal_moves:
+                        self.report_position(
+                            node,
+                            message=f"{c}Try {alt_reply_uci}: illegal here (skipped).",
+                        )
+                        continue
+
+                    board.push(alt_move)
+                    alt_after_fen = fen(board)
+                    alt_eval = self.query(alt_after_fen, "q-eval").eval
+                    board.pop()
+
+                    diff = abs(alt_eval - base_eval)
+                    status = "Replaceable" if diff <= eval_eps else ""
+                    self.report_position(
+                        node,
+                        message=(
+                            f"{c}Try {alt_reply_uci}: q-eval {alt_eval:+.2f} (diff {diff:.2f}) {status}".rstrip()
+                        ),
+                    )
+
+                    if status == "Replaceable":
+                        move_replacemenes += (node, alt_move)
+                        time.sleep(20)
+                        break  # no need to try other alts if we already found a good one
+
+                if sleep_s and sleep_s > 0:
+                    time.sleep(sleep_s)
+                    
+        return node_replacemenes
+
 
     def _add_variation(self, node: Node, move: Union[str, chess.Board], to_main: bool = False):
         if isinstance(move, str):
@@ -532,6 +638,8 @@ def only_move_criterion(eval1: float, eval2: float):
     return False
 
 
+# def seek_consistency(self, node: Node):
+    replies = self.move_coupling[node.move.uci()]
 
 class FirstDifference(NamedTuple):
     ply: int

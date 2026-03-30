@@ -7,6 +7,13 @@ CONFIG_FILE = "settings.json"
 
 DEBUG_MODE = False
 
+'''
+    CoreOptions are the options that we expect to stay constant throughout the program.
+    Note that this is is not the same as common options. For example,
+    two features may both use input_pgn/starting positions different ones,
+    and we want to keep them separate.
+'''
+
 @dataclass
 class CoreOptions:
     # --- ENGINE GROUP ---
@@ -28,11 +35,6 @@ class CoreOptions:
     check_alternatives: bool = field(
         default=False,
         metadata={"label": "Check Our Alternatives"}
-    )
-
-    starting_pos: str = field(
-        default="",
-        metadata={"label": "Starting Position (FEN)"}
     )
 
 
@@ -62,6 +64,11 @@ class CheckerOptions(CoreOptions):
             "file_filter": "PGN files (*.pgn)",
             "initial_dir": "input pgns"
         }
+    )
+
+    starting_pos: str = field(
+        default="",
+        metadata={"label": "Starting Position (FEN)"}
     )
 
     play_white: bool = field(
@@ -123,6 +130,20 @@ class CheckerOptions(CoreOptions):
 
 @dataclass
 class GraphOptions(CoreOptions):
+    input_pgn: str = field(
+        default='',
+        metadata={
+            "label": "Input PGN",
+            "ui_hint": "file_path",
+            "file_filter": "PGN files (*.pgn)",
+            "initial_dir": "input pgns"
+        }
+    )
+    
+    starting_pos: str = field(
+        default="",
+        metadata={"label": "Starting Position (FEN)"}
+    )
     # def __post_init__(self):
     #     self.validate()
 
@@ -141,25 +162,11 @@ class GraphOptions(CoreOptions):
         metadata={"label": "Minimum Number of Games", "min": 1, "max": 1000}
     )
 
-    starting_pos: str = field(
-        default="",
-        metadata={"label": "Starting Position (FEN)"}
-    )
-
     min_observations: int = field(
         default=3,
         metadata={"label": "Min edge weight to be shown", "min": 1, "max": 100}
     )
 
-    input_pgn: str = field(
-        default='',
-        metadata={
-            "label": "Input PGN",
-            "ui_hint": "file_path",
-            "file_filter": "PGN files (*.pgn)",
-            "initial_dir": "input pgns"
-        }
-    )
 
 
 feature_list = [CheckerOptions, GraphOptions]

@@ -295,7 +295,8 @@ class Runner(ABC):
         self.report(RunnerReport(kind = "msg", message=msg))
 
     def report_position(self, node: Node, message: Optional[str] = None):
-        self.report(RunnerReport(kind = "position", position=PositionSnapshot(fen(node)), message=message))
+        pos_snap = PositionSnapshot(fen(node), node.ply(), last_move_uci=node.move.uci() if node.move else None)
+        self.report(RunnerReport(kind = "position", position=pos_snap, message=message))
 
     def _cleanup(self):
         if self._engine is not None:
@@ -330,15 +331,23 @@ class Runner(ABC):
             lichessClient = berserk.Client()
         self.opening_explorer = lichessClient.opening_explorer
 
+    def variations(self, node: Node) ->  list[Node]:
+        '''Node.variations consistent with our mainline preferences.'''
+
+        mainline_sides = () if self.options.check_alternatives else (self.options.side,)
+        return mainline_children(mainline_sides)(node)
+
     def _traverse(self, node: Node,
                     visit: Optional[Callable[[Node], VisitResultT]] = None,
                     post: Optional[Callable[[Node, list, VisitResultT], PostResultT]] = None,
                     reasons_to_stop: Optional[Callable[[Node, VisitResultT], bool]] = None,
-                    get_children: Optional[Callable[[Node], list[Node]]] = lambda n: n.variations):
+                    get_children: Optional[Callable[[Node], list[Node]]] = None):
         '''Traverse the subtree rooted at node
         in a way consistent with self.options'''
-        mainline_sides = () if self.options.check_alternatives else (self.options.side,)
-        get_children = mainline_children(mainline_sides)
+
+        if get_children is None:
+            get_children = self.variations
+
         tp = TraversalPolicy(
             start_ply=self.options.start_ply,
             end_ply=self.options.end_ply,

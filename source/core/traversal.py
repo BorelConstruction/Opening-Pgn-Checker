@@ -52,17 +52,12 @@ def traverse(node: Node,
     variations = get_children(node)
 
     for n in variations:
-        t = traverse(n, visit, post,
-            reasons_to_stop, tp, progress)
-        child_results.append(t)
-                            #  raverse(n, visit, post,
-            # reasons_to_stop, tp, progress))
+        child_results.append(traverse(n, visit, post,
+            reasons_to_stop, tp, progress))
 
     if post:
         if start_ply <= node.ply() <= end_ply:
             if progress:
                 progress.step()
-        p = post(node, child_results, v_res)
-        return p
-    # ost(node, child_results)
+        return post(node, child_results)
     return v_res

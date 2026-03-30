@@ -70,7 +70,7 @@ def find_node_by_position(node: Node, fen_str: str) -> Node:
         
     n = traverse(node, visit=visit, reasons_to_stop=lambda _, res: res is not None, post=propagator_post)
     if not n:
-        raise ValueError(f"Starting position {fen} not found in the tree")
+        raise ValueError(f"Starting position {fen_str} not found in the tree")
     return n
 
 def opposite_side(side: chess.Color) -> chess.Color:

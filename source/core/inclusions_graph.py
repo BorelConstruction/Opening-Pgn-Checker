@@ -510,8 +510,6 @@ def build_inclusion_graph(
 
     graph = PgnInclusionGraph(get_children=get_children, get_db_stats=get_db_stats, edge_weights=get_edge_weights)
 
-    depth = end_ply - start_ply #############
-
     print(f"Building graph...")
     graph.build(root, start_ply, end_ply)
     print(f"  {graph.graph.number_of_nodes()} nodes, {graph.graph.number_of_edges()} edges.")

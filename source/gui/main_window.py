@@ -198,6 +198,8 @@ class MainWindow(QWidget):
         for field in fields(options_class):
             if field.metadata.get("ui_hint") == "manually":
                 continue
+            if exclude_core and field.name in core_fields:
+                continue  # Skip options already shown in the Core section
 
             name = field.name
             val = getattr(self.options, field.name)
@@ -205,8 +207,6 @@ class MainWindow(QWidget):
             widget = create_widget_for_field(field, val, label=label)
 
             i += 1
-            if exclude_core and field.name in core_fields:
-                continue  # Skip options already shown in the Core section
 
             col = i // MAX_ROWS
             row = (i % MAX_ROWS) * 2
