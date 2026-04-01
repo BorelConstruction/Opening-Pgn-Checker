@@ -59,5 +59,5 @@ def traverse(node: Node,
         if start_ply <= node.ply() <= end_ply:
             if progress:
                 progress.step()
-        return post(node, child_results)
+        return post(node, child_results, v_res)
     return v_res

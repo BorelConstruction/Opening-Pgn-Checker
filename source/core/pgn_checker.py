@@ -121,10 +121,11 @@ class PgnChecker(Runner):
                     node = self.starting_node
 
                     sys.stderr.write('starting to traverse...')
-                    self.make_move_coupling_dict(node)
-                    self.seek_response_consistency(self.move_coupling, eval_eps=0.15, sleep_s=1.0)
-                    # self.find_fill_gaps(node)
-                    # self.mark_moves(node)
+
+                    # self.seek_move_consistency(node)
+
+                    self.find_fill_gaps(node)
+                    self.mark_moves(node)
                     print(output_game, file=open(self.options.output_pgn, "a", encoding="utf-8"), end="\n\n") # "a" for adding
 
         except Exception as e:
@@ -352,53 +353,79 @@ class PgnChecker(Runner):
 
         return moves
 
+    def add_moves_us(self, node: Node) -> tuple[Node, MoveChoice]:
+        our_move_choices = self.generate_moves_us(node)
+        best_choice = our_move_choices[0]
+        best_move_child = self._add_variation(node, best_choice.move, to_main=True)
+
+        if best_choice.reason == "tr":
+            self.annotate_transposition(self.cache[fen(best_move_child)].TTed[0], best_move_child)
+            return best_move_child, best_choice
+
+        for choice in our_move_choices[1:]:
+            child = self._add_variation(node, choice.move)
+            update_comment(child, choice.comment)
+
+        best_move_child.nags.update(self.nags_our_move(best_move_child))
+        return best_move_child, best_choice
+
+    def add_moves_them(self, node: Node) -> list[Node]:
+        children = []
+        opponent_move_choices = self.generate_moves_them(node, maybe_use_engine=True)
+
+        for choice in opponent_move_choices:
+            reply_child = self._add_variation(node, choice.move)
+            update_comment(reply_child, choice.comment)
+            children.append(reply_child)
+
+        return children
+
     def add_sample_line(self, log_node: Node, depth: int = 5):
         sys.stderr.write(f"\nAdding sample line for {fen(log_node)}...")
         leaf_node = True
+        best_move_child = log_node
+        best_choice: Optional[MoveChoice] = None
         try:
-            e = self.query(fen(log_node), "eval").top(2) 
-            # TODO: ^ reliable way to know in advance how many lines we will know, so that we never call top(1) before top(2)
+            self.report_position(log_node, message=f"Adding sample line... Depth: {depth}")
 
-            self.set_question_marks(log_node)
+            if log_node.turn() == self.options.side:
+                e = self.query(fen(log_node), "eval").top(2) 
+                # TODO: ^ reliable way to know in advance how many lines we will know, so that we never call top(1) before top(2)
 
-            our_move_choices = self.generate_moves_us(log_node)
-            best_move_child = self._add_variation(log_node, our_move_choices[0].move, to_main=True)
-            if our_move_choices[0].reason == "tr":
-                self.annotate_transposition(self.cache[fen(best_move_child)].TTed, best_move_child)
-                return
-            
-            for m in our_move_choices[1:]:
-                child = self._add_variation(log_node, m.move)
-                update_comment(child, m.comment)
+                self.set_question_marks(log_node)
 
+                best_move_child, best_choice = self.add_moves_us(log_node)
+                if best_choice.reason == "tr":
+                    return
 
-            nags = self.nags_our_move(best_move_child)
-            best_move_child.nags.update(nags)
+                if self.only_move_criterion(fen(log_node)) and depth <= 0:  # don't want to finish with an obvious move
+                    depth += 2
 
-            if self.only_move_criterion(fen(log_node)) and depth<=0: # don't want to finish with an obvious move
-                depth += 2
+                if depth <= 0:  # even if depth was 0 we first added a move for ourselves
+                    return
 
-            if depth <= 0:  # even if depth was 0 we first add a move for ourselves
-                return
+                if (e[0].eval > 2 and len(e) > 1 and e[1].eval > 2):
+                    # self.we_are_winning
+                    update_comment(best_move_child, f"Eval: {e[0].eval:.2f}", True)
+                    return
+                depth -= 1
 
-            if e[0].eval > 2 and len(e) > 1 and e[1].eval > 2:
-                # if self.they_are_lost(node):
-                update_comment(best_move_child, f"Eval: {e[0].eval:.2f}", True)
-                return
-           
-            opponent_move_choices = self.generate_moves_them(best_move_child, maybe_use_engine=True)
-
-            for move, reason, _, comment in opponent_move_choices:
-                reply_child = self._add_variation(best_move_child, move)
-                update_comment(reply_child, comment)                
-
-                leaf_node = False
-
-                self.add_sample_line(reply_child,depth=depth - 2) 
+            children = self.add_moves_them(best_move_child, maybe_use_engine=True)
+            depth -= 1
+            for child in children:
+                self.add_sample_line(child, depth=depth)
+            leaf_node = not children
 
         finally: # add an evaluation nag at the end of the line
-            if leaf_node and abs(our_move_choices[0].eval) > 0.3:
-                best_move_child.nags.add(eval_to_nag(pov_eval_to_white_eval(our_move_choices[0].eval, self.options.side)))
+            if (
+                leaf_node
+                and best_choice is not None
+                and best_choice.eval is not None
+                and abs(best_choice.eval) > 0.3
+            ):
+                best_move_child.nags.add(
+                    eval_to_nag(pov_eval_to_white_eval(best_choice.eval, self.options.side))
+                )
 
         
     def set_question_marks(self, node: Node, eval_query="eval"):
@@ -450,7 +477,7 @@ class PgnChecker(Runner):
                 self.move_coupling[key].append(child)
         self._traverse(node, visit)
 
-    def seek_response_consistency(self, move_coupling: dict[str, list[Node]], *, eval_eps: float = 0.15, sleep_s: float = 2.0):
+    def move_replacements(self, move_coupling: dict[str, list[Node]], *, eval_eps: float = 0.15, sleep_s: float = 2.0):
         """
         Try to make replies more same for same opponent moves.
 
@@ -504,10 +531,11 @@ class PgnChecker(Runner):
                         )
                         continue
 
-                    board.push(alt_move) # TODO: eval_move fnc
-                    alt_after_fen = fen(board)
-                    alt_eval = self.query(alt_after_fen, "q-eval").eval
-                    board.pop()
+                    alt_eval = self.q_eval_move(parent, alt_move).eval
+                    # board.push(alt_move) # TODO: eval_move fnc
+                    # alt_after_fen = fen(board)
+                    # alt_eval = self.query(alt_after_fen, "q-eval").eval
+                    # board.pop()
 
                     diff = abs(alt_eval - base_eval)
                     status = "Replaceable" if diff <= eval_eps else ""
@@ -518,29 +546,29 @@ class PgnChecker(Runner):
                         ),
                     )
                     if status=="Replaceable":
-                        move_replacements.append((parent, alt_move))
-                        time.sleep(10)
+                        move_replacements.append((parent, alt_move, diff))
+                        # time.sleep(10)
                         break # only try to replace with one alternative
 
 
                 if sleep_s and sleep_s > 0:
-                    time.sleep(sleep_s)
+                    # time.sleep(sleep_s)
+                    pass
         return move_replacements
 
+    def seek_move_consistency(self, node: Node):
+        self.make_move_coupling_dict(node)
+        self.moves_added = 0
+        l = self.move_replacements(self.move_coupling, eval_eps=0.15, sleep_s=1.0)
+        self.progress.reset()
+        for parent, alt_move, diff in self.progress.iter(l):
+            child = next((child for child in parent.variations if child.move == alt_move), None)
+            if child is not None:
+                continue # already have this move as a variation, no need to add it again
+            child = self._add_variation(parent, alt_move)
+            update_comment(child, f"For consistency, diff is {diff:.2f}")
+            self.add_sample_line(child)
 
-    def _add_variation(self, node: Node, move: Union[str, chess.Board], to_main: bool = False):
-        if isinstance(move, str):
-            move = chess.Move.from_uci(move)
-        if to_main:
-            child = node.add_main_variation(move)
-        else:
-            child = node.add_variation(move)
-        self._record_position_in_TT(child)
-        self.moves_added += 1
-        return child
-    def _record_position_in_TT(self, node): # TODO: when do we add?
-        if not self.cache[fen(node)].TTed:
-            self.cache[fen(node)].TTed = node
 
 def color_from_freq(freq) -> str:
     '''returns the color for an arrow, depending on
@@ -627,36 +655,34 @@ def only_move_criterion(eval1: float, eval2: float):
     return False
 
 
-# def seek_consistency(self, node: Node):
-    replies = self.move_coupling[node.move.uci()]
-
 class FirstDifference(NamedTuple):
     ply: int
     # move: chess.Move
     move: str
 
+def node_moves(n: Node) -> list[chess.Move]:
+    stack: list[chess.Move] = []
+    cur = n
+    while cur is not None and getattr(cur, "move", None) is not None:
+        stack.append(node_san(cur))
+        cur = cur.parent
+    stack.reverse()
+    return stack
 
 def first_difference(n1: Node, n2: Node) -> Optional[FirstDifference]:
     """
-    Compare two move sequences ending at `n1` and `n2` and return the first move
-    that differs in `n1`, together with the ply at which it occurs.
+    Compare two move sequences ending at 'n1' and 'n2' and return the first move
+    that differs in 'n1', together with the ply at which it occurs.
 
-    If `n2` is a prefix of `n1`, returns the next move from `n1`.
-    If there is no differing move in `n1` (identical lines, or `n1` is shorter),
+    If 'n2' is a prefix of 'n1', returns the next move from 'n1'.
+    If there is no differing move in 'n1' (identical lines, or 'n1' is shorter),
     returns None.
     """
     stack1: list[chess.Move] = []
     stack2: list[chess.Move] = []
 
-    cur = n1
-    while cur is not None and getattr(cur, "move", None) is not None:
-        stack1.append(node_san(cur))
-        cur = cur.parent
-
-    cur = n2
-    while cur is not None and getattr(cur, "move", None) is not None:
-        stack2.append(node_san(cur))
-        cur = cur.parent
+    stack1 = node_moves(n1)
+    stack2 = node_moves(n2)
 
     stack1.reverse()
     stack2.reverse()
