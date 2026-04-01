@@ -259,36 +259,46 @@ class MainWindow(QWidget):
 
 
     def on_run(self):
-        self.options = self.get_current_options()
-        self.save_settings()
+        try:
+            self.options = self.get_current_options()
+            self.save_settings()
 
-        self.progress_bar.setValue(0)
-        self.show_runtime_widgets()
+            self.progress_bar.setValue(0)
+            self.show_runtime_widgets()
 
-        self.options.validate()
+            self.options.validate()
 
-        self.setEnabled(False)
+            self.setEnabled(False)
 
-        self.thread = QThread(self)
-        runner = OPT_TO_FEATURE[self.options_class]
-        self.worker = EngineWorker(self.options, runner)
-        if not getenv("APP_DEBUG") == "1":
-            self.worker.moveToThread(self.thread)
+            self.thread = QThread(self)
+            runner = OPT_TO_FEATURE[self.options_class]
+            self.worker = EngineWorker(self.options, runner)
+            if not getenv("APP_DEBUG") == "1":
+                self.worker.moveToThread(self.thread)
 
-        # connections
-        self.thread.started.connect(self.worker.run)
-        self.worker.progress.connect(self.on_progress)
-        self.worker.finished.connect(self.on_finished)
-        self.worker.error.connect(self.on_error)
-        self.worker.report.connect(self.on_engine_report)
+            # connections
+            self.thread.started.connect(self.worker.run)
+            self.worker.progress.connect(self.on_progress)
+            self.worker.finished.connect(self.on_finished)
+            self.worker.error.connect(self.on_error)
+            self.worker.report.connect(self.on_engine_report)
 
-        # cleanup (very important)
-        self.worker.finished.connect(self.thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
+            # cleanup (very important)
+            self.worker.finished.connect(self.thread.quit)
+            self.worker.finished.connect(self.worker.deleteLater)
+            self.thread.finished.connect(self.thread.deleteLater)
 
-        self.thread.start()
-        # self.thread.run()
+            self.thread.start()
+            # self.thread.run()
+        except Exception:
+            # Catch synchronous errors before the worker thread even starts
+            self.setEnabled(True)
+            self.hide_runtime_widgets()
+            e = sys.exc_info()[1]
+            self.report_error(f"{e}")
+            if DEBUG_MODE:
+                raise
+            return
 
     def save_settings(self):
         save_settings(self.options, self.options_class)
@@ -298,10 +308,13 @@ class MainWindow(QWidget):
         self.setEnabled(True)
         QMessageBox.information(self, "Analysis finished.", report)
 
+    def report_error(self, message):
+        QMessageBox.critical(self, "Error", message)
+
     def on_error(self, message):
         self.setEnabled(True)
         self.hide_runtime_widgets()
-        QMessageBox.critical(self, "Engine error", message)
+        self.report_error(message)
 
     def on_progress(self, current, total):
         self.progress_bar.setMaximum(total)
@@ -357,18 +370,20 @@ class EngineWorker(QObject):
 
     @Slot()
     def run(self):
+        r = None
+        report = None
         try:
             r = self.runner_cls(self.options, self.progress.emit, self.report.emit)
             print(self.options)
             report = r.run()
-            # test.test(self.options)
-            r.close()
-            self.finished.emit(report)
         except Exception as e:
-            self.error.emit(str(e))
-            r.close()
-            raise e
+            self.error.emit(f"{e}")
             return
+        finally:
+            if r is not None:
+                r.close()
+
+        self.finished.emit(report)
     
 
 class BoardWidget(QSvgWidget):

@@ -138,7 +138,7 @@ class CheckerOptions(CoreOptions):
         super().validate()
         if not self.input_pgn:
             raise ValueError("No opening PGN selected")
-        if "Fill Gaps" in self.actions and "Find Gaps" not in self.actions:
+        if "fill_gaps" in self.actions and "find_gaps" not in self.actions:
             raise ValueError("Fill Gaps action requires Find Gaps to be selected")
 
 @dataclass

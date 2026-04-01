@@ -106,8 +106,7 @@ class Progress:
         old_total = self.total
         old_done = self.done
 
-        self.total = total
-        self.done = 0
+        self.set_total(total)
 
         self._emit()
         try:
@@ -115,7 +114,7 @@ class Progress:
                 yield item
                 self.done += 1
                 self._emit()
-        finally:
+        finally: # Do we need this?
             self.total = old_total
             self.done = old_done
 
