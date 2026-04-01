@@ -75,7 +75,17 @@ class PgnChecker(Runner):
         self.options.adaptive_an = True # TODO
 
         self.set_output_pgn()
-        
+
+    def pipeline(self):
+        # a skeleton for when the logic gets more complex
+        pipeline = []
+        if "fill_gaps" in self.options.actions:
+            pipeline.append(self.find_fill_gaps)
+        if "mark_moves" in self.options.actions:
+            pipeline.append(self.mark_moves)
+        if "find_gaps" in self.options.actions:
+            pipeline.append(self.seek_move_consistency)    
+        return pipeline
 
     def set_output_pgn(self):
         output_dir = "output pgns" # should we give the user a choice?
@@ -122,10 +132,9 @@ class PgnChecker(Runner):
 
                     sys.stderr.write('starting to traverse...')
 
-                    # self.seek_move_consistency(node)
+                    for action in self.pipeline():
+                        action(node)
 
-                    self.find_fill_gaps(node)
-                    self.mark_moves(node)
                     print(output_game, file=open(self.options.output_pgn, "a", encoding="utf-8"), end="\n\n") # "a" for adding
 
         except Exception as e:

@@ -458,7 +458,7 @@ def browse_file(widget, dir: str):
 
 def create_selector(options: dict):
 
-    container = QGroupBox("Select Databases")
+    container = QGroupBox("Select One or More")
     layout = QHBoxLayout(container) # Horizontal looks better for small lists
     
     checkboxes = []

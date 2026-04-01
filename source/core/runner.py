@@ -48,7 +48,7 @@ class RunnerReport:
 class PosCache:
     def __init__(self, fen: str):
         self.fen = fen
-        self.TTed : Node = None # "seen in the relevant part of the pgn file"
+        self.TTed : list[Node] = [] # "seen in the relevant part of the pgn file"
         self._data = {}
 
     def get(self, label, query_fn):
@@ -428,6 +428,29 @@ class Runner(ABC):
             count += 1
         self._traverse(root_node, visit)
         return count
+    
+    def _add_variation(self, node: Node, move: Union[str, chess.Board], to_main: bool = False):
+        if isinstance(move, str):
+            move = chess.Move.from_uci(move)
+        if to_main:
+            child = node.add_main_variation(move)
+        else:
+            child = node.add_variation(move)
+        self._record_position_in_TT(child)
+        if hasattr(self, "moves_added"):
+            self.moves_added += 1
+        return child
+    def _record_position_in_TT(self, node): # TODO: when do we add?
+        if not self.cache[fen(node)].TTed:
+            self.cache[fen(node)].TTed.append(node) 
+    
+    def q_eval_move(self, board: Union[Node, chess.Board], move: Union[chess.Move, str]) -> EngineEval:
+        if isinstance(board, Node):
+            board = board.board()
+        if isinstance(move, str):
+            move = chess.Move.from_uci(move)
+        board.push(move)
+        return self.query(fen(board), 'q-eval')
 
 
   

@@ -58,6 +58,7 @@ class CoreOptions:
 
 @dataclass
 class CheckerOptions(CoreOptions):
+    # --- WHAT TO WORK WITH ---
     input_pgn: str = field(
         default='',  # so it doesn't complain if we try to initialize an "empty" one
         metadata={
@@ -73,11 +74,19 @@ class CheckerOptions(CoreOptions):
         metadata={"label": "Starting Position (FEN)"}
     )
 
+    # --- HOW TO WORK WITH IT ---
     play_white: bool = field(
         default=True,
         metadata={
-            "label": "Play As White",
+            "label": "Play as White",
         }
+    )
+
+    # --- WHAT TO DO WITH IT ---
+    actions: list = field(
+        default_factory=lambda: ["find_gaps"],
+        metadata={"label": "Actions", "options": {"Find Gaps": "find_gaps", "Fill Gaps": "fill_gaps",
+                                                   "Mark Moves": "mark_moves", "Seek Consistency": "seek_consistency"}}
     )
 
     # --- MOVE CHOICE ---
@@ -129,6 +138,8 @@ class CheckerOptions(CoreOptions):
         super().validate()
         if not self.input_pgn:
             raise ValueError("No opening PGN selected")
+        if "Fill Gaps" in self.actions and "Find Gaps" not in self.actions:
+            raise ValueError("Fill Gaps action requires Find Gaps to be selected")
 
 @dataclass
 class GraphOptions(CoreOptions):
