@@ -1,6 +1,7 @@
 from collections import defaultdict, Counter
 import datetime
 import os
+from platform import node
 import sys
 import tempfile
 import time
@@ -76,6 +77,13 @@ class PgnChecker(Runner):
 
         self.set_output_pgn()
 
+        self.convert_moves_to_plies()
+
+    def convert_moves_to_plies(self):
+        self.options.start_ply = ply_from_move_number(self.options.start_move)
+        self.options.end_ply = ply_from_move_number(self.options.end_move)
+        self.options.added_depth = (self.options.added_depth + 1) // 2
+
     def pipeline(self):
         # a skeleton for when the logic gets more complex
         pipeline = []
@@ -83,8 +91,8 @@ class PgnChecker(Runner):
             pipeline.append(self.find_fill_gaps)
         if "mark_moves" in self.options.actions:
             pipeline.append(self.mark_moves)
-        if "find_gaps" in self.options.actions:
-            pipeline.append(self.seek_move_consistency)    
+        if "seek_consistency" in self.options.actions:
+            pipeline.append(self.seek_move_consistency)
         return pipeline
 
     def set_output_pgn(self):
@@ -104,13 +112,17 @@ class PgnChecker(Runner):
             name = os.path.splitext(os.path.basename(self.options.input_pgn))[0]
         return os.path.join(base, f"{name}.json")
     
+    def make_headers(self, game):
+        if game.headers["Event"] == '?':
+            game.headers["Event"] = f'''plies {self.options.start_ply}-{self.options.end_ply}'''
+        else:
+            game.headers["Event"] = game.headers["Event"] + f''' | plies {self.options.start_ply}-{self.options.end_ply}'''
+    
     @clock
     def run(self):
         try:
             with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
-                num = 0
                 while True:
-                    num += 1
                     node = chess.pgn.read_game(pgnFile)
 
                     if node is None:
@@ -121,11 +133,8 @@ class PgnChecker(Runner):
                     self.cache.enable_auto_save()
                     total = sum(1 for _ in self.cache if self.cache[_].TTed)
                     self.progress.set_total(total)
-                    output_game = node  # no need to copy they way it currently works
-                    if node.headers["Event"] == '?':
-                        output_game.headers["Event"] = f'''plies {self.options.start_ply}-{self.options.end_ply}'''
-                    else:
-                        output_game.headers["Event"] = node.headers["Event"] + f''' | plies {self.options.start_ply}-{self.options.end_ply}'''
+                    output_game = node  # no need to copy the way it currently works
+                    self.make_headers(output_game)
 
                     self.set_starting_pos(output_game)
                     node = self.starting_node
@@ -148,7 +157,7 @@ class PgnChecker(Runner):
                 sys.stderr.write(f"Failed to save cache: {exc}\n")
             self._finalizer()
 
-        # return f"Added {self.moves_added} moves"
+        return f"Added {self.moves_added} moves"
     
     def fill_the_TT(self, root_node: Node):
         def visit(node: Node):
@@ -395,7 +404,8 @@ class PgnChecker(Runner):
         best_move_child = log_node
         best_choice: Optional[MoveChoice] = None
         try:
-            self.report_position(log_node, message=f"Adding sample line... Depth: {depth}")
+            self.report_position(log_node, message=f"Adding sample line... Depth: {depth}." 
+                                 + f"\n {moves_to_algebraic(node_moves(log_node))}")
 
             if log_node.turn() == self.options.side:
                 e = self.query(fen(log_node), "eval").top(2) 
@@ -419,7 +429,7 @@ class PgnChecker(Runner):
                     return
                 depth -= 1
 
-            children = self.add_moves_them(best_move_child, maybe_use_engine=True)
+            children = self.add_moves_them(best_move_child)
             depth -= 1
             for child in children:
                 self.add_sample_line(child, depth=depth)
@@ -541,10 +551,6 @@ class PgnChecker(Runner):
                         continue
 
                     alt_eval = self.q_eval_move(parent, alt_move).eval
-                    # board.push(alt_move) # TODO: eval_move fnc
-                    # alt_after_fen = fen(board)
-                    # alt_eval = self.query(alt_after_fen, "q-eval").eval
-                    # board.pop()
 
                     diff = abs(alt_eval - base_eval)
                     status = "Replaceable" if diff <= eval_eps else ""
@@ -569,7 +575,6 @@ class PgnChecker(Runner):
         self.make_move_coupling_dict(node)
         self.moves_added = 0
         l = self.move_replacements(self.move_coupling, eval_eps=0.15, sleep_s=1.0)
-        self.progress.reset()
         for parent, alt_move, diff in self.progress.iter(l):
             child = next((child for child in parent.variations if child.move == alt_move), None)
             if child is not None:
@@ -663,56 +668,6 @@ def only_move_criterion(eval1: float, eval2: float):
         return True
     return False
 
-
-class FirstDifference(NamedTuple):
-    ply: int
-    # move: chess.Move
-    move: str
-
-def node_moves(n: Node) -> list[chess.Move]:
-    stack: list[chess.Move] = []
-    cur = n
-    while cur is not None and getattr(cur, "move", None) is not None:
-        stack.append(node_san(cur))
-        cur = cur.parent
-    stack.reverse()
-    return stack
-
-def first_difference(n1: Node, n2: Node) -> Optional[FirstDifference]:
-    """
-    Compare two move sequences ending at 'n1' and 'n2' and return the first move
-    that differs in 'n1', together with the ply at which it occurs.
-
-    If 'n2' is a prefix of 'n1', returns the next move from 'n1'.
-    If there is no differing move in 'n1' (identical lines, or 'n1' is shorter),
-    returns None.
-    """
-    stack1: list[chess.Move] = []
-    stack2: list[chess.Move] = []
-
-    stack1 = node_moves(n1)
-    stack2 = node_moves(n2)
-
-    stack1.reverse()
-    stack2.reverse()
-
-    common_len = min(len(stack1), len(stack2))
-    for i in range(common_len):
-        if stack1[i] != stack2[i]:
-            return FirstDifference(i + 1, stack1[i])
-
-    if len(stack1) > len(stack2):
-        i = len(stack2)
-        return FirstDifference(i + 1, stack1[i])
-
-    return None
-
-def node_san(n: Node) -> str:
-    b = n.parent.board()
-    return b.san(n.move)
-
-def uci_to_san(uci: str, board: chess.Board) -> str:
-    return board.san(chess.Move.from_uci(uci))
 
 def gap_criterion(move_data: dict, move_freq: float, freq_threshold: float, min_games: int = 0, pov: chess.Color = WHITE) -> int:
     if score_rate(move_data, pov) > 0.75: # _datawe assume files don't need to consider moves that lose in practice

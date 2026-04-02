@@ -128,7 +128,7 @@ class MainWindow(QWidget):
         # text feedback
         self.feedback = QTextEdit()
         self.feedback.setReadOnly(True)
-        self.feedback.setMaximumHeight(120)
+        self.feedback.setMaximumHeight(200)
         self.feedback.setVisible(False)
         # font = QFont("Consolas")      # "Courier New", "Monospace"
         # font.setPointSize(13)
@@ -136,7 +136,7 @@ class MainWindow(QWidget):
         self.feedback.setStyleSheet("""
             QTextEdit {
                 font-family: Consolas, Monaco, monospace;
-                font-size: 13pt;
+                font-size: 11pt;
                 color: #202020;
                 background-color: #f4f4f4;
                 border: 1px solid #c0c0c0;
@@ -193,13 +193,61 @@ class MainWindow(QWidget):
         grid = QGridLayout(page_widget)
         
         core_fields = {f.name for f in fields(CoreOptions)}
-        
-        i = 0
+
+        all_fields = []
         for field in fields(options_class):
             if field.metadata.get("ui_hint") == "manually":
                 continue
             if exclude_core and field.name in core_fields:
                 continue  # Skip options already shown in the Core section
+            all_fields.append(field)
+
+        ui_group_fields = {}
+        for field in all_fields:
+            ui_group = field.metadata.get("ui_group")
+            if not ui_group:
+                continue
+            ui_group_fields.setdefault(ui_group, []).append(field)
+
+        rendered_ui_groups = set()
+        i = 0
+        for field in all_fields:
+            ui_group = field.metadata.get("ui_group")
+            if ui_group:
+                if ui_group in rendered_ui_groups:
+                    continue
+                rendered_ui_groups.add(ui_group)
+
+                group_fields = ui_group_fields.get(ui_group, [])
+                group_fields = sorted(
+                    group_fields,
+                    key=lambda f: (f.metadata.get("ui_group_order", 0), all_fields.index(f)),
+                )
+
+                group_container = QWidget()
+                hbox = QHBoxLayout(group_container)
+                hbox.setContentsMargins(0, 0, 0, 0)
+
+                for gf in group_fields:
+                    val = getattr(self.options, gf.name)
+                    label = gf.metadata.get("label", gf.name.replace("_", " ").title())
+                    widget = create_widget_for_field(gf, val, label=label)
+
+                    field_container = QWidget()
+                    vbox = QVBoxLayout(field_container)
+                    vbox.setContentsMargins(0, 0, 0, 0)
+                    vbox.addWidget(QLabel(label))
+                    vbox.addWidget(widget)
+
+                    hbox.addWidget(field_container)
+                    self.widgets[gf.name] = widget
+
+                i += 1
+
+                col = i // MAX_ROWS
+                row = (i % MAX_ROWS) * 2
+                grid.addWidget(group_container, row, col, 2, 1)
+                continue
 
             name = field.name
             val = getattr(self.options, field.name)
@@ -218,7 +266,7 @@ class MainWindow(QWidget):
             self.widgets[name] = widget
 
         grid.setRowStretch(row, 1)
-            
+             
         return page_widget
 
     def switch_feature(self, index):

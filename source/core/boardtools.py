@@ -1,4 +1,4 @@
-from typing import Union
+from typing import NamedTuple, Union, Optional
 
 import chess
 from chess.pgn import GameNode as Node
@@ -75,3 +75,63 @@ def find_node_by_position(node: Node, fen_str: str) -> Node:
 
 def opposite_side(side: chess.Color) -> chess.Color:
     return WHITE if side == BLACK else BLACK
+
+def node_san(n: Node) -> str:
+    b = n.parent.board()
+    return b.san(n.move)
+
+def uci_to_san(uci: str, board: chess.Board) -> str:
+    return board.san(chess.Move.from_uci(uci))
+
+class FirstDifference(NamedTuple):
+    ply: int
+    # move: chess.Move
+    move: str
+
+def node_moves(n: Node) -> list[chess.Move]:
+    stack: list[chess.Move] = []
+    cur = n
+    while cur is not None and getattr(cur, "move", None) is not None:
+        stack.append(node_san(cur))
+        cur = cur.parent
+    stack.reverse()
+    return stack
+
+def first_difference(n1: Node, n2: Node) -> Optional[FirstDifference]:
+    """
+    Compare two move sequences ending at 'n1' and 'n2' and return the first move
+    that differs in 'n1', together with the ply at which it occurs.
+
+    If 'n2' is a prefix of 'n1', returns the next move from 'n1'.
+    If there is no differing move in 'n1' (identical lines, or 'n1' is shorter),
+    returns None.
+    """
+    stack1: list[chess.Move] = []
+    stack2: list[chess.Move] = []
+
+    stack1 = node_moves(n1)
+    stack2 = node_moves(n2)
+
+    stack1.reverse()
+    stack2.reverse()
+
+    common_len = min(len(stack1), len(stack2))
+    for i in range(common_len):
+        if stack1[i] != stack2[i]:
+            return FirstDifference(i + 1, stack1[i])
+
+    if len(stack1) > len(stack2):
+        i = len(stack2)
+        return FirstDifference(i + 1, stack1[i])
+
+    return None
+
+def moves_to_algebraic(moves: list[str]) -> str:
+    pairs = [
+        f"{i + 1}. {' '.join(moves[i * 2:(i + 1) * 2])}"
+        for i in range((len(moves) + 1) // 2)
+    ]
+    return ' '.join(pairs)
+
+def ply_from_move_number(move_number: int) -> int:
+    return move_number * 2 - 1

@@ -18,7 +18,19 @@ DEBUG_MODE = False
 
 @dataclass
 class CoreOptions:
-    # --- ENGINE GROUP ---
+    # --- PROVIDED ONCE AND FOR ALL ---
+    engine_path: str = field(
+        default="",
+        metadata={"label": "Engine Path", "ui_hint": "file_path",
+            "file_filter": "EXE files (*.exe)",}
+    )
+
+    _token: str = field(
+        default="",
+        metadata={"label": "Lichess API Token", "ui_hint": "password"}
+    )
+
+    # --- ENGINE SETTINGS ---
     min_depth: int = field(
         default=28,
         metadata={"label": "Minimum Engine Depth", "min": 1, "max": 60, "group": "Engine Settings", "order": 1}
@@ -28,27 +40,18 @@ class CoreOptions:
         metadata={"label": "Maximum Engine Depth", "min": 1, "max": 80, "group": "Engine Settings", "order": 2}
     )
 
-    engine_path: str = field(
-        default="",
-        metadata={"label": "Engine Path", "ui_hint": "file_path",
-            "file_filter": "EXE files (*.exe)",}
-    )
-
+    # --- TRAVERSAL SETTINGS ---
     check_alternatives: bool = field(
         default=False,
         metadata={"label": "Check Our Alternatives"}
     )
 
-
+    # --- DATABASE SETTINGS ---
     db_types: list = field(
         default_factory=lambda: ["db_lichess"],
         metadata={"label": "Database Types", "options": {"Lichess": "db_lichess", "Masters": "db_masters"}}
     )
 
-    _token: str = field(
-        default="",
-        metadata={"label": "Lichess API Token", "ui_hint": "password"}
-    )
 
     def validate(self):
         if self.min_depth > self.max_depth:
@@ -74,6 +77,13 @@ class CheckerOptions(CoreOptions):
         metadata={"label": "Starting Position (FEN)"}
     )
 
+    # --- WHAT TO DO WITH IT ---
+    actions: list = field(
+        default_factory=lambda: ["find_gaps"],
+        metadata={"label": "Actions", "options": {"Find Gaps": "find_gaps", "Fill Gaps": "fill_gaps",
+                                                   "Mark Moves": "mark_moves", "Seek Consistency": "seek_consistency"}}
+    )
+
     # --- HOW TO WORK WITH IT ---
     play_white: bool = field(
         default=True,
@@ -82,11 +92,25 @@ class CheckerOptions(CoreOptions):
         }
     )
 
-    # --- WHAT TO DO WITH IT ---
-    actions: list = field(
-        default_factory=lambda: ["find_gaps"],
-        metadata={"label": "Actions", "options": {"Find Gaps": "find_gaps", "Fill Gaps": "fill_gaps",
-                                                   "Mark Moves": "mark_moves", "Seek Consistency": "seek_consistency"}}
+    start_move: int = field(
+        default=6,
+        metadata={
+            "label": "Start Analysis on Move",
+            "min": 2,
+            "max": 60,
+            "ui_group": "analysis_ply_range",
+            "ui_group_order": 1,
+        }
+    )
+    end_move: int = field(
+        default=20,
+        metadata={
+            "label": "End Analysis on Move",
+            "min": 2,
+            "max": 80,
+            "ui_group": "analysis_ply_range",
+            "ui_group_order": 2,
+        }
     )
 
     # --- MOVE CHOICE ---
@@ -100,21 +124,16 @@ class CheckerOptions(CoreOptions):
     )
 
     added_depth: int = field(
-        default=5,
+        default=3,
         metadata={"label": "Length of Suggested Lines", "min": 1, "max": 20}
     )
 
-    # Game phase constraints - Range or SpinBox
-    start_ply: int = field(
-        default=10,
-        metadata={"label": "Start Analysis at Ply", "min": 2, "max": 60}
-    )
-    end_ply: int = field(
-        default=40,
-        metadata={"label": "End Analysis at Ply", "min": 2, "max": 80}
+    use_engine_for_them: bool = field(
+        default=False,
+        metadata={"label": "Engine for Opponent's Move"}
     )
 
-    # Booleans - simple Checkboxes
+    # --- DETAILS ON WHAT TO DO ---
     add_nag: bool = field(
         default=True,
         metadata={"label": "Add NAG Annotations (+-, !?, etc.)"}
@@ -124,11 +143,7 @@ class CheckerOptions(CoreOptions):
         metadata={"label": "Trim Obvious Moves"}
     )
 
-    use_engine_for_them: bool = field(
-        default=False,
-        metadata={"label": "Engine for Opponent's Move"}
-    )
-
+    # --- OUTPUT ---  (currently don't use this)
     output_pgn: str = field(
         default="Output.pgn",
         metadata={"label": "Output PGN Filename", "ui_hint": "save_file"}
