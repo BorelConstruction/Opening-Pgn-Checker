@@ -73,10 +73,11 @@ python -m source.gui.main
 - PGN Checker
 - Move Graph Builder
 
-3. Provide, if not cached:
-- Engine path
-- Lichess API token
-- PGN file and/or position
+3. Choose the inputs:
+- Provide, if not cached:
+  + Engine path
+  + Lichess API token
+  + PGN file and/or position
 - Select options if desired
 
 
@@ -107,6 +108,6 @@ python -m source.gui.main
 ## Motivation
 
 1. Making opening files is hard work, and the tool is hoped to save 50+% of time.
-2. In a highbrower way, I am curious about finding structure underlying data. In particular, I believe that the PGN tree memorization can be greatly aided by explicating patterns found within this tree. Teasing as many of these as possible is a long-term goal. I can think of a dozen ways to be smart about opening lines, it would be interesting to see which are possible to implement.
+2. In a highbrower way, I am curious about finding structure underlying data. In particular, I believe that the PGN tree memorization can be greatly aided by explicating patterns found within this tree. Teasing as many of these as possible is a long-term goal. I can think of a dozen ways to be smart about opening lines; it would be interesting to see which are possible to implement.
 
-Other long-term ideas include a memorization tool (I don't find widely available spaced repetition tools like that of Chessable adequate), a probability-based move search, a better version of OpeningTree.
+Other long-term ideas include a memorization tool (I don't find widely available spaced repetition tools like that of Chessable adequate), a probability-based move search tool, a better version of OpeningTree.
