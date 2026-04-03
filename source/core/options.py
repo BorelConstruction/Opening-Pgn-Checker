@@ -98,7 +98,7 @@ class CheckerOptions(CoreOptions):
             "label": "Start Analysis on Move",
             "min": 2,
             "max": 60,
-            "ui_group": "analysis_ply_range",
+            "ui_group": "analysis_move_range",
             "ui_group_order": 1,
         }
     )
@@ -108,19 +108,21 @@ class CheckerOptions(CoreOptions):
             "label": "End Analysis on Move",
             "min": 2,
             "max": 80,
-            "ui_group": "analysis_ply_range",
+            "ui_group": "analysis_move_range",
             "ui_group_order": 2,
         }
     )
 
     # --- MOVE CHOICE ---
-    min_games: int = field(  # book cutoff
-        default=10,
-        metadata={"label": "Minimum Number of Games", "min": 1, "max": 500}
-    )
     freq_threshold: float = field(
         default=0.15,
-        metadata={"label": "Frequency Threshold", "ui_hint": "percentage", "min": 0.0, "max": 1.0, "step": 0.025}
+        metadata={"label": "Frequency Threshold", "ui_hint": "percentage", "min": 0.0, "max": 1.0, "step": 0.025,
+                  "ui_group": "move_choice", "ui_group_order": 1,}
+    )
+    min_games: int = field(  # book cutoff
+        default=10,
+        metadata={"label": "Minimum Number of Games", "min": 1, "max": 500,
+                  "ui_group": "move_choice", "ui_group_order": 2,}
     )
 
     added_depth: int = field(

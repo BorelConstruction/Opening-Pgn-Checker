@@ -27,11 +27,26 @@ def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attemp
             return games
 
         except berserk.exceptions.ResponseError as e:
-            if e.response is not None and e.response.status_code == 429:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status == 429:
                 # exponential backoff
                 delay = base_delay * (2 ** attempt)
                 time.sleep(delay)
                 sys.stderr.write(f"\n 429, {attempt}")
+            elif status in (401, 403):
+                url = None
+                try:
+                    url = e.response.request.url
+                except AttributeError:
+                    pass
+
+                url_part = f" ({url})" if url else ""
+                raise RuntimeError(
+                    "Lichess opening explorer request was rejected "
+                    f"with HTTP {status}{url_part}. "
+                    "\nPerhaps an invalid/empty API token was sent or "
+                    "you are behind a proxy/VPN/captive portal. "
+                ) from e
             else:
                 raise
         except Exception as e:

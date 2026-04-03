@@ -106,15 +106,9 @@ def first_difference(n1: Node, n2: Node) -> Optional[FirstDifference]:
     If there is no differing move in 'n1' (identical lines, or 'n1' is shorter),
     returns None.
     """
-    stack1: list[chess.Move] = []
-    stack2: list[chess.Move] = []
-
     stack1 = node_moves(n1)
     stack2 = node_moves(n2)
-
-    stack1.reverse()
-    stack2.reverse()
-
+    
     common_len = min(len(stack1), len(stack2))
     for i in range(common_len):
         if stack1[i] != stack2[i]:

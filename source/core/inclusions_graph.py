@@ -531,7 +531,7 @@ if __name__ == "__main__":
 
 
     # --- berserk client ---
-    token = '' # delete before pushing
+    token = None # delete before pushing
     session = berserk.TokenSession(token)
     client  = berserk.Client(session)
 

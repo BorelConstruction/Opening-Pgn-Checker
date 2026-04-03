@@ -82,7 +82,7 @@ class PgnChecker(Runner):
     def convert_moves_to_plies(self):
         self.options.start_ply = ply_from_move_number(self.options.start_move)
         self.options.end_ply = ply_from_move_number(self.options.end_move)
-        self.options.added_depth = (self.options.added_depth + 1) // 2
+        self.options.added_depth = 2*self.options.added_depth - 1
 
     def pipeline(self):
         # a skeleton for when the logic gets more complex
@@ -289,7 +289,7 @@ class PgnChecker(Runner):
                         move2 = board.san(tr_move)
                         board.pop()
                         move1 = uci_to_san(most_popular_uci, board)
-                        c = f"Likely Tr after {move1} and {move2}".upper()
+                        c = f"Likely Tr after {move1} and {move2}"
                         return (move, c)
 
     def better_engine_move(self, node: Node) -> MoveChoice:
@@ -321,12 +321,19 @@ class PgnChecker(Runner):
             board.push(tr_move)
             tr_eval = self.query(fen(board), "eval").best_eval()
             board.pop()
-            if tr_eval >= eval - 0.15:
+            # if a position is complex, tr_eval and eval may differ a lot just by the fact that
+            # the best move is already "entered" after tr_move. Then we may not recognize tr_move
+            # as the best one even if it is. I am not sure why this happens this way
+            # since we use adaptive eval. Does it not stabilize with max depth 40?
+            # anyway, we don't want to avoid transposing to be +3 intead of +2.7, so the second check is 
+            # still needed; hopefully it also prevents the problem just described.
+            # Also note that it only makes sense when we are better
+            if tr_eval >= eval - 0.15 or tr_eval >= 0.85*eval:
                 eval = tr_eval
                 return [MoveChoice(tr_move, "tr", tr_eval)]
             else:
                 return [self.better_engine_move(node),
-                        MoveChoice(tr_move, "tr", tr_eval, f"To Tr, {eval:.2f} > {tr_eval:.2f}..")]
+                        MoveChoice(tr_move, "tr", tr_eval, f"To Tr, {eval:.2f} > {tr_eval:.2f}.")]
         to_tr = self.seek_transposition(node)
 
         if to_tr: # TODO: abstract these two blocks
@@ -423,7 +430,7 @@ class PgnChecker(Runner):
                 if depth <= 0:  # even if depth was 0 we first added a move for ourselves
                     return
 
-                if (e[0].eval > 2 and len(e) > 1 and e[1].eval > 2):
+                if (e[0].eval > 1.9 and len(e) > 1 and e[1].eval > 1.9):
                     # self.we_are_winning
                     update_comment(best_move_child, f"Eval: {e[0].eval:.2f}", True)
                     return
