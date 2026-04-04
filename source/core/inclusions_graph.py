@@ -25,7 +25,6 @@ import chess.pgn
 import collections
 from abc import ABC, abstractmethod
 from typing import Callable, Union, Optional, Any
-from hashlib import sha1
 
 import networkx as nx
 from pyvis.network import Network
@@ -33,7 +32,7 @@ from pyvis.network import Network
 from .traversal import traverse, TraversalPolicy, default_children, mainline_children
 from .runner import Runner, fen
 from .boardtools import *
-
+from .options import cache_filename_from_string
 
 # Type aliases
 Board       = chess.Board
@@ -397,10 +396,8 @@ class InclusionGraphRunner(Runner):
         return g
     
     def _default_cache_path(self) -> str:
-        base = os.path.join("cache", "graph")
-        name = sha1(self.options.starting_pos.encode()).hexdigest()[:10]
-        print(name)
-        return os.path.join(base, f"{name}.json")
+        return cache_filename_from_string("graph", self.options.starting_pos)
+
     
     def set_starting_pos(self, game: chess.pgn.GameNode):
         self.starting_node = find_node_by_position(game, self.options.starting_pos)

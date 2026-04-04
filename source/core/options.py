@@ -2,6 +2,8 @@ from dataclasses import dataclass, field, asdict, fields
 import json
 import os
 
+from hashlib import sha1
+
 
 CONFIG_FILE = "settings.json"
 
@@ -252,3 +254,8 @@ def load_settings(options_class = None):
     final_params = {k: v for k, v in combined_data.items() if k in valid_fields}
 
     return options_class(**final_params), options_class
+
+def cache_filename_from_string(dir: str, string: str) -> str:
+    base = os.path.join("cache", dir)
+    name = sha1(string.encode()).hexdigest()[:10]
+    return os.path.join(base, f"{name}.json")

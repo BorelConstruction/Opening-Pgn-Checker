@@ -20,7 +20,7 @@ from chess import WHITE
 from chess import BLACK
 
 
-from .options import CheckerOptions, DEBUG_MODE
+from .options import CheckerOptions, DEBUG_MODE, cache_filename_from_string
 from .timer import clock
 from .database import *
 from .runner import *
@@ -106,11 +106,43 @@ class PgnChecker(Runner):
         )
 
     def _default_cache_path(self) -> str:
-        base = "cache"
-        name = "cache"
-        if self.options.input_pgn:
-            name = os.path.splitext(os.path.basename(self.options.input_pgn))[0]
-        return os.path.join(base, f"{name}.json")
+        # Old behavior (sometimes is more convenient):
+        # base = "cache"
+        # name = "cache"
+        # if self.options.input_pgn:
+        #     name = os.path.splitext(os.path.basename(self.options.input_pgn))[0]
+        # return os.path.join(base, f"{name}.json")
+
+        if not self.options.input_pgn:
+            raise ValueError("No opening PGN selected")
+
+        with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
+            game = chess.pgn.read_game(pgnFile)
+        if game is None:
+            raise ValueError(f"Failed to parse PGN: {self.options.input_pgn}")
+
+        moves_uci: list[str] = []
+        node: Node = game
+        PLY_LIMIT = 20  # first 10 moves
+        while node.variations and node.ply() < PLY_LIMIT:
+            node = node.variations[0]
+            moves_uci.append(node.move.uci())
+
+        if not moves_uci:
+            raise ValueError(f"No moves found in PGN: {self.options.input_pgn}")
+
+        pgn_basename = os.path.basename(self.options.input_pgn)
+
+        # Prefer an existing cache for a shorter prefix, so extending the PGN mainline
+        # doesn't force a brand-new cache file.
+        for prefix_len in range(min(PLY_LIMIT, len(moves_uci)), 8, -1):
+            signature = f"{pgn_basename}|{' '.join(moves_uci[:prefix_len])}"
+            candidate = cache_filename_from_string("pgn_checker", signature)
+            if os.path.exists(candidate):
+                return candidate
+
+        signature = f"{pgn_basename}|{' '.join(moves_uci)}"
+        return cache_filename_from_string("pgn_checker", signature)
     
     def make_headers(self, game):
         if game.headers["Event"] == '?':
