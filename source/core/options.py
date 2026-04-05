@@ -35,11 +35,13 @@ class CoreOptions:
     # --- ENGINE SETTINGS ---
     min_depth: int = field(
         default=28,
-        metadata={"label": "Minimum Engine Depth", "min": 1, "max": 60, "group": "Engine Settings", "order": 1}
+        metadata={"label": "Minimum Engine Depth (ply)", "min": 1, "max": 60, 
+                  "ui_group": "Engine Settings", "ui_group_order": 1}
     )
     max_depth: int = field(
         default=40,
-        metadata={"label": "Maximum Engine Depth", "min": 1, "max": 80, "group": "Engine Settings", "order": 2}
+        metadata={"label": "Maximum Engine Depth (ply)", "min": 1, "max": 80,
+                   "ui_group": "Engine Settings", "ui_group_order": 2}
     )
 
     # --- TRAVERSAL SETTINGS ---

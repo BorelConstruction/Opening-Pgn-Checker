@@ -107,42 +107,40 @@ class PgnChecker(Runner):
 
     def _default_cache_path(self) -> str:
         # Old behavior (sometimes is more convenient):
-        # base = "cache"
-        # name = "cache"
-        # if self.options.input_pgn:
-        #     name = os.path.splitext(os.path.basename(self.options.input_pgn))[0]
-        # return os.path.join(base, f"{name}.json")
+        base = "cache"
+        name = "cache"
+        if self.options.input_pgn:
+            name = os.path.splitext(os.path.basename(self.options.input_pgn))[0]
+        return os.path.join(base, f"{name}.json")
 
-        if not self.options.input_pgn:
-            raise ValueError("No opening PGN selected")
+        # if not self.options.input_pgn:
+        #     raise ValueError("No opening PGN selected")
 
-        with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
-            game = chess.pgn.read_game(pgnFile)
-        if game is None:
-            raise ValueError(f"Failed to parse PGN: {self.options.input_pgn}")
+        # with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
+        #     game = chess.pgn.read_game(pgnFile)
+        # if game is None:
+        #     raise ValueError(f"Failed to parse PGN: {self.options.input_pgn}")
 
-        moves_uci: list[str] = []
-        node: Node = game
-        PLY_LIMIT = 20  # first 10 moves
-        while node.variations and node.ply() < PLY_LIMIT:
-            node = node.variations[0]
-            moves_uci.append(node.move.uci())
+        # moves_uci: list[str] = []
+        # node: Node = game
+        # PLY_LIMIT = 20  # first 10 moves
+        # while node.variations and node.ply() < PLY_LIMIT:
+        #     node = node.variations[0]
+        #     moves_uci.append(node.move.uci())
 
-        if not moves_uci:
-            raise ValueError(f"No moves found in PGN: {self.options.input_pgn}")
+        # if not moves_uci:
+        #     raise ValueError(f"No moves found in PGN: {self.options.input_pgn}")
 
-        pgn_basename = os.path.basename(self.options.input_pgn)
+        # # Prefer an existing cache for a shorter prefix, so extending the PGN mainline
+        # # doesn't force a brand-new cache file.
+        # for prefix_len in range(min(PLY_LIMIT, len(moves_uci)), 8, -1):
+        #     signature = ' '.join(moves_uci[:prefix_len])
+        #     candidate = cache_filename_from_string("pgn_checker", signature)
+        #     if os.path.exists(candidate):
+        #         return candidate
 
-        # Prefer an existing cache for a shorter prefix, so extending the PGN mainline
-        # doesn't force a brand-new cache file.
-        for prefix_len in range(min(PLY_LIMIT, len(moves_uci)), 8, -1):
-            signature = f"{pgn_basename}|{' '.join(moves_uci[:prefix_len])}"
-            candidate = cache_filename_from_string("pgn_checker", signature)
-            if os.path.exists(candidate):
-                return candidate
-
-        signature = f"{pgn_basename}|{' '.join(moves_uci)}"
-        return cache_filename_from_string("pgn_checker", signature)
+        # signature = ' '.join(moves_uci)
+        # return cache_filename_from_string("pgn_checker", signature)
     
     def make_headers(self, game):
         if game.headers["Event"] == '?':
@@ -169,6 +167,7 @@ class PgnChecker(Runner):
                     self.make_headers(output_game)
 
                     self.set_starting_pos(output_game)
+                    self.make_move_coupling_dict(output_game) # MOVE
                     node = self.starting_node
 
                     sys.stderr.write('starting to traverse...')
@@ -274,7 +273,7 @@ class PgnChecker(Runner):
 
     def mark_moves(self, log_node):
         # TODO: if a move is frequent, promote it?
-        self.report(RunnerReport(kind="position", position=PositionSnapshot("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 0)))
+        self.report(RunnerReport(kind="position", position=PositionSnapshot("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -", 0)))
         self.report_message("Marking moves...")
         self.progress.reset()
         self._traverse(log_node, partial(PgnChecker.mark_move_local, self))
@@ -324,12 +323,46 @@ class PgnChecker(Runner):
                         c = f"Likely Tr after {move1} and {move2}"
                         return (move, c)
 
+    def consistency_move_from_coupling(self, node: Node, engine_eval: float, best_engine_move: chess.Move, eval_eps: float = 0.15) -> Optional[MoveChoice]:
+        if not hasattr(self, "move_coupling") or node.move is None:
+            return None
+
+        prev_move_uci = node.move.uci()
+        responses = self.move_coupling[prev_move_uci]
+
+        uci_counts = Counter(child.move.uci() for child in responses if child.move)
+        candidate_ucis = sorted(uci_counts.keys(), key=lambda uci: uci_counts[uci], reverse=True)
+        if best_engine_move.uci() in candidate_ucis:
+            return None
+
+        board = node.board()
+        for uci in candidate_ucis:
+            move = chess.Move.from_uci(uci)
+            if move not in board.legal_moves:
+                continue
+
+            q_eval = self.q_eval_move(node, move).eval
+
+            diff = abs(q_eval - engine_eval)
+            if diff <= eval_eps:
+                sys.stderr.write(f"\nFound a coupling move {uci} with eval {q_eval:.2f} close to best move eval {engine_eval:.2f}, diff {diff:.2f}.")
+                return MoveChoice(move, "consistency", q_eval,
+                                  f"Coupling {prev_move_uci} candidate {uci} diff {diff:.2f}")
+
+        return None
+
     def better_engine_move(self, node: Node) -> MoveChoice:
         top2 = self.query(fen(node), "eval").top(2) # we'll also need top(2) later for nags
-        eval1, best_move1 = top2[0]
+        eval1, best_move1, adap = top2[0]
+
+        # try to keep a coupling move for the same opponent move if it's reasonably close
+        consistency_choice = self.consistency_move_from_coupling(node, eval1, best_move1)
+        if consistency_choice is not None:
+            return consistency_choice
+
         if len(top2) == 1:
             return MoveChoice(best_move1, "eng", eval1)
-        eval2, best_move2 = top2[1]
+        eval2, best_move2, adap = top2[1]
         stats = self.query(fen(node), "db_lichess")
         stats1 = stats_for_uci(stats, best_move1.uci())
         stats2 = stats_for_uci(stats, best_move2.uci())
@@ -345,7 +378,6 @@ class PgnChecker(Runner):
             return MoveChoice(best_move1, "eng", eval1)            
 
     def generate_moves_us(self, node: Node) -> list[MoveChoice]:
-        moves = []
         eval = self.query(fen(node), "eval").best_eval()
         tr_move = self.find_transposition_move(node)
         if tr_move:
@@ -374,12 +406,13 @@ class PgnChecker(Runner):
             board.push(to_tr_move)
             to_tr_eval = self.query(fen(board), "eval").best_eval()
             board.pop()
-            if to_tr_eval >= eval - 0.10:
+            if to_tr_eval >= eval - 0.10 or to_tr_eval >= 0.9*eval:
                 eval = to_tr_eval
                 return [MoveChoice(to_tr_move, "to_tr", to_tr_eval, comment)]
             else:
                 return [self.better_engine_move(node),
                         MoveChoice(to_tr_move, "to_tr", to_tr_eval, f"To Tr, {eval:.2f} > {to_tr_eval:.2f}")]
+
         return [self.better_engine_move(node)]
     
     def generate_moves_them_db(self, stats: dict) -> list[MoveChoice]:
@@ -443,11 +476,13 @@ class PgnChecker(Runner):
         best_move_child = log_node
         best_choice: Optional[MoveChoice] = None
         try:
-            self.report_position(log_node, message=f"Adding sample line... Depth: {depth}." 
-                                 + f"\n {moves_to_algebraic(node_moves(log_node))}")
+            self.report_position(log_node)
+            # , message=f"Adding sample line... Depth: {depth}." 
+                                #  + f"\n {moves_to_algebraic(node_moves(log_node))}")
 
             if log_node.turn() == self.options.side:
-                e = self.query(fen(log_node), "eval").top(2) 
+                e = self.query(fen(log_node), "eval").top(2)
+                self.report_message(f'depth: {e[0].adap}')
                 # TODO: ^ reliable way to know in advance how many lines we will know, so that we never call top(1) before top(2)
 
                 self.set_question_marks(log_node)
