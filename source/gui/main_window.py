@@ -25,9 +25,7 @@ from PySide6.QtWidgets import (
     QStackedWidget
 )
 
-from ..core.pgn_checker import PgnChecker as checker
-from ..core.pgn_checker import RunnerReport
-from ..core.inclusions_graph import InclusionGraphRunner as grapher
+from ..core.runner import Runner, RunnerReport
 from ..core.options import *
 from os import getenv
 
@@ -42,8 +40,8 @@ FEATURE_NAMES = {
 
 # Introduce feature specs if this grows
 OPT_TO_FEATURE = {
-    CheckerOptions: checker,
-    GraphOptions: grapher
+    CheckerOptions: Runner,
+    GraphOptions: Runner,
 }
 
 
@@ -91,7 +89,10 @@ class MainWindow(QWidget):
         super().__init__()
         self.options, self.options_class = load_settings()
         self.setWindowTitle("Opening Tool")
-        self.widgets = {}  # Store widgets to retrieve values later
+        # Active widget map for the currently-selected feature (== self.widgets_by_index[current index])
+        self.widgets = {}
+        # Per-feature widget maps keyed by the QStackedWidget index.
+        self.widgets_by_index = {}
         self.init_ui()
         # QCoreApplication.instance().aboutToQuit.connect(self.controller.shutdown)
 
@@ -161,11 +162,15 @@ class MainWindow(QWidget):
 
         # load pages lazily; initially one only
         w = self.create_group_for_options(self.options_class)
-        self.stack.removeWidget(self.stack.widget(index))
+        old = self.stack.widget(index)
+        self.stack.removeWidget(old)
+        old.deleteLater()
         self.stack.insertWidget(index, w)
         self.stack.setCurrentIndex(index)
 
         self.pages[index] = w
+        self.widgets_by_index[index] = w._widgets
+        self.widgets = self.widgets_by_index[index]
 
         options_layout.addWidget(self.stack)
 
@@ -191,6 +196,8 @@ class MainWindow(QWidget):
     def create_group_for_options(self, options_class, exclude_core=False):
         page_widget = QWidget()
         grid = QGridLayout(page_widget)
+        page_widget._widgets = {}
+        widgets = page_widget._widgets
         
         core_fields = {f.name for f in fields(CoreOptions)}
 
@@ -240,7 +247,7 @@ class MainWindow(QWidget):
                     vbox.addWidget(widget)
 
                     hbox.addWidget(field_container)
-                    self.widgets[gf.name] = widget
+                    widgets[gf.name] = widget
 
                 i += 1
 
@@ -260,30 +267,36 @@ class MainWindow(QWidget):
             row = (i % MAX_ROWS) * 2
             grid.addWidget(QLabel(label), row, col)
             grid.addWidget(widget, row+1, col)
-            self.widgets[field.name] = widget
-
-            # form_layout.addRow(name.replace("_", " ").title(), widget)
-            self.widgets[name] = widget
+            widgets[field.name] = widget
 
         grid.setRowStretch(row, 1)
-             
+              
         return page_widget
 
     def switch_feature(self, index):
         self.options_class = feature_list[index]
+        created_page = False
 
         if index not in self.pages:
+            created_page = True
             self.options, _ = load_settings(self.options_class)
             w = self.create_group_for_options(self.options_class)
 
-            self.stack.removeWidget(self.stack.widget(index))
+            old = self.stack.widget(index)
+            self.stack.removeWidget(old)
+            old.deleteLater()
             self.stack.insertWidget(index, w)
 
             self.pages[index] = w
-        else:
-            self.options = self.get_current_options()
+            self.widgets_by_index[index] = w._widgets
 
         self.stack.setCurrentIndex(index)
+        self.widgets = self.widgets_by_index[index]
+
+        if not created_page:
+            # Keep 'self.options' in sync with what's currently in the UI for this feature.
+            self.options = self.get_current_options()
+
 
 
     def get_current_options(self):
@@ -378,7 +391,8 @@ class MainWindow(QWidget):
                 orientation=chess.WHITE
             self.board.show_report(report, orientation=orientation)
         # sys.stderr.write(str(report.message))
-        self.feedback.setPlainText(report.message)
+        if report.message:
+            self.feedback.setPlainText(report.message)
 
     def hide_runtime_widgets(self):
         self.progress_bar.setVisible(False)
