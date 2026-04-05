@@ -76,7 +76,7 @@ class PosCache:
         }
     
     @classmethod
-    def from_dict(cls, runner: 'Runner', payload: dict) -> "PosCache":
+    def from_dict(cls, session: 'PgnSession', payload: dict) -> "PosCache":
         payload["fen"] = fen(payload["fen"]) #####
         pc = cls(payload["fen"])
         data = payload.get("data", {})
@@ -85,7 +85,7 @@ class PosCache:
         if "db_masters" in data:
             pc._data["db_masters"] = data["db_masters"]
         if "eval" in data:
-            pc._data["eval"] = EvalProvider.from_dict(runner, pc.fen, data["eval"])
+            pc._data["eval"] = EvalProvider.from_dict(session, pc.fen, data["eval"])
         if "q-eval" in data:
             pc._data["q-eval"] = EngineEval.from_dict(data["q-eval"])
         return pc
@@ -157,6 +157,7 @@ class QueryResult(ABC):
 class EngineEval(NamedTuple):
     eval: float
     move: str
+    adap: Optional[int] = None
 
     def to_dict(self) -> dict:
         move = self.move.uci() if isinstance(self.move, chess.Move) else self.move
@@ -170,8 +171,8 @@ class EngineEval(NamedTuple):
         return cls(payload["eval"], move)
 
 class EvalProvider(QueryResult):
-    def __init__(self, runner: 'Runner', fen: str):
-        self._runner = runner   # gives access to engine, options, cache helpers
+    def __init__(self, session: 'PgnSession', fen: str):
+        self._session = session   # gives access to engine, options, cache helpers
         self._fen = fen
         
         # TODO: remember depths
@@ -185,8 +186,8 @@ class EvalProvider(QueryResult):
         return {"multipvs": multipvs}
 
     @classmethod
-    def from_dict(cls, runner: 'Runner', fen: str, payload: dict) -> "EvalProvider":
-        ev = cls(runner, fen)
+    def from_dict(cls, session: 'PgnSession', fen: str, payload: dict) -> "EvalProvider":
+        ev = cls(session, fen)
         multipvs = {}
         for amount, lines in payload.get("multipvs", {}).items():
             try:
@@ -213,7 +214,7 @@ class EvalProvider(QueryResult):
 
     def top(self, amount: int) -> list[EngineEval]:
         if amount not in self._multipvs:
-            result = self._runner.engine_eval(self._fen, multipv=amount)
+            result = self._session.engine_eval(self._fen, multipv=amount)
             for n in range(1, amount + 1):
                 if n not in self._multipvs:
                     self._multipvs[n] = result[:n] # will make cache heavier, so make push this to retrieval if that becomes a problem
@@ -226,8 +227,15 @@ class EvalProvider(QueryResult):
         return self.top(1)[0].eval
 
 
-class Runner(ABC):
-    def __init__(self, options: CoreOptions, progress_cb=None, report_cb=None):
+class PgnSession:
+    def __init__(
+        self,
+        options: CoreOptions,
+        progress_cb=None,
+        report_cb=None,
+        *,
+        default_cache_path: Optional[Callable[[], str]] = None,
+    ):
         options.validate()
 
         self.options = copy.copy(options)
@@ -237,12 +245,15 @@ class Runner(ABC):
         self.progress = Progress(progress_cb)
         self.report = report_cb or (lambda *_: None)
 
+        self._default_cache_path = default_cache_path
+
         self.normalize_fens() # has to be done before cache loading
 
         self.cache = CacheDict(lambda fen: PosCache(fen))
+
         self.load_cache()
 
-        self.engine_path = sf_path
+        self.engine_path = getattr(self.options, "engine_path", None) or sf_path
         self._engine = None
         self.init_client()
         self.init_queries()
@@ -253,6 +264,7 @@ class Runner(ABC):
             self.options.starting_pos = fen(self.options.starting_pos)
 
     def init_queries(self):
+        pov = getattr(self.options, "side", WHITE)
         self._queries = {
             # NOTE: will be a bug is self.opening_explorer changes
             # (as self.cache will then store the result relative to the old explorer)
@@ -264,7 +276,7 @@ class Runner(ABC):
             "eval": lambda fen: EvalProvider(self, fen),
 
             # if we don't cache quick evals, results will be different every time
-            "q-eval": lambda fen: quick_eval(self.engine, fen, pov=self.options.side)
+            "q-eval": lambda fen: quick_eval(self.engine, fen, pov=pov)
         }
 
     def query(self, fen: str, type: str):
@@ -272,22 +284,21 @@ class Runner(ABC):
             sys.stderr.write(f"Using cache for {fen}\n")
         return self.cache[fen].get(type, self._queries[type])
 
-    @abstractmethod
-    def _default_cache_path(self) -> str:
-        pass
-
-    @abstractmethod
-    def run(self):
-        pass
-    
     def load_cache(self, path: Optional[str] = None) -> bool:
         self.report_message("Loading cache...")
-        path = path or self._default_cache_path()
+        if path is None:
+            if self._default_cache_path is None:
+                raise ValueError("No cache path provided and no default_cache_path configured")
+            path = self._default_cache_path()
         pos_cache_factory = lambda payload: PosCache.from_dict(self, payload)
         self.cache = CacheDict.from_dict(path, pos_cache_factory)
+        return True
 
     def save_cache(self, path: Optional[str] = None):
-        path = path or self._default_cache_path()
+        if path is None:
+            if self._default_cache_path is None:
+                raise ValueError("No cache path provided and no default_cache_path configured")
+            path = self._default_cache_path()
         self.cache.serialize(path)
 
     def report_message(self, msg: str):
@@ -318,9 +329,11 @@ class Runner(ABC):
         return self._engine
     
     def engine_eval(self, fen: str, multipv: int = 1):
-        return evaluate_position(self.engine, fen, pov=self.options.side, options=self.options,
-                                     adaptive=self.options.adaptive_an, multipv=multipv) # TODO
-        
+        pov = getattr(self.options, "side", WHITE)
+        adaptive = getattr(self.options, "adaptive_an", True)
+        return evaluate_position(self.engine, fen, pov=pov, options=self.options,
+                                     adaptive=adaptive, multipv=multipv) # TODO
+
 
     def init_client(self):
         token = getattr(self.options, "_token", None)
@@ -333,7 +346,9 @@ class Runner(ABC):
     def variations(self, node: Node) ->  list[Node]:
         '''Node.variations consistent with our mainline preferences.'''
 
-        mainline_sides = () if self.options.check_alternatives else (self.options.side,)
+        check_alternatives = getattr(self.options, "check_alternatives", True) # TODO: make sure we are consistent around this
+        side = getattr(self.options, "side", WHITE)
+        mainline_sides = () if check_alternatives else (side,)
         return mainline_children(mainline_sides)(node)
 
     def _traverse(self, node: Node,
@@ -347,10 +362,12 @@ class Runner(ABC):
         if get_children is None:
             get_children = self.variations
 
-        tp = TraversalPolicy(
-            start_ply=self.options.start_ply,
-            end_ply=self.options.end_ply,
-            get_children=get_children)
+        kwargs = {"get_children": get_children}
+        for attr in ("start_ply", "end_ply"):
+            if hasattr(self.options, attr):
+                kwargs[attr] = getattr(self.options, attr)
+        tp = TraversalPolicy(**kwargs)
+
         return traverse(node, visit, post, reasons_to_stop, tp, self.progress)
     
     
@@ -486,13 +503,13 @@ def evaluate_position(engine: chess.engine.SimpleEngine,
     # Use 'with' statement for proper engine startup and cleanup
     # with chess.engine.SimpleEngine.popen_uci("C:\\Users\\Vadim\\Downloads\\stockfish-windows-x86-64-avx2.exe") as engine:
     if adaptive:
-        infos = analyse_adaptive(engine, board, min_depth=options.min_depth, max_depth=options.max_depth, multipv=multipv)
+        infos, adap = analyse_adaptive(engine, board, min_depth=options.min_depth, max_depth=options.max_depth, multipv=multipv)
     else:
         infos = analyse_time_limit(engine, board, time_limit=time_limit, multipv=multipv)
     # Get the list of EngineEval objects
-    return process_engine_output(infos, board, pov)
+    return process_engine_output(infos, board, pov, adap)
 
-def process_engine_output(infos, board, pov=WHITE):
+def process_engine_output(infos, board, pov=WHITE, adap=None):
     lines = []
     for info in infos:
         score = info["score"].pov(pov)
@@ -501,7 +518,7 @@ def process_engine_output(infos, board, pov=WHITE):
         evaluation_cp = score.score(mate_score=100000)
         evaluation_pawns = evaluation_cp / 100.0
         
-        lines.append(EngineEval(evaluation_pawns, pv[0]))
+        lines.append(EngineEval(evaluation_pawns, pv[0], adap))
     return lines
 
 def analyse_adaptive(engine, board: chess.Board, min_depth=8, max_depth=14, multipv: int = 1) -> list:
@@ -511,16 +528,18 @@ def analyse_adaptive(engine, board: chess.Board, min_depth=8, max_depth=14, mult
         info = engine.analyse(board, chess.engine.Limit(depth=depth)) # we want to adapt based on the best move's eval, so multipv=1
         score = info["score"].white().score(mate_score=100000)
 
-        if last_score is not None and abs(score - last_score) < 15:
+        if last_score is not None:
+            sys.stderr.write(f"\n{abs(score - last_score)}\n")
+        if last_score is not None and abs(score - last_score) < 10:
             break
 
         last_score = score
 
     if multipv == 1:
-        return [info]
+        return [info], depth - min_depth
     else:
         info = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=multipv)
-        return info
+        return info, depth - min_depth
     
 def analyse_time_limit(engine, board: chess.Board, time_limit=0.1, multipv: int = 1) -> list:
     return engine.analyse(board, chess.engine.Limit(time=time_limit), multipv=multipv)
@@ -540,7 +559,7 @@ def stats_for_uci(games: dict, uci: str):
     return next((m for m in games['moves'] if m['uci'] == uci_from_pgn_to_lichess(uci)), None) # {}
 
 
-def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1) -> list[EngineEval]:
+def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1, time_limit=0.3) -> list[EngineEval]:
     # TODO: make a separate function for this processing?
     if isinstance(position, str):
             board = chess.Board(position)
@@ -551,5 +570,44 @@ def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1) 
     
     sys.stderr.write(f"\n Quick eval for {fen(board)}")
     
-    infos = analyse_time_limit(engine, board, time_limit=0.1, multipv=multipv)
+    infos = analyse_time_limit(engine, board, time_limit=time_limit, multipv=multipv)
     return process_engine_output(infos, board, pov)[0] # for now only return one EngineEval
+
+
+class Runner:
+    """
+    Feature dispatcher. Chooses the appropriate feature implementation for the given feature choice,
+    runs it, and owns its lifetime.
+    """
+
+    def __init__(self, options: CoreOptions, progress_cb=None, report_cb=None):
+        self.options = options
+        self._progress_cb = progress_cb
+        self._report_cb = report_cb
+        self._feature = None
+
+    def run(self):
+        # Local imports avoid circularm dependencies (features import helpers from this module).
+        from .options import CheckerOptions, GraphOptions
+        from .pgn_checker import PgnChecker
+        from .inclusions_graph import InclusionGraphRunner
+
+        if isinstance(self.options, CheckerOptions):
+            self._feature = PgnChecker(self.options, self._progress_cb, self._report_cb)
+        elif isinstance(self.options, GraphOptions):
+            self._feature = InclusionGraphRunner(self.options, self._progress_cb, self._report_cb)
+        else:
+            raise ValueError(f"Unsupported options type: {type(self.options).__name__}")
+
+        return self._feature.run()
+
+    def close(self):
+        if self._feature is not None:
+            self._feature.close()
+            self._feature = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()

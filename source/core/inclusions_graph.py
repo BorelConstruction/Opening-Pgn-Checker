@@ -30,7 +30,7 @@ import networkx as nx
 from pyvis.network import Network
 
 from .traversal import traverse, TraversalPolicy, default_children, mainline_children
-from .runner import Runner, fen
+from .runner import PgnSession, fen
 from .boardtools import *
 from .options import cache_filename_from_string
 
@@ -349,37 +349,51 @@ class DBInclusionGraph(InclusionGraph):
         )
 
 
-class InclusionGraphRunner(Runner):
-    '''
+class InclusionGraphRunner:
+    """
     Manages InclusionGraph building and visualisation.
-    '''
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    """
+
+    def __init__(self, options, progress_cb=None, report_cb=None):
+        if not hasattr(options, "side"):
+            options.side = chess.WHITE
+        if hasattr(options, "starting_pos"):
+            options.starting_pos = fen(options.starting_pos)
+
+        def default_cache_path() -> str:
+            return cache_filename_from_string("graph", options.starting_pos)
+
+        self.session = PgnSession(
+            options,
+            progress_cb=progress_cb,
+            report_cb=report_cb,
+            default_cache_path=default_cache_path,
+        )
 
 
     def make_inclusion_graph(self, freq_thresh: float, min_game_num: int, depth: int) -> InclusionGraph:
 
-        if self.options.input_pgn:
+        if self.session.options.input_pgn:
             return self.make_graph_pgn(depth)
         else:
             return self.make_graph_db(freq_thresh, min_game_num, depth)
         
     def make_graph_db(self, freq_thresh: float, min_game_num: int, depth: int) -> InclusionGraph:
- 
+  
         def get_games(node: chess.pgn.GameNode) -> dict[str, Any]:
-            return self.query(fen(node), "db_lichess")
- 
+            return self.session.query(fen(node), "db_lichess")
+  
         root = chess.pgn.Game()
-        root.setup(self.options.starting_pos)
- 
+        root.setup(self.session.options.starting_pos)
+  
         g = DBInclusionGraph(
             get_games=get_games,
             frequency_threshold=freq_thresh,
-            side=self.options.side,
+            side=self.session.options.side,
             min_games=min_game_num,
-            report=self.report_position,
+            report=self.session.report_position,
         )
-        g.build(root, end=depth, progress=self.progress)
+        g.build(root, end=depth, progress=self.session.progress)
         return g
      
     def make_graph_pgn(self, depth: int) -> InclusionGraph:
@@ -387,34 +401,40 @@ class InclusionGraphRunner(Runner):
         def get_db_stats(node: chess.pgn.GameNode) -> DbStats:
             return {child.move.uci(): 1 for child in node.variations}
  
-        with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
+        with open(self.session.options.input_pgn, encoding="utf-8") as pgnFile:
             node = chess.pgn.read_game(pgnFile)
-            self.set_starting_pos(node)
- 
-        g = PgnInclusionGraph(get_children=default_children, get_db_stats=get_db_stats, report=self.report_position)
-        g.build(self.starting_node, end=depth+self.starting_node.ply(), progress=self.progress)
+            self.session.set_starting_pos(node)
+  
+        g = PgnInclusionGraph(get_children=default_children, get_db_stats=get_db_stats, report=self.session.report_position)
+        g.build(
+            self.session.starting_node,
+            end=depth + self.session.starting_node.ply(),
+            progress=self.session.progress,
+        )
         return g
-    
-    def _default_cache_path(self) -> str:
-        return cache_filename_from_string("graph", self.options.starting_pos)
-
-    
-    def set_starting_pos(self, game: chess.pgn.GameNode):
-        self.starting_node = find_node_by_position(game, self.options.starting_pos)
     
     def run(self):
         try:
-            g = self.make_inclusion_graph(self.options.freq_threshold, self.options.min_games, self.options.depth)
+            g = self.make_inclusion_graph(self.session.options.freq_threshold, self.session.options.min_games, self.session.options.depth)
             g.visualize(        output_path="inclusion_graph.html",
                 min_weight=0.1,
-                min_observations=self.options.min_observations,)
+                min_observations=self.session.options.min_observations,)
             return f"{g.graph.number_of_nodes()} nodes, {g.graph.number_of_edges()} edges."
         finally:
             try:
-                self.save_cache()
+                self.session.save_cache()
             except Exception as exc:
                 print(f"Failed to save cache: {exc}\n")
-            self._finalizer()
+            self.session.close()
+
+    def close(self):
+        self.session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
     
     """
 inclusion_graph_lichess.py

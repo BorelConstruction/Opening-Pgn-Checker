@@ -114,12 +114,9 @@ class CacheDict(OnGetItemMixin[K], KeyDefaultDict[K, V]):
         if not os.path.exists(path):
             sys.stderr.write("\nCache file does not exist, starting with an empty cache.")
             return cache
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except Exception as exc:
-            sys.stderr.write(f"Failed to load cache: {exc}")
-            return False
+        
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
 
         items = payload.get("items", [])
         for item in items:

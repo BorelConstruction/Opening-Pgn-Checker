@@ -67,91 +67,97 @@ class GapsInfo:
         return iter(self.gaps)
 
 
-class PgnChecker(Runner):
+class PgnChecker:
     def __init__(self, options: CheckerOptions, progress_cb=None, report_cb=None):
-        super().__init__(options, progress_cb, report_cb)
+        options.side = WHITE if options.play_white else BLACK
+        options.starting_pos = fen(options.starting_pos) # all fens are normalized
+        options.adaptive_an = True # TODO
 
-        self.options.side = WHITE if self.options.play_white else BLACK
-        self.options.starting_pos = fen(self.options.starting_pos) # all fens are normalized
-        self.options.adaptive_an = True # TODO
+        def default_cache_path() -> str:
+            # Old behavior (sometimes is more convenient):
+            base = "cache"
+            name = "cache"
+            if options.input_pgn:
+                name = os.path.splitext(os.path.basename(options.input_pgn))[0]
+            return os.path.join(base, f"{name}.json")
 
-        self.set_output_pgn()
+            # if not self.options.input_pgn:
+            #     raise ValueError("No opening PGN selected")
 
-        self.convert_moves_to_plies()
+            # with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
+            #     game = chess.pgn.read_game(pgnFile)
+            # if game is None:
+            #     raise ValueError(f"Failed to parse PGN: {self.options.input_pgn}")
+
+            # moves_uci: list[str] = []
+            # node: Node = game
+            # PLY_LIMIT = 20  # first 10 moves
+            # while node.variations and node.ply() < PLY_LIMIT:
+            #     node = node.variations[0]
+            #     moves_uci.append(node.move.uci())
+
+            # if not moves_uci:
+            #     raise ValueError(f"No moves found in PGN: {self.options.input_pgn}")
+
+            # # Prefer an existing cache for a shorter prefix, so extending the PGN mainline
+            # # doesn't force a brand-new cache file.
+            # for prefix_len in range(min(PLY_LIMIT, len(moves_uci)), 8, -1):
+            #     signature = ' '.join(moves_uci[:prefix_len])
+            #     candidate = cache_filename_from_string("pgn_checker", signature)
+            #     if os.path.exists(candidate):
+            #         return candidate
+
+            # signature = ' '.join(moves_uci)
+            # return cache_filename_from_string("pgn_checker", signature)
+
+            # self.session = PgnSession(
+            #     options,
+            #     progress_cb=progress_cb,
+            #     report_cb=report_cb,
+            #     default_cache_path=default_cache_path,
+            # )
+
+            # self.set_output_pgn()
+
+            # self.convert_moves_to_plies()
 
     def convert_moves_to_plies(self):
-        self.options.start_ply = ply_from_move_number(self.options.start_move)
-        self.options.end_ply = ply_from_move_number(self.options.end_move)
-        self.options.added_depth = 2*self.options.added_depth - 1
+        o = self.session.options
+        o.start_ply = ply_from_move_number(o.start_move)
+        o.end_ply = ply_from_move_number(o.end_move)
+        o.added_depth = 2 * o.added_depth - 1
 
     def pipeline(self):
         # a skeleton for when the logic gets more complex
         pipeline = []
-        if "fill_gaps" in self.options.actions:
+        if "fill_gaps" in self.session.options.actions:
             pipeline.append(self.find_fill_gaps)
-        if "mark_moves" in self.options.actions:
+        if "mark_moves" in self.session.options.actions:
             pipeline.append(self.mark_moves)
-        if "seek_consistency" in self.options.actions:
+        if "seek_consistency" in self.session.options.actions:
             pipeline.append(self.seek_move_consistency)
         return pipeline
 
     def set_output_pgn(self):
         output_dir = "output pgns" # should we give the user a choice?
-        input_stem = os.path.splitext(os.path.basename(self.options.input_pgn))[0]
+        input_stem = os.path.splitext(os.path.basename(self.session.options.input_pgn))[0]
         timestamp = datetime.datetime.now().strftime("%d-%m_%H-%M-%S")
         os.makedirs(output_dir, exist_ok=True)
-        self.options.output_pgn = os.path.join(
+        self.session.options.output_pgn = os.path.join(
             output_dir,
             f"{input_stem} -- {timestamp}.pgn",
         )
-
-    def _default_cache_path(self) -> str:
-        # Old behavior (sometimes is more convenient):
-        base = "cache"
-        name = "cache"
-        if self.options.input_pgn:
-            name = os.path.splitext(os.path.basename(self.options.input_pgn))[0]
-        return os.path.join(base, f"{name}.json")
-
-        # if not self.options.input_pgn:
-        #     raise ValueError("No opening PGN selected")
-
-        # with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
-        #     game = chess.pgn.read_game(pgnFile)
-        # if game is None:
-        #     raise ValueError(f"Failed to parse PGN: {self.options.input_pgn}")
-
-        # moves_uci: list[str] = []
-        # node: Node = game
-        # PLY_LIMIT = 20  # first 10 moves
-        # while node.variations and node.ply() < PLY_LIMIT:
-        #     node = node.variations[0]
-        #     moves_uci.append(node.move.uci())
-
-        # if not moves_uci:
-        #     raise ValueError(f"No moves found in PGN: {self.options.input_pgn}")
-
-        # # Prefer an existing cache for a shorter prefix, so extending the PGN mainline
-        # # doesn't force a brand-new cache file.
-        # for prefix_len in range(min(PLY_LIMIT, len(moves_uci)), 8, -1):
-        #     signature = ' '.join(moves_uci[:prefix_len])
-        #     candidate = cache_filename_from_string("pgn_checker", signature)
-        #     if os.path.exists(candidate):
-        #         return candidate
-
-        # signature = ' '.join(moves_uci)
-        # return cache_filename_from_string("pgn_checker", signature)
     
     def make_headers(self, game):
         if game.headers["Event"] == '?':
-            game.headers["Event"] = f'''plies {self.options.start_ply}-{self.options.end_ply}'''
+            game.headers["Event"] = f'''plies {self.session.options.start_ply}-{self.session.options.end_ply}'''
         else:
-            game.headers["Event"] = game.headers["Event"] + f''' | plies {self.options.start_ply}-{self.options.end_ply}'''
+            game.headers["Event"] = game.headers["Event"] + f''' | plies {self.session.options.start_ply}-{self.session.options.end_ply}'''
     
     @clock
     def run(self):
         try:
-            with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
+            with open(self.session.options.input_pgn, encoding="utf-8") as pgnFile:
                 while True:
                     node = chess.pgn.read_game(pgnFile)
 
@@ -160,22 +166,22 @@ class PgnChecker(Runner):
 
                     self.fill_the_TT(node)
                     
-                    self.cache.enable_auto_save()
-                    total = sum(1 for _ in self.cache if self.cache[_].TTed)
-                    self.progress.set_total(total)
+                    self.session.cache.enable_auto_save()
+                    total = sum(1 for _ in self.session.cache if self.session.cache[_].TTed)
+                    self.session.progress.set_total(total)
                     output_game = node  # no need to copy the way it currently works
                     self.make_headers(output_game)
 
-                    self.set_starting_pos(output_game)
+                    self.session.set_starting_pos(output_game)
                     self.make_move_coupling_dict(output_game) # MOVE
-                    node = self.starting_node
+                    node = self.session.starting_node
 
                     sys.stderr.write('starting to traverse...')
 
                     for action in self.pipeline():
                         action(node)
 
-                    print(output_game, file=open(self.options.output_pgn, "a", encoding="utf-8"), end="\n\n") # "a" for adding
+                    print(output_game, file=open(self.session.options.output_pgn, "a", encoding="utf-8"), end="\n\n") # "a" for adding
 
         except Exception as e:
             sys.stderr.write(f"Error: {traceback.format_exc()}\n")
@@ -183,30 +189,39 @@ class PgnChecker(Runner):
 
         finally:
             try:
-                self.save_cache()
+                self.session.save_cache()
             except Exception as exc:
                 sys.stderr.write(f"Failed to save cache: {exc}\n")
-            self._finalizer()
+            self.session.close()
 
         return f"Added {self.moves_added} moves"
+
+    def close(self):
+        self.session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
     
     def fill_the_TT(self, root_node: Node):
         def visit(node: Node):
-            self._record_position_in_TT(node)
+            self.session._record_position_in_TT(node)
 
-        self._traverse(root_node, visit=visit)
+        self.session._traverse(root_node, visit=visit)
 
     def find_fill_gaps(self, game_node: Node):
-        self.report_message("Finding gaps...")
+        self.session.report_message("Finding gaps...")
         gaps = self.find_gaps(game_node)
-        self.report_message("Filling gaps...")
-        self.progress.reset()
+        self.session.report_message("Filling gaps...")
+        self.session.progress.reset()
         self.fill_gaps(gaps)
 
     def find_gaps_local(self, node: Node) -> Optional[GapsInfo]:      
         pgn_ucis = [m.move.uci() for m in node.variations]
 
-        if node.turn() == self.options.side:
+        if node.turn() == self.session.options.side:
             if not pgn_ucis:
                 return GapsInfo(node.parent, [node.move.uci()])
             return
@@ -216,7 +231,7 @@ class PgnChecker(Runner):
     
     def fill_gaps(self, gaps: list[GapsInfo]):
         self.moves_added = 0
-        for gaps_info in self.progress.iter(gaps):
+        for gaps_info in self.session.progress.iter(gaps):
             node = gaps_info.node
             self.act_on_gap_data_local(node, gaps_info)
 
@@ -227,19 +242,19 @@ class PgnChecker(Runner):
         comment = ''
 
         for uci in gap_data:
-            freq = self.move_freq(log_node, uci)
+            freq = self.session.move_freq(log_node, uci)
             if freq < 0:
                 update_comment(log_node,"Move {} not found in the database".format(uci).upper(), True)
             pos_snap = PositionSnapshot(fen(log_node), log_node.ply(), last_move_uci=uci)
-            self.report(RunnerReport(kind="position", position=pos_snap,
-                                    message=f"Filling gaps... \n" + f"{100*freq:.0f}% of {self.total_games(fen(log_node))} games" +
-                                    f"\nScore rate {100*self.score_rate_move(log_node, uci):.0f}%."))
+            self.session.report(RunnerReport(kind="position", position=pos_snap,
+                                    message=f"Filling gaps... \n" + f"{100*freq:.0f}% of {self.session.total_games(fen(log_node))} games" +
+                                    f"\nScore rate {100*self.session.score_rate_move(log_node, uci):.0f}%."))
             comment += uci + ': ' + (str(freq)[:4]) + ', '
             # arrows.append([chess.parse_square(m_uci[:2]), chess.parse_square(m_uci[2:4])])
             arrows.append(arrow_from_uci(uci, color=color_from_freq(freq)))
-            child = self._add_variation(log_node, uci)
+            child = self.session._add_variation(log_node, uci)
             child.starting_comment = 'SUGGESTED LINE:'
-            self.add_sample_line(child, depth=self.options.added_depth)
+            self.add_sample_line(child, depth=self.session.options.added_depth)
         if annotate:
             update_comment(log_node, comment)
             log_node.set_arrows(arrows)
@@ -248,7 +263,7 @@ class PgnChecker(Runner):
     def find_gaps(self, game: Node):
         def post(node, child_results: list[GapsInfo], v_res):
             all_gaps = sum([c for c in child_results if c is not None], [])
-            if node.ply() < self.options.start_ply:
+            if node.ply() < self.session.options.start_ply:
                 return all_gaps # only propagate the results
             gaps_local = self.find_gaps_local(node)
             if gaps_local:
@@ -256,7 +271,7 @@ class PgnChecker(Runner):
             return all_gaps
         def reasons_to_stop(node, _): 
             return node.comment.startswith(('tr ', 'Tr ', 'Transp ', 'transp ', 'Transposes', 'transposes'))
-        return self._traverse(game, post=post, reasons_to_stop=reasons_to_stop)
+        return self.session._traverse(game, post=post, reasons_to_stop=reasons_to_stop)
 
     def gaps_local(self, node: Node):
         gaps_info = self.find_gaps_local(node)
@@ -264,19 +279,19 @@ class PgnChecker(Runner):
             self.act_on_gap_data_local(node, gaps_info)
 
     def mark_move_local(self, log_node: Node):
-        mark_fn = mark_based_on_freq_us if log_node.turn() == self.options.side else mark_based_on_freq_them
+        mark_fn = mark_based_on_freq_us if log_node.turn() == self.session.options.side else mark_based_on_freq_them
         for n in log_node.variations:
-            if self.total_games(n) < FREQ_MARK_THRESHOLD:
+            if self.session.total_games(n) < FREQ_MARK_THRESHOLD:
                 continue
-            freq = self.move_freq(log_node, n.move)
+            freq = self.session.move_freq(log_node, n.move)
             mark_fn(n, freq)
 
     def mark_moves(self, log_node):
         # TODO: if a move is frequent, promote it?
-        self.report(RunnerReport(kind="position", position=PositionSnapshot("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -", 0)))
-        self.report_message("Marking moves...")
-        self.progress.reset()
-        self._traverse(log_node, partial(PgnChecker.mark_move_local, self))
+        self.session.report(RunnerReport(kind="position", position=PositionSnapshot("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -", 0)))
+        self.session.report_message("Marking moves...")
+        self.session.progress.reset()
+        self.session._traverse(log_node, partial(PgnChecker.mark_move_local, self))
 
     @staticmethod
     def annotate_transposition(first_occurrence: Node, node: Node):
@@ -291,7 +306,7 @@ class PgnChecker(Runner):
             board = board.board()
         for move in board.legal_moves:
             board.push(move)
-            cached = self.cache.get(fen(board))
+            cached = self.session.cache.get(fen(board))
             board.pop()
             if cached is not None and cached.TTed:
                 return move
@@ -304,16 +319,16 @@ class PgnChecker(Runner):
         
         Returns move and comment.
         '''
-        stats = self.query(fen(node), "db_lichess")
+        stats = self.session.query(fen(node), "db_lichess")
         db_moves = stats.get("moves", [])
         for m in db_moves[:3]:
             move = chess.Move.from_uci(m['uci'])
             board = node.board()
             board.push(move) # lichess_to_pgn?
-            stats_m = self.query(fen(board), "db_lichess") 
+            stats_m = self.session.query(fen(board), "db_lichess") 
             if stats_m['moves']:
                 most_popular_uci = stats_m['moves'][0]['uci']
-                if self.move_freq(board, most_popular_uci) > 0.8:
+                if self.session.move_freq(board, most_popular_uci) > 0.8:
                     board.push(chess.Move.from_uci(most_popular_uci))
                     tr_move = self.find_transposition_move(board)
                     if tr_move:
@@ -341,7 +356,7 @@ class PgnChecker(Runner):
             if move not in board.legal_moves:
                 continue
 
-            q_eval = self.q_eval_move(node, move).eval
+            q_eval = self.session.q_eval_move(node, move).eval
 
             diff = abs(q_eval - engine_eval)
             if diff <= eval_eps:
@@ -352,7 +367,7 @@ class PgnChecker(Runner):
         return None
 
     def better_engine_move(self, node: Node) -> MoveChoice:
-        top2 = self.query(fen(node), "eval").top(2) # we'll also need top(2) later for nags
+        top2 = self.session.query(fen(node), "eval").top(2) # we'll also need top(2) later for nags
         eval1, best_move1, adap = top2[0]
 
         # try to keep a coupling move for the same opponent move if it's reasonably close
@@ -363,11 +378,11 @@ class PgnChecker(Runner):
         if len(top2) == 1:
             return MoveChoice(best_move1, "eng", eval1)
         eval2, best_move2, adap = top2[1]
-        stats = self.query(fen(node), "db_lichess")
+        stats = self.session.query(fen(node), "db_lichess")
         stats1 = stats_for_uci(stats, best_move1.uci())
         stats2 = stats_for_uci(stats, best_move2.uci())
-        sr1 = score_rate(stats1, self.options.side) if stats1 else 0.5
-        sr2 = score_rate(stats2, self.options.side) if stats2 else 0.5
+        sr1 = score_rate(stats1, self.session.options.side) if stats1 else 0.5
+        sr2 = score_rate(stats2, self.session.options.side) if stats2 else 0.5
         tg1 = total_games(stats1) if stats1 else 0
         tg2 = total_games(stats2) if stats2 else 0
         if (eval2 is not None and eval1 - eval2 < 0.1 
@@ -378,12 +393,12 @@ class PgnChecker(Runner):
             return MoveChoice(best_move1, "eng", eval1)            
 
     def generate_moves_us(self, node: Node) -> list[MoveChoice]:
-        eval = self.query(fen(node), "eval").best_eval()
+        eval = self.session.query(fen(node), "eval").best_eval()
         tr_move = self.find_transposition_move(node)
         if tr_move:
             board = node.board()
             board.push(tr_move)
-            tr_eval = self.query(fen(board), "eval").best_eval()
+            tr_eval = self.session.query(fen(board), "eval").best_eval()
             board.pop()
             # if a position is complex, tr_eval and eval may differ a lot just by the fact that
             # the best move is already "entered" after tr_move. Then we may not recognize tr_move
@@ -404,7 +419,7 @@ class PgnChecker(Runner):
             to_tr_move, comment = to_tr
             board = node.board()
             board.push(to_tr_move)
-            to_tr_eval = self.query(fen(board), "eval").best_eval()
+            to_tr_eval = self.session.query(fen(board), "eval").best_eval()
             board.pop()
             if to_tr_eval >= eval - 0.10 or to_tr_eval >= 0.9*eval:
                 eval = to_tr_eval
@@ -419,25 +434,25 @@ class PgnChecker(Runner):
         moves = []
         db_moves = stats.get("moves", [])
         for m in db_moves:
-            crit = gap_criterion(m, move_frequency(m, stats), self.options.freq_threshold, 
-                                        self.options.min_games, pov=self.options.side) 
+            crit = gap_criterion(m, move_frequency(m, stats), self.session.options.freq_threshold,
+                                        self.session.options.min_games, pov=self.session.options.side)
             if crit == 1:
                 moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "db"))
             if crit == 2:
-                c = f"well-scoring, ".upper() + str(score_rate(m, self.options.side))[:4] + f" in {total_games(m)} games" if DEBUG_MODE else ""
+                c = f"well-scoring, ".upper() + str(score_rate(m, self.session.options.side))[:4] + f" in {total_games(m)} games" if DEBUG_MODE else ""
                 moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "good", c))
         return moves
 
     def generate_moves_them(self, node: Node, maybe_use_engine: bool = False) -> list[MoveChoice]:
         moves = []
-        stat_list = [self.query(fen(node), type) for type in self.options.db_types]
+        stat_list = [self.session.query(fen(node), type) for type in self.session.options.db_types]
         for stats in stat_list:
             moves += self.generate_moves_them_db(stats)
         moves = remove_duplicates(moves, equality_rel=lambda m:m.move)
 
         # if no DB moves and option enabled, add an engine move
-        if not moves and self.options.use_engine_for_them and maybe_use_engine:
-            engine_move = self.query(fen(node), "q-eval").move
+        if not moves and self.session.options.use_engine_for_them and maybe_use_engine:
+            engine_move = self.session.query(fen(node), "q-eval").move
             c = "Engine".upper() if DEBUG_MODE else ""
             moves.append(MoveChoice(engine_move, "eng", None, c)) 
 
@@ -446,14 +461,14 @@ class PgnChecker(Runner):
     def add_moves_us(self, node: Node) -> tuple[Node, MoveChoice]:
         our_move_choices = self.generate_moves_us(node)
         best_choice = our_move_choices[0]
-        best_move_child = self._add_variation(node, best_choice.move, to_main=True)
+        best_move_child = self.session._add_variation(node, best_choice.move, to_main=True)
 
         if best_choice.reason == "tr":
-            self.annotate_transposition(self.cache[fen(best_move_child)].TTed[0], best_move_child)
+            self.annotate_transposition(self.session.cache[fen(best_move_child)].TTed[0], best_move_child)
             return best_move_child, best_choice
 
         for choice in our_move_choices[1:]:
-            child = self._add_variation(node, choice.move)
+            child = self.session._add_variation(node, choice.move)
             update_comment(child, choice.comment)
 
         best_move_child.nags.update(self.nags_our_move(best_move_child))
@@ -464,7 +479,7 @@ class PgnChecker(Runner):
         opponent_move_choices = self.generate_moves_them(node, maybe_use_engine=True)
 
         for choice in opponent_move_choices:
-            reply_child = self._add_variation(node, choice.move)
+            reply_child = self.session._add_variation(node, choice.move)
             update_comment(reply_child, choice.comment)
             children.append(reply_child)
 
@@ -476,13 +491,13 @@ class PgnChecker(Runner):
         best_move_child = log_node
         best_choice: Optional[MoveChoice] = None
         try:
-            self.report_position(log_node)
+            self.session.report_position(log_node)
             # , message=f"Adding sample line... Depth: {depth}." 
                                 #  + f"\n {moves_to_algebraic(node_moves(log_node))}")
 
-            if log_node.turn() == self.options.side:
-                e = self.query(fen(log_node), "eval").top(2)
-                self.report_message(f'depth: {e[0].adap}')
+            if log_node.turn() == self.session.options.side:
+                e = self.session.query(fen(log_node), "eval").top(2)
+                self.session.report_message(f'depth: {e[0].adap}')
                 # TODO: ^ reliable way to know in advance how many lines we will know, so that we never call top(1) before top(2)
 
                 self.set_question_marks(log_node)
@@ -517,7 +532,7 @@ class PgnChecker(Runner):
                 and abs(best_choice.eval) > 0.3
             ):
                 best_move_child.nags.add(
-                    eval_to_nag(pov_eval_to_white_eval(best_choice.eval, self.options.side))
+                    eval_to_nag(pov_eval_to_white_eval(best_choice.eval, self.session.options.side))
                 )
 
         
@@ -525,8 +540,8 @@ class PgnChecker(Runner):
         pp = node.parent.parent
         if pp is None:
             return
-        eval_was = self.query(fen(pp), eval_query).best_eval()
-        eval_became = self.query(fen(node), eval_query).best_eval()
+        eval_was = self.session.query(fen(pp), eval_query).best_eval()
+        eval_became = self.session.query(fen(node), eval_query).best_eval()
         node.nags.update(compute_question_marks(eval_was, eval_became))
 
     def nags_our_move(self, node: Node):
@@ -537,10 +552,10 @@ class PgnChecker(Runner):
 
     def move_is_important(self, node: Node):
         p = node.parent
-        freq = self.move_freq(node)
+        freq = self.session.move_freq(node)
         if freq == -1:
             return False # can't decide without db
-        top_lines = self.query(fen(p), "eval").top(2)
+        top_lines = self.session.query(fen(p), "eval").top(2)
         if len(top_lines) < 2:
             return False
         eval1 = top_lines[0].eval
@@ -553,7 +568,7 @@ class PgnChecker(Runner):
         return False
     
     def only_move_criterion(self, fen: str) -> bool:
-        evals = self.query(fen, "eval").top(2)
+        evals = self.session.query(fen, "eval").top(2)
         if len(evals) < 2:
             return True
         return only_move_criterion(evals[0].eval, evals[1].eval)
@@ -563,12 +578,12 @@ class PgnChecker(Runner):
         # Value: reply nodes (children) that result from different replies in that position.
         self.move_coupling: dict[str, list[Node]] = defaultdict(list)
         def visit(n: Node):
-            if n.turn() != self.options.side or n.move is None:
+            if n.turn() != self.session.options.side or n.move is None:
                 return
             key = n.move.uci()
-            for child in self.variations(n):
+            for child in self.session.variations(n):
                 self.move_coupling[key].append(child)
-        self._traverse(node, visit)
+        self.session._traverse(node, visit)
 
     def move_replacements(self, move_coupling: dict[str, list[Node]], *, eval_eps: float = 0.15, sleep_s: float = 2.0):
         """
@@ -598,12 +613,12 @@ class PgnChecker(Runner):
                     None,
                 )
 
-                base_eval = self.query(fen(unique_node), "q-eval").eval
+                base_eval = self.session.query(fen(unique_node), "q-eval").eval
 
                 parent = unique_node.parent
 
                 c = f"prev {prev_move_uci} | unique {unique_reply_uci} | "
-                self.report_position(
+                self.session.report_position(
                     parent,
                     message=(
                         f"{c}(bucket size {len(responses)}). "
@@ -618,17 +633,17 @@ class PgnChecker(Runner):
                     alt_move = chess.Move.from_uci(alt_reply_uci)
 
                     if alt_move not in board.legal_moves:
-                        self.report_position(
+                        self.session.report_position(
                             parent,
                             message=f"{c}Try {alt_reply_uci}: illegal here (skipped).",
                         )
                         continue
 
-                    alt_eval = self.q_eval_move(parent, alt_move).eval
+                    alt_eval = self.session.q_eval_move(parent, alt_move).eval
 
                     diff = abs(alt_eval - base_eval)
                     status = "Replaceable" if diff <= eval_eps else ""
-                    self.report_position(
+                    self.session.report_position(
                         parent,
                         message=(
                             f"{c}Try {alt_reply_uci}: q-eval {alt_eval:+.2f} (diff {diff:.2f}) {status}".rstrip()
@@ -649,11 +664,11 @@ class PgnChecker(Runner):
         self.make_move_coupling_dict(node)
         self.moves_added = 0
         l = self.move_replacements(self.move_coupling, eval_eps=0.15, sleep_s=1.0)
-        for parent, alt_move, diff in self.progress.iter(l):
+        for parent, alt_move, diff in self.session.progress.iter(l):
             child = next((child for child in parent.variations if child.move == alt_move), None)
             if child is not None:
                 continue # already have this move as a variation, no need to add it again
-            child = self._add_variation(parent, alt_move)
+            child = self.session._add_variation(parent, alt_move)
             update_comment(child, f"For consistency, diff is {diff:.2f}")
             self.add_sample_line(child)
 
