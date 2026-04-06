@@ -588,7 +588,7 @@ class Runner:
 
     def run(self):
         # Local imports avoid circularm dependencies (features import helpers from this module).
-        from .options import CheckerOptions, GraphOptions
+        from .options import CheckerOptions, GraphOptions, SpacedRepetitionOptions
         from .pgn_checker import PgnChecker
         from .inclusions_graph import InclusionGraphRunner
 
@@ -596,6 +596,29 @@ class Runner:
             self._feature = PgnChecker(self.options, self._progress_cb, self._report_cb)
         elif isinstance(self.options, GraphOptions):
             self._feature = InclusionGraphRunner(self.options, self._progress_cb, self._report_cb)
+        elif isinstance(self.options, SpacedRepetitionOptions):
+            from ..web.server import ensure_web_server
+            from ..web.app import sr_controller
+            from ..web.spaced_repetition import SpacedRepetitionConfig
+
+            ensure_web_server(host="127.0.0.1", port=8000)
+            sr_controller.start(
+                SpacedRepetitionConfig(
+                    input_pgn=self.options.input_pgn,
+                    play_white=self.options.play_white,
+                    start_move=self.options.start_move,
+                    end_move=self.options.end_move,
+                    non_file_move_frequency=self.options.non_file_move_frequency,
+                    engine_path=self.options.engine_path,
+                )
+            )
+
+            class _NoopClose:
+                def close(self):  # noqa: ANN001
+                    return None
+
+            self._feature = _NoopClose()
+            return "Spaced repetition launched at http://127.0.0.1:8000/"
         else:
             raise ValueError(f"Unsupported options type: {type(self.options).__name__}")
 

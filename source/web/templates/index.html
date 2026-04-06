@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>PgnChecker Web Board</title>
+
+    <!-- Lichess chessground (GPL) -->
+    <link rel="stylesheet" href="https://unpkg.com/chessground@9.2.1/assets/chessground.base.css" />
+    <link rel="stylesheet" href="https://unpkg.com/chessground@9.2.1/assets/chessground.brown.css" />
+    <link rel="stylesheet" href="https://unpkg.com/chessground@9.2.1/assets/chessground.cburnett.css" />
+
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <div class="left">
+        <div id="board" class="cg-wrap"></div>
+        <div class="controls">
+          <button id="flip">Flip</button>
+          <button id="reset">Reset</button>
+          <button id="srNew" title="Spaced repetition: new random position">New</button>
+          <button id="srContinue" title="Spaced repetition: continue in the same line">Continue</button>
+          <span id="status" class="status">disconnected</span>
+        </div>
+      </div>
+      <div class="right">
+        <div class="panel">
+          <div class="row">
+            <label for="fen">FEN</label>
+            <input id="fen" type="text" spellcheck="false" />
+            <button id="setFen">Set</button>
+          </div>
+          <div class="row">
+            <label>Message</label>
+            <div id="message" class="message"></div>
+          </div>
+        </div>
+        <div class="panel logpanel">
+          <div class="row rowhead">
+            <div>Log</div>
+            <button id="clearLog">Clear</button>
+          </div>
+          <pre id="log" class="log"></pre>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/static/board.js"></script>
+  </body>
+</html>

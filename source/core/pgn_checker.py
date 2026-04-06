@@ -24,6 +24,7 @@ from .options import CheckerOptions, DEBUG_MODE, cache_filename_from_string
 from .timer import clock
 from .database import *
 from .runner import *
+from .repertoire import RepertoireSession, default_repertoire_cache_path
 
 # TODO: identify unobvious moves
 # TODO: exclaims for their moves (if it doesn't drop the eval while the most popular one does?)
@@ -69,17 +70,8 @@ class GapsInfo:
 
 class PgnChecker:
     def __init__(self, options: CheckerOptions, progress_cb=None, report_cb=None):
-        options.side = WHITE if options.play_white else BLACK
-        options.starting_pos = fen(options.starting_pos) # all fens are normalized
-        options.adaptive_an = True # TODO
-
-        def default_cache_path() -> str:
-            # Old behavior (sometimes is more convenient):
-            base = "cache"
-            name = "cache"
-            if options.input_pgn:
-                name = os.path.splitext(os.path.basename(options.input_pgn))[0]
-            return os.path.join(base, f"{name}.json")
+        options.starting_pos = fen(options.starting_pos)  # all fens are normalized
+        options.adaptive_an = True  # TODO
 
             # if not self.options.input_pgn:
             #     raise ValueError("No opening PGN selected")
@@ -110,16 +102,15 @@ class PgnChecker:
             # signature = ' '.join(moves_uci)
             # return cache_filename_from_string("pgn_checker", signature)
 
-            # self.session = PgnSession(
-            #     options,
-            #     progress_cb=progress_cb,
-            #     report_cb=report_cb,
-            #     default_cache_path=default_cache_path,
-            # )
+        self.session = RepertoireSession(
+            options,
+            progress_cb=progress_cb,
+            report_cb=report_cb,
+            default_cache_path=lambda: default_repertoire_cache_path(options),
+        )
 
-            # self.set_output_pgn()
-
-            # self.convert_moves_to_plies()
+        self.set_output_pgn()
+        self.convert_moves_to_plies()
 
     def convert_moves_to_plies(self):
         o = self.session.options

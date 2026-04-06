@@ -62,20 +62,60 @@ class CoreOptions:
             raise ValueError("min_depth must be ≤ max_depth")
         
 
-
 @dataclass
-class CheckerOptions(CoreOptions):
-    # --- WHAT TO WORK WITH ---
+class RepertoireOptions(CoreOptions):
+    """
+    Options shared by features that operate on a repertoire PGN.
+    """
+
     input_pgn: str = field(
-        default='',  # so it doesn't complain if we try to initialize an "empty" one
+        default="",
         metadata={
             "label": "Input PGN",
             "ui_hint": "file_path",
             "file_filter": "PGN files (*.pgn)",
-            "initial_dir": "input pgns"
-        }
+            "initial_dir": "input pgns",
+        },
     )
 
+    play_white: bool = field(
+        default=True,
+        metadata={"label": "Play as White"},
+    )
+
+    start_move: int = field(
+        default=6,
+        metadata={
+            "label": "Start on Move",
+            "min": 2,
+            "max": 60,
+            "ui_group": "analysis_move_range",
+            "ui_group_order": 1,
+        },
+    )
+
+    end_move: int = field(
+        default=20,
+        metadata={
+            "label": "End on Move",
+            "min": 2,
+            "max": 80,
+            "ui_group": "analysis_move_range",
+            "ui_group_order": 2,
+        },
+    )
+
+    def validate(self):
+        super().validate()
+        if not self.input_pgn:
+            raise ValueError("No opening PGN selected")
+        if self.start_move > self.end_move:
+            raise ValueError("start_move must be ≤ end_move")
+
+
+@dataclass
+class CheckerOptions(RepertoireOptions):
+    # --- WHAT TO WORK WITH ---
     starting_pos: str = field(
         default="",
         metadata={"label": "Starting Position (FEN)"}
@@ -89,34 +129,6 @@ class CheckerOptions(CoreOptions):
     )
 
     # --- HOW TO WORK WITH IT ---
-    play_white: bool = field(
-        default=True,
-        metadata={
-            "label": "Play as White",
-        }
-    )
-
-    start_move: int = field(
-        default=6,
-        metadata={
-            "label": "Start Analysis on Move",
-            "min": 2,
-            "max": 60,
-            "ui_group": "analysis_move_range",
-            "ui_group_order": 1,
-        }
-    )
-    end_move: int = field(
-        default=20,
-        metadata={
-            "label": "End Analysis on Move",
-            "min": 2,
-            "max": 80,
-            "ui_group": "analysis_move_range",
-            "ui_group_order": 2,
-        }
-    )
-
     # --- MOVE CHOICE ---
     freq_threshold: float = field(
         default=0.15,
@@ -157,10 +169,27 @@ class CheckerOptions(CoreOptions):
 
     def validate(self):
         super().validate()
-        if not self.input_pgn:
-            raise ValueError("No opening PGN selected")
         if "fill_gaps" in self.actions and "find_gaps" not in self.actions:
             raise ValueError("Fill Gaps action requires Find Gaps to be selected")
+
+
+@dataclass
+class SpacedRepetitionOptions(RepertoireOptions):
+    non_file_move_frequency: float = field(
+        default=0.20,
+        metadata={
+            "label": "Non-file Move Frequency",
+            "ui_hint": "percentage",
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.025,
+        },
+    )
+
+    def validate(self):
+        super().validate()
+        if not (0.0 <= self.non_file_move_frequency <= 1.0):
+            raise ValueError("non_file_move_frequency must be between 0 and 1")
 
 @dataclass
 class GraphOptions(CoreOptions):
@@ -203,7 +232,7 @@ class GraphOptions(CoreOptions):
 
 
 
-feature_list = [CheckerOptions, GraphOptions]
+feature_list = [CheckerOptions, GraphOptions, SpacedRepetitionOptions]
 
 def save_settings(options_obj, options_class):
     if os.path.exists(CONFIG_FILE):

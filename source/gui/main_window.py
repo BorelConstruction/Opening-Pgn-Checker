@@ -3,6 +3,8 @@ from pathlib import Path
 
 import chess
 from PySide6.QtCore import QCoreApplication, QObject, QThread, Signal, Slot
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -36,12 +38,14 @@ MAX_ROWS = 7
 FEATURE_NAMES = {
     CheckerOptions: "Pgn Checker",
     GraphOptions: "Inclusion Graph",
+    SpacedRepetitionOptions: "Spaced Repetition (Web Board)",
 }
 
 # Introduce feature specs if this grows
 OPT_TO_FEATURE = {
     CheckerOptions: Runner,
     GraphOptions: Runner,
+    SpacedRepetitionOptions: Runner,
 }
 
 
@@ -324,10 +328,14 @@ class MainWindow(QWidget):
             self.options = self.get_current_options()
             self.save_settings()
 
+            self.options.validate()
+
+            if isinstance(self.options, SpacedRepetitionOptions):
+                self.launch_spaced_repetition(self.options)
+                return
+
             self.progress_bar.setValue(0)
             self.show_runtime_widgets()
-
-            self.options.validate()
 
             self.setEnabled(False)
 
@@ -360,6 +368,23 @@ class MainWindow(QWidget):
             if DEBUG_MODE:
                 raise
             return
+
+    def launch_spaced_repetition(self, options: "SpacedRepetitionOptions") -> None:
+        from ..web.server import ensure_web_server
+        from ..web.app import sr_controller
+        from ..web.spaced_repetition import SpacedRepetitionConfig
+
+        handle = ensure_web_server(host="127.0.0.1", port=8000)
+        cfg = SpacedRepetitionConfig(
+            input_pgn=options.input_pgn,
+            play_white=options.play_white,
+            start_move=options.start_move,
+            end_move=options.end_move,
+            non_file_move_frequency=options.non_file_move_frequency,
+            engine_path=options.engine_path,
+        )
+        sr_controller.start(cfg)
+        QDesktopServices.openUrl(QUrl(handle.url))
 
     def save_settings(self):
         save_settings(self.options, self.options_class)
