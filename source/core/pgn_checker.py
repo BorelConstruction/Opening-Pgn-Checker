@@ -110,13 +110,8 @@ class PgnChecker:
         )
 
         self.set_output_pgn()
+        self.session.options.added_depth = 2 * self.session.options.added_depth - 1
         self.convert_moves_to_plies()
-
-    def convert_moves_to_plies(self):
-        o = self.session.options
-        o.start_ply = ply_from_move_number(o.start_move)
-        o.end_ply = ply_from_move_number(o.end_move)
-        o.added_depth = 2 * o.added_depth - 1
 
     def pipeline(self):
         # a skeleton for when the logic gets more complex
@@ -163,7 +158,7 @@ class PgnChecker:
                     output_game = node  # no need to copy the way it currently works
                     self.make_headers(output_game)
 
-                    self.session.set_starting_pos(output_game)
+                    self.session._set_starting_pos(output_game)
                     self.make_move_coupling_dict(output_game) # MOVE
                     node = self.session.starting_node
 
@@ -200,7 +195,7 @@ class PgnChecker:
         def visit(node: Node):
             self.session._record_position_in_TT(node)
 
-        self.session._traverse(root_node, visit=visit)
+        self.session.traverse(root_node, visit=visit)
 
     def find_fill_gaps(self, game_node: Node):
         self.session.report_message("Finding gaps...")
@@ -262,7 +257,7 @@ class PgnChecker:
             return all_gaps
         def reasons_to_stop(node, _): 
             return node.comment.startswith(('tr ', 'Tr ', 'Transp ', 'transp ', 'Transposes', 'transposes'))
-        return self.session._traverse(game, post=post, reasons_to_stop=reasons_to_stop)
+        return self.session.traverse(game, post=post, reasons_to_stop=reasons_to_stop)
 
     def gaps_local(self, node: Node):
         gaps_info = self.find_gaps_local(node)
@@ -282,7 +277,7 @@ class PgnChecker:
         self.session.report(RunnerReport(kind="position", position=PositionSnapshot("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -", 0)))
         self.session.report_message("Marking moves...")
         self.session.progress.reset()
-        self.session._traverse(log_node, partial(PgnChecker.mark_move_local, self))
+        self.session.traverse(log_node, partial(PgnChecker.mark_move_local, self))
 
     @staticmethod
     def annotate_transposition(first_occurrence: Node, node: Node):
@@ -574,7 +569,7 @@ class PgnChecker:
             key = n.move.uci()
             for child in self.session.variations(n):
                 self.move_coupling[key].append(child)
-        self.session._traverse(node, visit)
+        self.session.traverse(node, visit)
 
     def move_replacements(self, move_coupling: dict[str, list[Node]], *, eval_eps: float = 0.15, sleep_s: float = 2.0):
         """

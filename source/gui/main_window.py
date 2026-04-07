@@ -372,18 +372,9 @@ class MainWindow(QWidget):
     def launch_spaced_repetition(self, options: "SpacedRepetitionOptions") -> None:
         from ..web.server import ensure_web_server
         from ..web.app import sr_controller
-        from ..web.spaced_repetition import SpacedRepetitionConfig
 
         handle = ensure_web_server(host="127.0.0.1", port=8000)
-        cfg = SpacedRepetitionConfig(
-            input_pgn=options.input_pgn,
-            play_white=options.play_white,
-            start_move=options.start_move,
-            end_move=options.end_move,
-            non_file_move_frequency=options.non_file_move_frequency,
-            engine_path=options.engine_path,
-        )
-        sr_controller.start(cfg)
+        sr_controller.start(options)
         QDesktopServices.openUrl(QUrl(handle.url))
 
     def save_settings(self):

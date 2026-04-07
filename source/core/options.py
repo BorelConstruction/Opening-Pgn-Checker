@@ -186,6 +186,14 @@ class SpacedRepetitionOptions(RepertoireOptions):
         },
     )
 
+    preload_db: bool = field(
+        default=False,
+        metadata={
+            "label": "Preload DB Stats (makes init slow, but queries faster later)",
+            "ui_hint": "checkbox",
+        },
+    )
+
     def validate(self):
         super().validate()
         if not (0.0 <= self.non_file_move_frequency <= 1.0):

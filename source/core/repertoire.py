@@ -20,11 +20,9 @@ def default_repertoire_cache_path(options: RepertoireOptions) -> str:
 
 class RepertoireSession(PgnSession):
     """
-    A `PgnSession` configured for repertoire-like features.
+    A 'PgnSession' configured for repertoire-like features.
 
-    - Sets `options.side` from `play_white`
-    - Converts `start_move`/`end_move` into `start_ply`/`end_ply`
-    - Uses the same default cache naming as the PGN checker
+    Mainly, caching is determined by the line, not a single position.
     """
 
     def __init__(
@@ -42,6 +40,10 @@ class RepertoireSession(PgnSession):
             report_cb=report_cb,
             default_cache_path=default_cache_path or (lambda: default_repertoire_cache_path(options)),
         )
-        self.options.start_ply = ply_from_move_number(self.options.start_move)
-        self.options.end_ply = ply_from_move_number(self.options.end_move)
+        self._convert_moves_to_plies()
+
+    def _convert_moves_to_plies(self):
+        o = self.options
+        o.start_ply = ply_from_move_number(o.start_move)
+        o.end_ply = ply_from_move_number(o.end_move)
 

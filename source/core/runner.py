@@ -247,7 +247,7 @@ class PgnSession:
 
         self._default_cache_path = default_cache_path
 
-        self.normalize_fens() # has to be done before cache loading
+        self._normalize_fens() # has to be done before cache loading
 
         self.cache = CacheDict(lambda fen: PosCache(fen))
 
@@ -256,15 +256,16 @@ class PgnSession:
         self.engine_path = getattr(self.options, "engine_path", None) or sf_path
         self._engine = None
         self.init_client()
-        self.init_queries()
+        self._init_queries()
 
 
-    def normalize_fens(self):
+    def _normalize_fens(self):
         if hasattr(self.options, "starting_pos"):
             self.options.starting_pos = fen(self.options.starting_pos)
 
-    def init_queries(self):
+    def _init_queries(self):
         pov = getattr(self.options, "side", WHITE)
+        quick_eval_provider = lambda fen: quick_eval(self.engine, fen, pov=pov)
         self._queries = {
             # NOTE: will be a bug is self.opening_explorer changes
             # (as self.cache will then store the result relative to the old explorer)
@@ -276,7 +277,7 @@ class PgnSession:
             "eval": lambda fen: EvalProvider(self, fen),
 
             # if we don't cache quick evals, results will be different every time
-            "q-eval": lambda fen: quick_eval(self.engine, fen, pov=pov)
+            "q-eval": quick_eval_provider,
         }
 
     def query(self, fen: str, type: str):
@@ -351,7 +352,7 @@ class PgnSession:
         mainline_sides = () if check_alternatives else (side,)
         return mainline_children(mainline_sides)(node)
 
-    def _traverse(self, node: Node,
+    def traverse(self, node: Node,
                     visit: Optional[Callable[[Node], VisitResultT]] = None,
                     post: Optional[Callable[[Node, list, VisitResultT], PostResultT]] = None,
                     reasons_to_stop: Optional[Callable[[Node, VisitResultT], bool]] = None,
@@ -431,7 +432,7 @@ class PgnSession:
         return score_rate(md, self.options.side)
 
     
-    def set_starting_pos(self, game: chess.pgn.GameNode):
+    def _set_starting_pos(self, game: chess.pgn.GameNode):
         if self.options.starting_pos:
             self.starting_node = find_node_by_position(game, self.options.starting_pos)
         else:
@@ -442,7 +443,7 @@ class PgnSession:
         def visit(ply):
             nonlocal count
             count += 1
-        self._traverse(root_node, visit)
+        self.traverse(root_node, visit)
         return count
     
     def _add_variation(self, node: Node, move: Union[str, chess.Board], to_main: bool = False):
@@ -597,28 +598,10 @@ class Runner:
         elif isinstance(self.options, GraphOptions):
             self._feature = InclusionGraphRunner(self.options, self._progress_cb, self._report_cb)
         elif isinstance(self.options, SpacedRepetitionOptions):
-            from ..web.server import ensure_web_server
-            from ..web.app import sr_controller
-            from ..web.spaced_repetition import SpacedRepetitionConfig
+            from ..web.spaced_repetition import SpacedRepetitionFeature
 
-            ensure_web_server(host="127.0.0.1", port=8000)
-            sr_controller.start(
-                SpacedRepetitionConfig(
-                    input_pgn=self.options.input_pgn,
-                    play_white=self.options.play_white,
-                    start_move=self.options.start_move,
-                    end_move=self.options.end_move,
-                    non_file_move_frequency=self.options.non_file_move_frequency,
-                    engine_path=self.options.engine_path,
-                )
-            )
-
-            class _NoopClose:
-                def close(self):  # noqa: ANN001
-                    return None
-
-            self._feature = _NoopClose()
-            return "Spaced repetition launched at http://127.0.0.1:8000/"
+            self._feature = SpacedRepetitionFeature(self.options, self._progress_cb, self._report_cb)
+            return self._feature.run()
         else:
             raise ValueError(f"Unsupported options type: {type(self.options).__name__}")
 

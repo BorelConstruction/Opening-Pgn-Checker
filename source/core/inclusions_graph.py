@@ -403,7 +403,7 @@ class InclusionGraphRunner:
  
         with open(self.session.options.input_pgn, encoding="utf-8") as pgnFile:
             node = chess.pgn.read_game(pgnFile)
-            self.session.set_starting_pos(node)
+            self.session._set_starting_pos(node)
   
         g = PgnInclusionGraph(get_children=default_children, get_db_stats=get_db_stats, report=self.session.report_position)
         g.build(
