@@ -139,8 +139,10 @@ function connect() {
     setTimeout(connect, 1000);
   };
 
-  ws.onerror = () => {
-    log("ws error");
+  ws.onerror = (event) => {
+    const msg = `WebSocket error: ${event}`;
+    log(msg);
+    console.error(msg, event);
   };
 
   ws.onmessage = async (ev) => {
@@ -158,6 +160,8 @@ function connect() {
 
     if (msg.type === "error") {
       log(`error: ${msg.message}`);
+      // Log full details to browser console for debugging
+      console.error("Full error details:", msg.message);
       await fetchState(); // resync
       return;
     }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,11 @@ from fastapi.staticfiles import StaticFiles
 from .board.contracts import Arrow, Circle
 from .board.session import BoardSession
 from .spaced_repetition import SpacedRepetitionController
+
+
+def _format_exception_detail() -> str:
+    """Format current exception with full traceback."""
+    return traceback.format_exc()
 
 
 class ConnectionManager:
@@ -163,8 +169,8 @@ async def ws(ws: WebSocket) -> None:
     try:
         while True:
             msg = await ws.receive_json()
-            if not isinstance(msg, dict):
-                continue
+            # if not isinstance(msg, dict):
+            #     continue
 
             msg_type = msg.get("type")
 
@@ -179,20 +185,20 @@ async def ws(ws: WebSocket) -> None:
                     else:
                         hub.apply_uci(uci.strip())
                 except Exception as exc:
-                    await ws.send_json({"type": "error", "message": str(exc)})
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
                     continue
 
             elif msg_type == "sr_new":
                 try:
                     sr_controller.new_random()
                 except Exception as exc:
-                    await ws.send_json({"type": "error", "message": str(exc)})
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
             elif msg_type == "sr_continue":
                 try:
                     sr_controller.continue_line()
                 except Exception as exc:
-                    await ws.send_json({"type": "error", "message": str(exc)})
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
             elif msg_type == "set":
                 fen = msg.get("fen")
@@ -208,7 +214,7 @@ async def ws(ws: WebSocket) -> None:
                         message=msg.get("message") or "Position set",
                     )
                 except Exception as exc:
-                    await ws.send_json({"type": "error", "message": str(exc)})
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
                     continue
 
             else:
