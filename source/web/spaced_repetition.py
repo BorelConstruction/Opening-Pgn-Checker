@@ -9,7 +9,7 @@ import chess
 import chess.pgn
 from dataclasses import dataclass
 
-from ..core.boardtools import fen, node_san, ply_from_move_number
+from ..core.boardtools import fen, node_san, ply_from_move_number, uci_from_lichess_to_pgn
 from ..core.options import SpacedRepetitionOptions, DEBUG_MODE
 from ..core.repertoire import RepertoireSession, default_repertoire_cache_path
 
@@ -259,7 +259,7 @@ class SpacedRepetitionController:
             raise ValueError("Either node or board must be provided")
 
         self._hub.set_fen(
-            board.fen(),
+            fen(board),
             orientation=self._orientation,
             message=message,
             allow_moves=True,
@@ -280,7 +280,7 @@ class SpacedRepetitionController:
             return
 
         self._hub.set_fen(
-            board.fen(),
+            fen(board),
             orientation=self._orientation,
             message=message,
             allow_moves=False,
@@ -327,21 +327,21 @@ class SpacedRepetitionController:
 
         # Final step: potentially off_book move for opponent's move
         assert node.turn() != self._side, f"Prompt selection should end on our turn {line_length}"
-        next_board, selection_debug = self._choose_move(node, off_book=False)
-        if isinstance(next_board, chess.Move):
+        next_board, selection_debug = self._choose_move(node, off_book=True)
+        if isinstance(next_board, chess.Board):
             return PromptState(None, next_board, True, selection_debug)
         else:
             return PromptState(next_board, next_board.board(), False, selection_debug)
 
     def _choose_move(
         self,
-        parent: Any,
+        parent: chess.Node,
         *,
         off_book: bool = False,
         use_engine: bool = False,
-    ) -> tuple[Union[chess.Board, chess.Move], str]:
+    ) -> tuple[Union[chess.Board, chess.Node], str]:
         """
-        Chooses a move randomly to simulate a line.
+        Chooses a move randomly to simulate a line. Returns the resulting node/board and a debug string.
 
         If a choice could not be made, returns (False, "").
         """
@@ -362,15 +362,17 @@ class SpacedRepetitionController:
         if off_book:
             # Try to find an off-book move with probability non_file_move_frequency
             if self._rng.random() < self._cfg.non_file_move_frequency:
-                board = parent.board() if hasattr(parent, "board") else parent
-                off_book_move, off_book_debug = self._find_off_book_move(board)
+                off_book_move, off_book_debug = self._find_off_book_move(parent)
                 if off_book_move is not None:
-                    return off_book_move, off_book_debug
+                    board = parent.board()
+                    board.push(off_book_move)
+                    return board, off_book_debug
                 elif use_engine:
-                    move = self._session.query(fen(board), "q-eval").move
-                    if move:
-                        board.push(move)
-                        return board, f"engine-suggested off-book move {move}"
+                    engine_move = self._session.query(fen(parent), "q-eval").move
+                    if engine_move:
+                        board = parent.board()
+                        board.push(engine_move)
+                        return board, f"engine-suggested off-book move {engine_move}"
                     else:
                     # should only happen if it's mate
                         return False, ""
@@ -392,16 +394,12 @@ class SpacedRepetitionController:
         if not move_weights:
             return None, ""
         
-        total_weight = sum(move_weights.values())
-        if total_weight <= 0:
-            return None, ""
-        
         exclude = {m.uci() for m in self._session.variations(node)}
 
         # Filter candidates: frequency >= 5%, score_rate <= 75%
         candidates = []
         for uci, weight in move_weights.items():
-            if uci in exclude:
+            if uci_from_lichess_to_pgn(uci) in exclude:
                 continue
 
             if self._session.move_freq(node, uci) < 0.05:
