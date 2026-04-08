@@ -10,19 +10,26 @@
     <link rel="stylesheet" href="https://unpkg.com/chessground@9.2.1/assets/chessground.brown.css" />
     <link rel="stylesheet" href="https://unpkg.com/chessground@9.2.1/assets/chessground.cburnett.css" />
 
+    <!-- Lichess pgn-viewer (GPL) -->
+    <link rel="stylesheet" href="https://unpkg.com/lichess-pgn-viewer@2.4.5/dist/lichess-pgn-viewer.css" />
+
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
+    <div class="topbar">
+      <div class="controls">
+        <button id="flip">Flip</button>
+        <button id="reset">Reset</button>
+        <button id="srNew" title="Spaced repetition: new random position">New</button>
+        <button id="srContinue" title="Spaced repetition: continue in the same line">Continue</button>
+        <button id="srGiveUp" title="Spaced repetition: reveal the line and browse variations">Give up</button>
+        <span id="status" class="status">disconnected</span>
+      </div>
+    </div>
+
     <div class="app">
       <div class="left">
         <div id="board" class="cg-wrap"></div>
-        <div class="controls">
-          <button id="flip">Flip</button>
-          <button id="reset">Reset</button>
-          <button id="srNew" title="Spaced repetition: new random position">New</button>
-          <button id="srContinue" title="Spaced repetition: continue in the same line">Continue</button>
-          <span id="status" class="status">disconnected</span>
-        </div>
       </div>
       <div class="right">
         <div class="panel">
@@ -36,6 +43,11 @@
             <div id="message" class="message"></div>
           </div>
         </div>
+
+        <div class="panel lpvpanel" id="lpvPanel">
+          <div id="lpv" class="lpv-root"></div>
+        </div>
+
         <div class="panel logpanel">
           <div class="row rowhead">
             <div>Log</div>

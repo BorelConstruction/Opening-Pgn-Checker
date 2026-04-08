@@ -75,13 +75,13 @@ class BoardHub:
         self._broadcast_state(state.to_dict())
         return state.to_dict()
 
-    def _broadcast_state(self, state: dict[str, Any]) -> None:
+    def broadcast(self, message: dict[str, Any]) -> None:
         if not self._loop:
             return
-        asyncio.run_coroutine_threadsafe(
-            self._manager.broadcast({"type": "state", "state": state}),
-            self._loop,
-        )
+        asyncio.run_coroutine_threadsafe(self._manager.broadcast(message), self._loop)
+
+    def _broadcast_state(self, state: dict[str, Any]) -> None:
+        self.broadcast({"type": "state", "state": state})
 
 
 _BASE_DIR = Path(__file__).resolve().parent
@@ -166,6 +166,7 @@ def api_move(payload: dict[str, Any]) -> JSONResponse:
 async def ws(ws: WebSocket) -> None:
     await manager.connect(ws)
     await ws.send_json({"type": "state", "state": hub.get_state()})
+    await ws.send_json({"type": "sr_state", "sr": sr_controller.ui_state()})
     try:
         while True:
             msg = await ws.receive_json()
@@ -197,6 +198,22 @@ async def ws(ws: WebSocket) -> None:
             elif msg_type == "sr_continue":
                 try:
                     sr_controller.continue_line()
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
+            elif msg_type == "sr_give_up":
+                try:
+                    sr_controller.give_up()
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
+            elif msg_type == "sr_goto":
+                path = msg.get("path")
+                if not isinstance(path, list) or not all(isinstance(i, int) for i in path):
+                    await ws.send_json({"type": "error", "message": "path must be a list of integers"})
+                    continue
+                try:
+                    sr_controller.goto_review_path(path)
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 

@@ -5,6 +5,9 @@
   --text: #e5e7eb;
   --border: #1f2937;
   --accent: #38bdf8;
+  --board-min: 260px;
+  --board-max: 520px;
+  --board-size: clamp(var(--board-min), min(var(--board-max), calc(100vw - 36px), calc(100vh - 220px)), var(--board-max));
 }
 
 html,
@@ -22,11 +25,17 @@ body {
 .app {
   max-width: 1200px;
   margin: 0 auto;
-  padding: 18px;
+  padding: 0 18px 18px;
   display: grid;
-  grid-template-columns: 520px 1fr;
+  grid-template-columns: var(--board-size) 1fr;
   gap: 18px;
   align-items: start;
+}
+
+.topbar {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 18px 18px 0;
 }
 
 .left {
@@ -35,8 +44,8 @@ body {
 }
 
 #board.cg-wrap {
-  width: 520px;
-  height: 520px;
+  width: var(--board-size);
+  height: var(--board-size);
   border-radius: 14px;
   overflow: hidden;
   box-shadow: 0 16px 50px rgba(0, 0, 0, 0.45);
@@ -47,6 +56,10 @@ body {
   display: flex;
   gap: 10px;
   align-items: center;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(17, 24, 39, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 button {
@@ -74,6 +87,42 @@ button:hover {
 .right {
   display: grid;
   gap: 12px;
+}
+
+.lpvpanel {
+  padding: 0;
+}
+
+#lpvPanel {
+  display: none;
+}
+
+.lpv-root {
+  width: 100%;
+  overflow: auto;
+}
+
+body.sr-review .app {
+  grid-template-columns: 1fr;
+}
+
+body.sr-review .left {
+  display: none;
+}
+
+body.sr-review #lpvPanel {
+  display: block;
+}
+
+/* Keep lichess-pgn-viewer board at a reasonable size. */
+body.sr-review #lpvPanel {
+  max-height: calc(100vh - 190px);
+  overflow: auto;
+}
+
+body.sr-review #lpv .cg-wrap {
+  width: var(--board-size) !important;
+  height: var(--board-size) !important;
 }
 
 .panel {
@@ -119,6 +168,98 @@ button:hover {
   margin-bottom: 8px;
 }
 
+.movespanel .rowhead {
+  grid-template-columns: 1fr auto;
+  margin-bottom: 8px;
+}
+
+.movesnav {
+  display: flex;
+  gap: 8px;
+}
+
+.moveshint {
+  color: var(--muted);
+  margin-bottom: 8px;
+  min-height: 18px;
+}
+
+.movetree {
+  height: 340px;
+  overflow: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 10px;
+  background: rgba(2, 6, 23, 0.55);
+}
+
+.move-item {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  border-radius: 10px;
+  padding: 6px 10px;
+  margin-bottom: 2px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  user-select: none;
+}
+
+.move-item:hover {
+  border-color: rgba(56, 189, 248, 0.35);
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.move-item:last-child {
+  margin-bottom: 0;
+}
+
+.move-item.onpath {
+  background: rgba(148, 163, 184, 0.06);
+  font-weight: 600;
+}
+
+.move-item.current {
+  border-color: rgba(56, 189, 248, 0.85);
+  background: rgba(56, 189, 248, 0.14);
+  box-shadow:
+    3px 0 0 0 rgba(56, 189, 248, 0.95) inset,
+    0 0 0 1px rgba(56, 189, 248, 0.25) inset;
+  font-weight: 700;
+}
+
+.move-item.root {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.move-prefix {
+  color: var(--muted);
+  min-width: 50px;
+  font-variant-numeric: tabular-nums;
+}
+
+.move-item.onpath .move-prefix {
+  color: #cbd5e1;
+}
+
+.move-item.current .move-prefix {
+  color: rgba(56, 189, 248, 0.95);
+}
+
+.move-san {
+  color: var(--text);
+}
+
+.move-item.onpath .move-san {
+  color: #f1f5f9;
+}
+
+.move-item.current .move-san {
+  color: #e0f2fe;
+}
+
 .log {
   margin: 0;
   height: 340px;
@@ -135,9 +276,4 @@ button:hover {
   .app {
     grid-template-columns: 1fr;
   }
-  #board.cg-wrap {
-    width: min(520px, calc(100vw - 36px));
-    height: min(520px, calc(100vw - 36px));
-  }
 }
-
