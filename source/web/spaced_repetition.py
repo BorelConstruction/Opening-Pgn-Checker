@@ -1,24 +1,30 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 import random
 import sys
-from typing import Any, Optional, Union
+from typing import Any, Optional, TypeVar, Union
 
 import chess
 import chess.pgn
+from chess.pgn import GameNode as Node
 from dataclasses import dataclass
 
-from ..core.boardtools import fen, node_san, ply_from_move_number, uci_from_lichess_to_pgn
+from ..core.boardtools import fen, node_san, uci_from_lichess_to_pgn, uci_from_lichess_to_pgn
 from ..core.options import SpacedRepetitionOptions, DEBUG_MODE
 from ..core.repertoire import RepertoireSession, default_repertoire_cache_path
+# from .pgn_export import export_pgn_subtree
+from .variation_tree import node_at_path, path_from_root
+
+K = TypeVar("K")
 
 @dataclass
 class PromptState:
-    node: Optional[chess.Node]
-    board: Optional[chess.Board]
+    node: Node
     off_file: bool
     debug_msg: str
+    anchor_node: Node
 
 
 class SpacedRepetitionFeature:
@@ -63,11 +69,21 @@ class SpacedRepetitionController:
         self._rng = random.Random()
 
         self.active = False
+        self._mode = "idle"  # idle | guess | review
 
         self._cfg = SpacedRepetitionOptions()
         self._games: list[Any] = []
 
-        self._after_our_move_node: Optional[Any] = None
+        self._after_our_move_node: Optional[Node] = None
+
+        self._prompt = PromptState(node=None, off_file=False, debug_msg="", anchor_node=None)
+
+        def ui_state(self) -> dict[str, Any]:
+            return {
+                "active": self.active,
+                "mode": self._mode,
+                "review": self._review_payload if self.active and self._mode == "review" else None,
+            }
 
     def start(self, options: SpacedRepetitionOptions, session: Optional[RepertoireSession] = None) -> None:
         self._cfg = options
@@ -91,11 +107,14 @@ class SpacedRepetitionController:
 
     def stop(self) -> None:
         self.active = False
-        self._cfg = None
+        self._mode = "idle"
         self._games = []
         self._prompt = None
         self._after_our_move_node = None
         self._close_session()
+
+    def _broadcast_ui_state(self) -> None:
+        self._hub.broadcast({"type": "sr_state", "sr": self.ui_state()})
 
     def _prefetch_db_stats(self) -> None:
         """Pre-warm the cache by querying DB stats that we will need."""
@@ -124,18 +143,18 @@ class SpacedRepetitionController:
         return weights
 
     def new_random(self, *, message: str = "New position. Make your move.") -> None:
-        if not self.active:
-            return
+        self._mode = "guess"
+        self._review_payload = None
+        self._review_path = None
+
         self._after_our_move_node = None
-        self._prompt = self._choose_random_prompt()
+        self._choose_random_prompt()
 
         if self._prompt.debug_msg:
             message = f"{message} {self._prompt.debug_msg}"
 
-        if self._prompt.node is not None:
-            self._show_prompt(node=self._prompt.node, message=message)
-        else:
-            self._show_prompt(board=self._prompt.board, message=message)
+        self._show_prompt(message=message)
+        # self._broadcast_ui_state()
 
     def continue_line(self) -> None:
         if not self.active:
@@ -160,41 +179,45 @@ class SpacedRepetitionController:
             return
         
         self._prompt.node = opp
-        self._prompt.board = None
         self._prompt.off_file = False
         self._after_our_move_node = None
-        self._show_prompt(self._prompt.node, message="Continue. Your move.")
+        self._show_prompt(message="Continue. Your move.")
 
-    def handle_guess(self, uci: str) -> None:        
-        if self._prompt.node is not None:
-            self._handle_file_guess(uci)
-        else:
+    def handle_guess(self, uci: str) -> None:
+        if self._mode != "guess":
+            raise RuntimeError("Not currently in guess mode")
+        
+        if self._prompt.off_file:
             self._handle_off_file_guess(uci)
+        else:
+            self._handle_file_guess(uci)
 
     def _handle_file_guess(self, uci: str) -> None:
-        expected_moves = list(self._session.variations(self._prompt.node))
+        expected_moves = self._session.variations(self._prompt.node)
         if not expected_moves:
             self.new_random(message="No moves in file here. New position.")
             return
 
-        expected_ucis = {n.move.uci() for n in expected_moves}
-        if uci in expected_ucis:
-            chosen_node = next(n for n in expected_moves if n.move and n.move.uci() == uci)
-            san = node_san(chosen_node)
+        chosen_node = next((n for n in expected_moves if n.move and n.move.uci() == uci_from_lichess_to_pgn(uci)), None)
+        if chosen_node:
             self._after_our_move_node = chosen_node
-            self._prompt.board = None
             self._prompt.off_file = False
-            self._advance_line(chosen_node, san)
+            self._prompt.node = chosen_node
+            self._advance_line(chosen_node)
             return
+
+        # child = self._session._add_variation(self._prompt.node, uci)
+        # self._prompt.node = child
 
         expected_sans = ", ".join(
             node_san(n) for n in expected_moves
         )
-        user_eval = self._evaluate_move(self._prompt.node.board(), uci)
+        user_eval = self._evaluate_move(self._prompt.node, uci)
         best_expected_eval = None
-        evals = [self._evaluate_move(self._prompt.node.board(), n.move.uci())
+        evals = [self._evaluate_move(self._prompt.node, n.move.uci())
                  for n in expected_moves]
-        best_expected_eval = max(evals)
+        if evals:
+            best_expected_eval = max(evals)
 
         msg = f"Wrong. Expected: {expected_sans}."
         if user_eval is not None:
@@ -202,68 +225,60 @@ class SpacedRepetitionController:
             if best_expected_eval is not None:
                 msg += f" File move eval {best_expected_eval:+.2f}."
 
-        self._show_prompt(self._prompt.node, message=msg)
+        self._show_prompt(message=msg)
 
     def _handle_off_file_guess(self, uci: str) -> None:
-        board = self._prompt.board
-        move = chess.Move.from_uci(uci)
-        
-        if move not in board.legal_moves:
-            self._show_prompt(board=board, message=f"Illegal move: {uci}. Try again.")
-            return
+        ev = self._session.query(fen(self._prompt.node), "q-eval")
+        eval, best_reply = ev.eval, ev.move
 
-        ev = self._session.q_eval_move(self._prompt.board, move)
-        move_eval, reply = ev.eval, ev.move
-        san = _san_from_board(board, move)
-        reply_san = self._prompt.board.san(reply)
+        user_ev = self._session.q_eval_move(self._prompt.node, uci)
+        move_eval, reply_to_user = user_ev.eval, user_ev.move
 
-        msg = f"Off-file {san}. Evaluation {move_eval:+.2f} after {reply}."
-        msg += f" Best was {reply_san} with evaluation {move_eval:+.2f}."
+        best_reply_san = node_san(self._prompt.node, best_reply) if best_reply else "None"
+        san = node_san(self._prompt.node)
+        msg = f"Off-file {san}. Your move: eval {move_eval:+.2f} after {reply_to_user}."
+        if uci == best_reply.uci():
+            msg += " Good guess!"
+        else:
+            msg += f" Best was {best_reply_san} with evaluation {eval:+.2f}."
         msg += " Try again or click New."
 
-        self._show_prompt(board=board, message=msg)
+        self._show_prompt(message=msg)
 
-    def _advance_line(self, chosen: Any, san: str) -> None:
-        chosen_variations = list(self._session.variations(chosen))
-        if not chosen_variations:
-            self.new_random(message=f"Correct: {san}. Line ended. New random position.")
-            return
+    def _advance_line(self, chosen: Node) -> None:
+        assert chosen.turn() != self._side, "Chosen move should be ours"
+        next_node, selection_debug = self._choose_move(chosen)
 
-        opp, advance_debug = self._choose_move(chosen)
-
-        if opp is None:
-            self.new_random(message=f"Correct: {san}. Line ended. New random position.")
-            return
-
-        if opp.turn() != self._side or not self._session.variations(opp):
-            self.new_random(message=f"Correct: {san}. No further guessable line. New random position.")
-            return
-
-        self._prompt = PromptState(opp, None, False, advance_debug)
-        message = f"Correct: {san}. Continue along the line."
-        if advance_debug:
-            message = f"{message} {advance_debug}"
-        self._show_prompt(self._prompt.node, message=message)
-
-    def _show_prompt(self, node: Any = None, board: Optional[chess.Board] = None, *, message: str) -> None:
-        if node is not None:
-            self._hub.set_from_node(
-                node,
-                orientation=self._orientation,
-                message=message,
-                allow_moves=True,
+        if next_node is False:
+            self._enter_review_mode(
+                node=chosen,
+                message=f"Correct: {node_san(chosen)}. Line ended. Browse the tree or click New.",
             )
             return
 
-        if board is None:
-            raise ValueError("Either node or board must be provided")
+        # if next_node.ply() > self._session.options.end_ply:
+        #     self._enter_review_mode(
+        #         node=chosen,
+        #         message=f"Correct: {node_san(chosen)}. Reached end of range. Browse the tree or click New.",
+        #     )
 
-        self._hub.set_fen(
-            fen(board),
+
+        self._prompt.node = next_node
+        self._prompt.debug_msg = selection_debug
+
+        message = f"Correct: {node_san(chosen)}. Continue along the line."
+        if selection_debug:
+            message = f"{message} {selection_debug}"
+        self._show_prompt(message=message)
+
+    def _show_prompt(self, *, message: str) -> None:
+        self._hub.set_from_node(
+            self._prompt.node,
             orientation=self._orientation,
             message=message,
             allow_moves=True,
         )
+
 
     def _show_after_move(self, node: Any = None, board: Optional[chess.Board] = None, *, message: str) -> None:
         if node is None and board is None:
@@ -290,62 +305,70 @@ class SpacedRepetitionController:
         """Pick a random game and navigate to start_ply, then choose a prompt."""        
         for _ in range(len(self._games)):
             game = self._rng.choice(self._games)
-            node = self._mainline_node_at_ply(game, self._session.options.start_ply)
-            while not (prompt := self._choose_prompt(node)):
-                pass
-            if prompt.node is not None or prompt.board is not None:
-                return prompt
-        
-        # Fallback: try the first game
-        node = self._mainline_node_at_ply(self._games[0], self._session.options.start_ply)
-        return self._choose_prompt(node)
+            self._tree_root = self._mainline_node_at_ply(game, self._session.options.start_ply)
+            node = deepcopy(self._tree_root)
+            while not (success := self._choose_prompt(node)):
+                # we may add some moves to node while choosing, so reset to the file contents
+                node = deepcopy(self._tree_root)
+
 
     def _choose_prompt_line_length(self, node: Any) -> int:
         remaining = self._session.options.end_ply - node.ply()
         if remaining <= 0:
             return 0
         # Choose a short line length for prompt sampling.
-        return min(max(1, self._rng.randint(1, 5)), remaining)
+        # return min(max(1, self._rng.randint(1, 5)), remaining)
+        return self._rng.randint(1, remaining)
 
-    def _choose_prompt(self, node: Any) -> PromptState:
-        """Simulate walking through a line. Returns False if a walk along a line failed."""
+    def _choose_prompt(self, node: Node) -> bool:
+        """Simulate walking through a randomly chosen line. 
+        Results in populting self._prompt.
+        Returns False if a walk along a line failed."""
         selection_debug = ""
+        self._prompt.off_file = False
+        self._prompt.anchor_node = node
         line_length = self._choose_prompt_line_length(node)
 
         # we'll do line_length or  line_length-1 steps total
         for step in range(line_length - 2):
-            next_node, _ = self._choose_move(node, off_book=False)
+            next_node, _ = self._choose_move(node, maybe_off_book=False)
             if next_node is False:
                 return False
             node = next_node
 
         if node.turn() == self._side:
-            next_node, _ = self._choose_move(node, off_book=False)
+            next_node, _ = self._choose_move(node, maybe_off_book=False)
             if next_node is False:
                 return False
             node = next_node
 
         # Final step: potentially off_book move for opponent's move
-        assert node.turn() != self._side, f"Prompt selection should end on our turn {line_length}"
-        next_board, selection_debug = self._choose_move(node, off_book=True)
-        if isinstance(next_board, chess.Board):
-            return PromptState(None, next_board, True, selection_debug)
-        else:
-            return PromptState(next_board, next_board.board(), False, selection_debug)
+        assert node.turn() != self._side, f"Prompt selection should end on our turn {line_length}" # TODO: remove this after a while
+        next_node, selection_debug = self._choose_move(node, maybe_off_book=True)
+        if next_node is False:
+            return False
+        
+        self._prompt.node = next_node
+        self._prompt.debug_msg = selection_debug
+
+        return True        
 
     def _choose_move(
         self,
-        parent: chess.Node,
+        parent: Node,
         *,
-        off_book: bool = False,
+        maybe_off_book: bool = False,
         use_engine: bool = False,
-    ) -> tuple[Union[chess.Board, chess.Node], str]:
+    ) -> tuple[Node, str]:
         """
-        Chooses a move randomly to simulate a line. Returns the resulting node/board and a debug string.
+        Chooses a move randomly to simulate a step along aline. 
+        Determines changes in self._prompt.off_file.
+        Returns the resulting node and a debug string.
 
         If a choice could not be made, returns (False, "").
         """
-        
+        off_book = maybe_off_book and self._rng.random() < self._cfg.non_file_move_frequency
+
         children = self._session.variations(parent)
         if not children:
             # if there are no moves for us in the file but we are still here, that's impoper usage
@@ -361,21 +384,20 @@ class SpacedRepetitionController:
             
         if off_book:
             # Try to find an off-book move with probability non_file_move_frequency
-            if self._rng.random() < self._cfg.non_file_move_frequency:
-                off_book_move, off_book_debug = self._find_off_book_move(parent)
-                if off_book_move is not None:
-                    board = parent.board()
-                    board.push(off_book_move)
-                    return board, off_book_debug
-                elif use_engine:
-                    engine_move = self._session.query(fen(parent), "q-eval").move
-                    if engine_move:
-                        board = parent.board()
-                        board.push(engine_move)
-                        return board, f"engine-suggested off-book move {engine_move}"
-                    else:
-                    # should only happen if it's mate
-                        return False, ""
+            off_book_move, off_book_debug = self._find_off_book_move(parent)
+            if off_book_move is not None:
+                child = self._session._add_variation(parent, off_book_move)
+                self._prompt.off_file = True
+                return child, off_book_debug
+            elif use_engine:
+                engine_move = self._session.query(fen(parent), "q-eval").move
+                if engine_move:
+                    child = self._session._add_variation(parent, engine_move)
+                    self._prompt.off_file = True
+                    return child, f"engine-suggested off-book move {engine_move}"
+                else:
+                # should only happen if it's mate
+                    return False, ""
             # Fall through to normal logic
 
         weights = self._child_weights(parent, children)
@@ -388,11 +410,11 @@ class SpacedRepetitionController:
             node = node.variations[0]
         return node
 
-    def _find_off_book_move(self, node: chess.Node) -> tuple[Optional[chess.Move], str]:
+    def _find_off_book_move(self, node: Node) -> tuple[Optional[chess.Move], str]:
         """Find an off-book DB move with frequency >= 5% and score_rate <= 75%."""
         move_weights = self._get_move_weights(node)
         if not move_weights:
-            return None, ""
+            return None, "no children"
         
         exclude = {m.uci() for m in self._session.variations(node)}
 
@@ -413,25 +435,87 @@ class SpacedRepetitionController:
             candidates.append((chess.Move.from_uci(uci), weight))
 
         if not candidates:
-            return None, ""
+            return None, "no candidates"
 
         # Select from candidates using weights
         moves, weights = zip(*candidates)
         move = self._rng_choice(list(moves), list(weights))
         debug_text = self._format_rng_weights(list(moves), list(weights))
         return move, debug_text
+    
+    def give_up(self) -> None:
+        self._ensure_active()
+        if self._mode != "guess":
+            return
 
-    def _child_weights(self, parent: Any, variations: list[Any]) -> list[float]:
-        if isinstance(parent, chess.Board):
-            turn = parent.turn
+        if self._prompt.node is not None:
+            expected_moves = list(self._session.variations(self._prompt.node))
+            if expected_moves:
+                expected_sans = ", ".join(node_san(n) for n in expected_moves)
+                message = f"Gave up. Expected: {expected_sans}. Browse the tree or click New."
+            else:
+                message = "Gave up. No moves in file here. Browse the tree or click New."
         else:
-            turn = parent.turn() # thanks python-chess
-        
-        if turn == self._side:
+            message = "Gave up (off-file prompt). Browse the repertoire tree or click New."
+
+        self._enter_review_mode(node=self._prompt.anchor_node, message=message)
+
+    def goto_review_path(self, path: list[int]) -> None:
+        self._ensure_active()
+        if self._mode != "review":
+            raise RuntimeError("Browsing is only available in review mode")
+
+        end_ply = self._session.options.end_ply
+        node = node_at_path(self._session, self._tree_root, path, end_ply=end_ply)
+
+        self._review_path = list(path)
+        self._hub.set_from_node(
+            node,
+            orientation=self._orientation,
+            message="Browsing variations",
+            allow_moves=False,
+        )
+        # self._broadcast_ui_state()
+
+    def _enter_review_mode(self, *, node: chess.pgn.GameNode, message: str) -> None:
+        self._ensure_active()
+
+        self._mode = "review"
+        end_ply = self._session.options.end_ply
+        self._review_path = path_from_root(self._session, self._tree_root, node)
+        exported = export_pgn_subtree(
+            self._session,
+            self._tree_root,
+            end_ply=end_ply,
+            prefer_mainline_path=self._review_path,
+        )
+        if exported.skipped_illegal_moves:
+            message = (
+                f"{message} (skipped {exported.skipped_illegal_moves} illegal move(s) while exporting PGN"
+                + (f"; first: {exported.first_illegal_move}" if exported.first_illegal_move else "")
+                + ")"
+            )
+        self._review_payload = {
+            "fen": exported.fen,
+            "pgn": exported.pgn,
+            "initialPly": exported.initial_ply,
+            "orientation": self._orientation,
+        }
+
+        self._hub.set_from_node(
+            node,
+            orientation=self._orientation,
+            message=message,
+            allow_moves=False,
+        )
+        # self._broadcast_ui_state()
+
+    def _child_weights(self, node: Node, variations: list[Any]) -> list[float]:
+        if node.turn() == self._side:
             # TODO: we may want to assign higher weights to file's main line
             return [1.0] * len(variations)
         
-        move_weights = self._get_move_weights(parent)
+        move_weights = self._get_move_weights(node)
         if not move_weights:
             return [1.0] * len(variations)
 
@@ -447,15 +531,16 @@ class SpacedRepetitionController:
             return weights
         return [1.0] * len(variations)
 
-    def _rng_choice(self, items: list[Any], weights: list[float]) -> Any:
-        if not items:
-            return None
-        if len(items) != len(weights):
-            return self._rng.choice(items)
 
+    def _rng_choice(self, items: list[K], weights: Optional[list[float]]=None) -> K:
+        if not items:
+            raise ValueError("No items to choose from")
+        if len(items) != len(weights):
+            raise ValueError("Items and weights must have the same length")
+
+        if weights is None:
+            weights = [1.0] * len(items)
         total = sum(weights)
-        if total <= 0:
-            return self._rng.choice(items)
 
         threshold = self._rng.random() * total
         cumulative = 0.0
@@ -509,20 +594,13 @@ class SpacedRepetitionController:
         return move_count / total_weight
 
 
-    def _evaluate_move(self, board: Union[chess.Board, chess.Node], move: Union[chess.Move, str]) -> float:
-        return self._session.q_eval_move(board, move).eval
+    def _evaluate_move(self, position: Union[chess.Board, Node], move: Union[chess.Move, str]) -> float:
+        return self._session.q_eval_move(position, move).eval
 
 
     def _close_session(self) -> None:
         self._session.close()
         self._session = None
-
-
-def _san_from_board(board: chess.Board, move: chess.Move) -> str:
-    try:
-        return board.san(move)
-    except Exception:
-        return move.uci()
 
 
 def _load_games(path: str) -> list[Any]:
@@ -534,7 +612,3 @@ def _load_games(path: str) -> list[Any]:
                 break
             games.append(g)
     return games
-
-def truncate_to_even(number: int) -> int:
-    return number - (number % 2)
-

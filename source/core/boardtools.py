@@ -76,7 +76,12 @@ def find_node_by_position(node: Node, fen_str: str) -> Node:
 def opposite_side(side: chess.Color) -> chess.Color:
     return WHITE if side == BLACK else BLACK
 
-def node_san(n: Node) -> str:
+def node_san(n: Node, move: Optional[Union[chess.Move, str]] = None) -> str:
+    if move is not None:
+        if isinstance(move, str):
+            move = chess.Move.from_uci(move)
+        b = n.board()
+        return b.san(move)
     b = n.parent.board()
     return b.san(n.move)
 
