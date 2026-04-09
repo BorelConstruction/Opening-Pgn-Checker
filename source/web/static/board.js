@@ -10,6 +10,7 @@ const flipBtn = document.getElementById("flip");
 const resetBtn = document.getElementById("reset");
 const srNewBtn = document.getElementById("srNew");
 const srContinueBtn = document.getElementById("srContinue");
+const srPrevBtn = document.getElementById("srPrev");
 const setFenBtn = document.getElementById("setFen");
 const clearLogBtn = document.getElementById("clearLog");
 
@@ -158,6 +159,12 @@ function connect() {
       return;
     }
 
+    if (msg.type === "sr_state") {
+      // Handle SR state update if needed
+      console.log("SR state:", msg.sr);
+      return;
+    }
+
     if (msg.type === "error") {
       log(`error: ${msg.message}`);
       // Log full details to browser console for debugging
@@ -174,6 +181,7 @@ resetBtn.addEventListener("click", () => send({ type: "set", fen: "startpos" }))
 
 srNewBtn.addEventListener("click", () => send({ type: "sr_new" }));
 srContinueBtn.addEventListener("click", () => send({ type: "sr_continue" }));
+srPrevBtn.addEventListener("click", () => send({ type: "sr_prev" }));
 
 setFenBtn.addEventListener("click", () => {
   const fen = (fenEl.value || "").trim();

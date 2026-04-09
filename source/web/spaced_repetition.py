@@ -15,7 +15,7 @@ from ..core.boardtools import fen, node_san, uci_from_lichess_to_pgn, uci_from_l
 from ..core.options import SpacedRepetitionOptions, DEBUG_MODE
 from ..core.repertoire import RepertoireSession, default_repertoire_cache_path
 # from .pgn_export import export_pgn_subtree
-from .variation_tree import node_at_path, path_from_root
+# from .variation_tree import node_at_path, path_from_root
 
 K = TypeVar("K")
 
@@ -25,6 +25,9 @@ class PromptState:
     off_file: bool
     debug_msg: str
     anchor_node: Node
+
+    def __bool__(self):
+        return self.node is not None 
 
 
 class SpacedRepetitionFeature:
@@ -77,6 +80,7 @@ class SpacedRepetitionController:
         self._after_our_move_node: Optional[Node] = None
 
         self._prompt = PromptState(node=None, off_file=False, debug_msg="", anchor_node=None)
+        self._prompt_history = []
 
         def ui_state(self) -> dict[str, Any]:
             return {
@@ -148,6 +152,7 @@ class SpacedRepetitionController:
         self._review_path = None
 
         self._after_our_move_node = None
+        self._previous_prompt = deepcopy(self._prompt)
         self._choose_random_prompt()
 
         if self._prompt.debug_msg:
@@ -310,6 +315,7 @@ class SpacedRepetitionController:
             while not (success := self._choose_prompt(node)):
                 # we may add some moves to node while choosing, so reset to the file contents
                 node = deepcopy(self._tree_root)
+            self._prompt_history.append(deepcopy(self._prompt))
 
 
     def _choose_prompt_line_length(self, node: Any) -> int:
@@ -476,6 +482,14 @@ class SpacedRepetitionController:
             allow_moves=False,
         )
         # self._broadcast_ui_state()
+
+    def prev_prompt(self) -> None:
+        if len(self._prompt_history) > 1:
+            self._mode = "guess"
+            self._prompt = self._prompt_history[-2]
+            # swap the last two
+            self._prompt_history[-2:] = self._prompt_history[:-3:-1]
+            self._show_prompt(message="Back to previous prompt. Make your move.")
 
     def _enter_review_mode(self, *, node: chess.pgn.GameNode, message: str) -> None:
         self._ensure_active()

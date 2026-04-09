@@ -200,6 +200,12 @@ async def ws(ws: WebSocket) -> None:
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
+            elif msg_type == "sr_prev":
+                try:
+                    sr_controller.prev_prompt()
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
             elif msg_type == "set":
                 fen = msg.get("fen")
                 if not isinstance(fen, str) or not fen.strip():
