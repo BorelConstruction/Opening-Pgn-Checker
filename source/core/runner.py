@@ -352,6 +352,14 @@ class PgnSession:
         mainline_sides = () if check_alternatives else (side,)
         return mainline_children(mainline_sides)(node)
 
+    def traversal_restrictions(self) -> TraversalPolicy:
+        kwargs = {"get_children": self.variations}
+        for attr in ("start_ply", "end_ply"):
+            if hasattr(self.options, attr):
+                kwargs[attr] = getattr(self.options, attr)
+
+        return TraversalPolicy(**kwargs)
+
     def traverse(self, node: Node,
                     visit: Optional[Callable[[Node], VisitResultT]] = None,
                     post: Optional[Callable[[Node, list, VisitResultT], PostResultT]] = None,
@@ -360,14 +368,9 @@ class PgnSession:
         '''Traverse the subtree rooted at node
         in a way consistent with self.options'''
 
-        if get_children is None:
-            get_children = self.variations
-
-        kwargs = {"get_children": get_children}
-        for attr in ("start_ply", "end_ply"):
-            if hasattr(self.options, attr):
-                kwargs[attr] = getattr(self.options, attr)
-        tp = TraversalPolicy(**kwargs)
+        tp = self.traversal_restrictions()
+        if get_children:
+            tp.get_children = get_children
 
         return traverse(node, visit, post, reasons_to_stop, tp, self.progress)
     
@@ -439,12 +442,7 @@ class PgnSession:
             self.starting_node = game
 
     def count_nodes(self, root_node):
-        count = 0
-        def visit(ply):
-            nonlocal count
-            count += 1
-        self.traverse(root_node, visit)
-        return count
+        return count_nodes(root_node, self.traversal_restrictions())
     
     def _add_variation(self, node: Node, move: Union[str, chess.Board], to_main: bool = False):
         if isinstance(move, str):
@@ -460,6 +458,8 @@ class PgnSession:
     def _record_position_in_TT(self, node): # TODO: when do we add?
         if not self.cache[fen(node)].TTed:
             self.cache[fen(node)].TTed.append(node) 
+        if len(self.cache[fen(node)].TTed) > 1:
+            self.cache[fen(node)].TTed.sort(key=lambda n: count_nodes(n))
     
     def q_eval_move(self, board: Union[Node, chess.Board], move: Union[chess.Move, str]) -> EngineEval:
         if isinstance(board, Node):

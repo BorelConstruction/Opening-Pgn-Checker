@@ -6,7 +6,7 @@ from chess import WHITE
 from chess import BLACK
 
 
-from .traversal import traverse, propagator_post
+from .traversal import TraversalPolicy, traverse, propagator_post
 from .options import DEBUG_MODE
 
 def update_comment(node: Node, message: str, debug=False):
@@ -87,6 +87,14 @@ def node_san(n: Node, move: Optional[Union[chess.Move, str]] = None) -> str:
 
 def uci_to_san(uci: str, board: chess.Board) -> str:
     return board.san(chess.Move.from_uci(uci))
+
+def count_nodes(root_node, tp: Optional[TraversalPolicy] = None):
+    count = 0
+    def visit(ply):
+        nonlocal count
+        count += 1
+    traverse(root_node, visit, tp=tp)
+    return count
 
 class FirstDifference(NamedTuple):
     ply: int

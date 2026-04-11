@@ -29,8 +29,10 @@ def traverse(node: Node,
                 visit: Callable = None,
                 post: Callable = None,
                 reasons_to_stop: Callable = None,
-                tp: TraversalPolicy = TraversalPolicy(),
+                tp: TraversalPolicy = None,
                 progress = None):
+    if tp is None:
+        tp = TraversalPolicy()
     start_ply, end_ply, get_children = tp
 
     child_results = []
