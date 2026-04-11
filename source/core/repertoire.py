@@ -17,6 +17,32 @@ def default_repertoire_cache_path(options: RepertoireOptions) -> str:
         name = os.path.splitext(os.path.basename(options.input_pgn))[0]
     return os.path.join(base, f"{name}.json")
 
+    # more rubust -- does not depend on the file naming
+    with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
+        game = chess.pgn.read_game(pgnFile)
+    if game is None:
+        raise ValueError(f"Failed to parse PGN: {self.options.input_pgn}")
+
+    moves_uci: list[str] = []
+    node: Node = game
+    PLY_LIMIT = 20  # first 10 moves
+    while node.variations and node.ply() < PLY_LIMIT:
+        node = node.variations[0]
+        moves_uci.append(node.move.uci())
+
+    pgn_basename = os.path.basename(self.options.input_pgn)
+
+    # Prefer an existing cache for a shorter prefix, so extending the PGN mainline
+    # doesn't force a brand-new cache file.
+    for prefix_len in range(min(PLY_LIMIT, len(moves_uci)), 8, -1):
+        signature = f"{pgn_basename}|{' '.join(moves_uci[:prefix_len])}"
+        candidate = cache_filename_from_string("pgn_checker", signature)
+        if os.path.exists(candidate):
+            return candidate
+
+    signature = f"{pgn_basename}|{' '.join(moves_uci)}"
+    return cache_filename_from_string("pgn_checker", signature)
+
 
 class RepertoireSession(PgnSession):
     """

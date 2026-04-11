@@ -140,10 +140,9 @@ class SpacedRepetitionController:
         
         weights = {}
         for move_data in data.get("moves", []):
-            uci = move_data["uci"]
-            if uci:
-                count = move_data.get("white", 0) + move_data.get("draws", 0) + move_data.get("black", 0)
-                weights[uci] = float(count)
+            uci = uci_from_lichess_to_pgn(move_data["uci"])
+            count = move_data.get("white", 0) + move_data.get("draws", 0) + move_data.get("black", 0)
+            weights[uci] = float(count)
         return weights
 
     def new_random(self, *, message: str = "New position. Make your move.") -> None:
@@ -310,7 +309,11 @@ class SpacedRepetitionController:
         """Pick a random game and navigate to start_ply, then choose a prompt."""        
         for _ in range(len(self._games)):
             game = self._rng.choice(self._games)
-            self._tree_root = self._mainline_node_at_ply(game, self._session.options.start_ply)
+            # self._tree_root = self._mainline_node_at_ply(game, self._session.options.start_ply)
+            # we can start from the main line at start_ply, but this deesn't seem right
+            # if by the moment start_ply there is branching already, other lines have to be checked
+            # long-term, we give the user the choice of which position to start from and in which range to generate
+            self._tree_root = game
             node = deepcopy(self._tree_root)
             while not (success := self._choose_prompt(node)):
                 # we may add some moves to node while choosing, so reset to the file contents
@@ -319,28 +322,31 @@ class SpacedRepetitionController:
 
 
     def _choose_prompt_line_length(self, node: Any) -> int:
-        remaining = self._session.options.end_ply - node.ply()
-        if remaining <= 0:
-            return 0
-        # Choose a short line length for prompt sampling.
-        # return min(max(1, self._rng.randint(1, 5)), remaining)
-        return self._rng.randint(1, remaining)
+        # start_ply = min(node.ply(), self._session.options.start_ply)
+        # remaining = self._session.options.end_ply - start_ply
+        # if remaining <= 0:
+        #     return 0
+        # # return min(max(1, self._rng.randint(1, 5)), remaining)
+        # return self._rng.randint(1, remaining)
+        return self._rng.randint(self._session.options.start_ply, self._session.options.end_ply)+1
 
     def _choose_prompt(self, node: Node) -> bool:
         """Simulate walking through a randomly chosen line. 
         Results in populting self._prompt.
-        Returns False if a walk along a line failed."""
+        Returns False if the walk along a line failed."""
         selection_debug = ""
         self._prompt.off_file = False
-        self._prompt.anchor_node = node
         line_length = self._choose_prompt_line_length(node)
 
-        # we'll do line_length or  line_length-1 steps total
+        # we'll do line_length or line_length-1 steps total
         for step in range(line_length - 2):
             next_node, _ = self._choose_move(node, maybe_off_book=False)
             if next_node is False:
                 return False
             node = next_node
+            if step == self._session.options.start_ply:
+                self._prompt.anchor_node = node
+
 
         if node.turn() == self._side:
             next_node, _ = self._choose_move(node, maybe_off_book=False)
@@ -443,7 +449,6 @@ class SpacedRepetitionController:
         if not candidates:
             return None, "no candidates"
 
-        # Select from candidates using weights
         moves, weights = zip(*candidates)
         move = self._rng_choice(list(moves), list(weights))
         debug_text = self._format_rng_weights(list(moves), list(weights))
@@ -524,7 +529,7 @@ class SpacedRepetitionController:
         )
         # self._broadcast_ui_state()
 
-    def _child_weights(self, node: Node, variations: list[Any]) -> list[float]:
+    def _child_weights(self, node: Node, variations: list[Node]) -> list[float]:
         if node.turn() == self._side:
             # TODO: we may want to assign higher weights to file's main line
             return [1.0] * len(variations)
@@ -535,15 +540,10 @@ class SpacedRepetitionController:
 
         weights = []
         for child in variations:
-            if getattr(child, "move", None) is None:
-                weights.append(0.0)
-                continue
             uci = child.move.uci()
             weights.append(move_weights.get(uci, 0.0))
 
-        if any(w > 0 for w in weights):
-            return weights
-        return [1.0] * len(variations)
+        return weights
 
 
     def _rng_choice(self, items: list[K], weights: Optional[list[float]]=None) -> K:
@@ -588,24 +588,6 @@ class SpacedRepetitionController:
         probs = [weight / total for weight in weights[:5]]
         prob_entries = [f"{p:.1%}" for p in probs]
         return f"rng weights: {', '.join(entries)}; probs: {', '.join(prob_entries)}"
-
-    def _edge_probability(self, parent: Any, move: chess.Move) -> float:
-        move_weights = self._get_move_weights(parent)
-        if not move_weights:
-            # No DB data; fall back to uniform
-            variation_count = max(len(self._session.variations(parent)), 1)
-            return 1.0 / variation_count
-
-        total_weight = sum(move_weights.values())
-        if total_weight <= 0:
-            variation_count = max(len(self._session.variations(parent)), 1)
-            return 1.0 / variation_count
-
-        uci = move.uci()
-        move_count = move_weights.get(uci, 0.0)
-        if move_count <= 0:
-            return 0.0  # Move not in database
-        return move_count / total_weight
 
 
     def _evaluate_move(self, position: Union[chess.Board, Node], move: Union[chess.Move, str]) -> float:
