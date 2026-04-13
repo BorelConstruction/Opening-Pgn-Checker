@@ -33,6 +33,9 @@ def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attemp
                 delay = base_delay * (2 ** attempt)
                 time.sleep(delay)
                 sys.stderr.write(f"\n 429, {attempt}")
+            elif status in (500, 502, 503, 504): # not an expert, not sure what time to wait for max robustness
+                time.sleep(10)
+                continue
             elif status in (401, 403):
                 url = None
                 try:
