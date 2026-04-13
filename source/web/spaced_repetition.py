@@ -11,11 +11,13 @@ import chess.pgn
 from chess.pgn import GameNode as Node
 from dataclasses import dataclass
 
+# from source.web.app import BoardHub
+
 from ..core.boardtools import fen, node_san, uci_from_lichess_to_pgn, uci_from_lichess_to_pgn
 from ..core.options import SpacedRepetitionOptions, DEBUG_MODE
 from ..core.repertoire import RepertoireSession, default_repertoire_cache_path
-# from .pgn_export import export_pgn_subtree
-# from .variation_tree import node_at_path, path_from_root
+from .pgn_export import export_pgn_subtree
+from .variation_tree import node_at_path, path_from_root, build_variation_tree
 
 K = TypeVar("K")
 
@@ -67,7 +69,7 @@ class SpacedRepetitionController:
     - if wrong: board resets back to the prompt and user can retry or New
     """
 
-    def __init__(self, hub: Any) -> None:
+    def __init__(self, hub: 'BoardHub') -> None:
         self._hub = hub
         self._rng = random.Random()
 
@@ -82,12 +84,12 @@ class SpacedRepetitionController:
         self._prompt = PromptState(node=None, off_file=False, debug_msg="", anchor_node=None)
         self._prompt_history = []
 
-        def ui_state(self) -> dict[str, Any]:
-            return {
-                "active": self.active,
-                "mode": self._mode,
-                "review": self._review_payload if self.active and self._mode == "review" else None,
-            }
+    def ui_state(self) -> dict[str, Any]:
+        return {
+            "active": self.active,
+            "mode": self._mode,
+            "review": self._review_payload if self.active and self._mode == "review" else None,
+        }
 
     def start(self, options: SpacedRepetitionOptions, session: Optional[RepertoireSession] = None) -> None:
         self._cfg = options
@@ -158,7 +160,7 @@ class SpacedRepetitionController:
             message = f"{message} {self._prompt.debug_msg}"
 
         self._show_prompt(message=message)
-        # self._broadcast_ui_state()
+        self._broadcast_ui_state()
 
     def continue_line(self) -> None:
         if not self.active:
@@ -455,7 +457,6 @@ class SpacedRepetitionController:
         return move, debug_text
     
     def give_up(self) -> None:
-        self._ensure_active()
         if self._mode != "guess":
             return
 
@@ -472,21 +473,20 @@ class SpacedRepetitionController:
         self._enter_review_mode(node=self._prompt.anchor_node, message=message)
 
     def goto_review_path(self, path: list[int]) -> None:
-        self._ensure_active()
         if self._mode != "review":
             raise RuntimeError("Browsing is only available in review mode")
 
-        end_ply = self._session.options.end_ply
-        node = node_at_path(self._session, self._tree_root, path, end_ply=end_ply)
+        node = node_at_path(self._session, self._tree_root, path)
 
         self._review_path = list(path)
+        self._review_payload["currentPath"] = list(path)
         self._hub.set_from_node(
             node,
             orientation=self._orientation,
             message="Browsing variations",
             allow_moves=False,
         )
-        # self._broadcast_ui_state()
+        self._broadcast_ui_state()
 
     def prev_prompt(self) -> None:
         if len(self._prompt_history) > 1:
@@ -497,8 +497,6 @@ class SpacedRepetitionController:
             self._show_prompt(message="Back to previous prompt. Make your move.")
 
     def _enter_review_mode(self, *, node: chess.pgn.GameNode, message: str) -> None:
-        self._ensure_active()
-
         self._mode = "review"
         end_ply = self._session.options.end_ply
         self._review_path = path_from_root(self._session, self._tree_root, node)
@@ -508,17 +506,14 @@ class SpacedRepetitionController:
             end_ply=end_ply,
             prefer_mainline_path=self._review_path,
         )
-        if exported.skipped_illegal_moves:
-            message = (
-                f"{message} (skipped {exported.skipped_illegal_moves} illegal move(s) while exporting PGN"
-                + (f"; first: {exported.first_illegal_move}" if exported.first_illegal_move else "")
-                + ")"
-            )
+        tree = build_variation_tree(self._session, self._tree_root, end_ply=end_ply)
         self._review_payload = {
             "fen": exported.fen,
             "pgn": exported.pgn,
             "initialPly": exported.initial_ply,
             "orientation": self._orientation,
+            "tree": tree,
+            "currentPath": self._review_path,
         }
 
         self._hub.set_from_node(
@@ -527,7 +522,7 @@ class SpacedRepetitionController:
             message=message,
             allow_moves=False,
         )
-        # self._broadcast_ui_state()
+        self._broadcast_ui_state()
 
     def _child_weights(self, node: Node, variations: list[Node]) -> list[float]:
         if node.turn() == self._side:

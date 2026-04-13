@@ -1,4 +1,5 @@
 import { Chessground } from "https://unpkg.com/chessground@9.2.1/dist/chessground.min.js";
+import { createPgnViewerUi } from "./pgn_viewer_ui.js";
 
 const boardEl = document.getElementById("board");
 const logEl = document.getElementById("log");
@@ -8,9 +9,6 @@ const statusEl = document.getElementById("status");
 
 const flipBtn = document.getElementById("flip");
 const resetBtn = document.getElementById("reset");
-const srNewBtn = document.getElementById("srNew");
-const srContinueBtn = document.getElementById("srContinue");
-const srPrevBtn = document.getElementById("srPrev");
 const setFenBtn = document.getElementById("setFen");
 const clearLogBtn = document.getElementById("clearLog");
 
@@ -122,6 +120,12 @@ function send(obj) {
   ws.send(msg);
 }
 
+const srUi = createPgnViewerUi({
+  send,
+  onFlipBoard: () => ground.toggleOrientation(),
+  onResetBoard: () => send({ type: "set", fen: "startpos" }),
+});
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${proto}//${location.host}/ws`);
@@ -160,8 +164,13 @@ function connect() {
     }
 
     if (msg.type === "sr_state") {
-      // Handle SR state update if needed
-      console.log("SR state:", msg.sr);
+      try {
+        await srUi.applySrState(msg.sr);
+      } catch (err) {
+        const message = err && err.message ? err.message : String(err);
+        log(`sr ui error: ${message}`);
+        console.error("sr ui error:", err);
+      }
       return;
     }
 
@@ -175,13 +184,9 @@ function connect() {
   };
 }
 
-flipBtn.addEventListener("click", () => ground.toggleOrientation());
+flipBtn.addEventListener("click", () => srUi.handleFlip());
 
-resetBtn.addEventListener("click", () => send({ type: "set", fen: "startpos" }));
-
-srNewBtn.addEventListener("click", () => send({ type: "sr_new" }));
-srContinueBtn.addEventListener("click", () => send({ type: "sr_continue" }));
-srPrevBtn.addEventListener("click", () => send({ type: "sr_prev" }));
+resetBtn.addEventListener("click", () => srUi.handleReset());
 
 setFenBtn.addEventListener("click", () => {
   const fen = (fenEl.value || "").trim();

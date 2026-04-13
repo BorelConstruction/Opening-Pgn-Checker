@@ -1,0 +1,188 @@
+// import { log } from "./board.js";
+
+export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
+  // log("Creating PGN Viewer UI");
+  const srNewBtn = document.getElementById("srNew");
+  const srContinueBtn = document.getElementById("srContinue");
+  const srGiveUpBtn = document.getElementById("srGiveUp");
+  const srPrevBtn = document.getElementById("srPrev");
+
+  const treePanel = document.getElementById("treePanel");
+  const treeContainer = document.getElementById("variation-tree");
+
+  const state = {
+    active: false,
+    mode: "idle", // idle | guess | review
+    review: null,
+  };
+
+  function isReviewMode() {
+    return state.active && state.mode === "review";
+  }
+
+  function refreshButtons() {
+    const active = !!state.active;
+    srNewBtn.disabled = !active;
+    srContinueBtn.disabled = !active || state.mode !== "guess";
+    srGiveUpBtn.disabled = !active || state.mode !== "guess";
+    srPrevBtn.disabled = !active;
+  }
+
+  function findNodeAtPath(tree, path) {
+    let node = tree;
+    for (const idx of path) {
+      if (!node || !Array.isArray(node.children) || idx < 0 || idx >= node.children.length) {
+        return null;
+      }
+      node = node.children[idx];
+    }
+    return node;
+  }
+
+  function getArrowNavigationPath(tree, currentPath, direction) {
+    const node = findNodeAtPath(tree, currentPath || []);
+    if (!node) return currentPath || [];
+
+    if (direction === 'left') {
+      return (currentPath && currentPath.length > 0) ? currentPath.slice(0, -1) : currentPath || [];
+    }
+
+    if (direction === 'right') {
+      if (node.children && node.children.length > 0) {
+        return [...(currentPath || []), 0];
+      }
+      return currentPath || [];
+    }
+
+    if (!currentPath || currentPath.length === 0) {
+      return currentPath || [];
+    }
+
+    const parentPath = currentPath.slice(0, -1);
+    const siblingIndex = currentPath[currentPath.length - 1];
+    const parentNode = findNodeAtPath(tree, parentPath);
+    if (!parentNode || !Array.isArray(parentNode.children)) {
+      return currentPath || [];
+    }
+
+    if (direction === 'up') {
+      return siblingIndex > 0 ? [...parentPath, siblingIndex - 1] : currentPath || [];
+    }
+
+    if (direction === 'down') {
+      return siblingIndex < parentNode.children.length - 1 ? [...parentPath, siblingIndex + 1] : currentPath || [];
+    }
+
+    return currentPath || [];
+  }
+
+  function handleKeyNavigation(event) {
+    if (!isReviewMode() || !state.review || !state.review.tree) return;
+    if (event.target instanceof Element) {
+      const tagName = event.target.tagName.toLowerCase();
+      if (tagName === 'input' || tagName === 'textarea' || event.target.isContentEditable) {
+        return;
+      }
+    }
+
+    let direction = null;
+    if (event.key === 'ArrowLeft') {
+      direction = 'left';
+    } else if (event.key === 'ArrowRight') {
+      direction = 'right';
+    } else if (event.key === 'ArrowUp') {
+      direction = 'up';
+    } else if (event.key === 'ArrowDown') {
+      direction = 'down';
+    } else {
+      return;
+    }
+
+    const currentPath = Array.isArray(state.review.currentPath) ? state.review.currentPath : [];
+    const newPath = getArrowNavigationPath(state.review.tree, currentPath, direction);
+    if (JSON.stringify(newPath) !== JSON.stringify(currentPath)) {
+      event.preventDefault();
+      send({ type: 'sr_goto', path: newPath });
+    }
+  }
+
+  function renderTreeNode(node, currentPath, nodePath = []) {
+    const isCurrent = JSON.stringify(nodePath) === JSON.stringify(currentPath);
+    const div = document.createElement("div");
+    div.className = `tree-node ${isCurrent ? 'current' : ''}`;
+    div.dataset.path = JSON.stringify(nodePath);
+
+    if (node.san) {
+      // This is a move node
+      const moveSpan = document.createElement("span");
+      moveSpan.className = "tree-move";
+      moveSpan.textContent = `${node.moveNumber}${node.color === 'white' ? '.' : '...'} ${node.san}`;
+      moveSpan.addEventListener("click", (event) => {
+        event.stopPropagation();
+        send({ type: "sr_goto", path: nodePath });
+      });
+      div.appendChild(moveSpan);
+    } else {
+      // This is a position node (root)
+      const posSpan = document.createElement("span");
+      posSpan.className = "tree-position";
+      posSpan.textContent = `Position (ply ${node.ply})`;
+      div.appendChild(posSpan);
+    }
+
+    if (node.children && node.children.length > 0) {
+      const childrenDiv = document.createElement("div");
+      childrenDiv.className = "tree-children";
+      for (let i = 0; i < node.children.length; i++) {
+        const child = node.children[i];
+        childrenDiv.appendChild(renderTreeNode(child, currentPath, [...nodePath, i]));
+      }
+      div.appendChild(childrenDiv);
+    }
+
+    return div;
+  }
+
+  function applySrState(sr) {
+    // log("[DEBUG] applySrState called with sr:");
+    state.active = !!sr.active;
+    state.mode = sr.mode || "idle";
+    state.review = sr.review || null;
+
+    refreshButtons();
+
+    if (isReviewMode() && state.review && state.review.tree) {
+      treePanel.style.display = "block";
+      treeContainer.innerHTML = "";
+      const treeRoot = renderTreeNode(state.review.tree, state.review.currentPath || []);
+      treeContainer.appendChild(treeRoot);
+    } else {
+      treePanel.style.display = "none";
+      treeContainer.innerHTML = "";
+    }
+  }
+
+  function handleFlip() {
+    onFlipBoard();
+  }
+
+  function handleReset() {
+    onResetBoard();
+  }
+
+  document.addEventListener("keydown", handleKeyNavigation);
+
+  srNewBtn.addEventListener("click", () => send({ type: "sr_new" }));
+  srContinueBtn.addEventListener("click", () => send({ type: "sr_continue" }));
+  srGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
+  srPrevBtn.addEventListener("click", () => send({ type: "sr_prev" }));
+
+  refreshButtons();
+
+  return {
+    applySrState,
+    isReviewMode,
+    handleFlip,
+    handleReset,
+  };
+}

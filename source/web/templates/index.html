@@ -13,17 +13,21 @@
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
+    <div class="topbar">
+      <div class="controls">
+        <button id="flip">Flip</button>
+        <button id="reset">Reset</button>
+        <button id="srNew" title="Spaced repetition: new random position">New</button>
+        <button id="srContinue" title="Spaced repetition: continue in the same line">Continue</button>
+        <button id="srGiveUp" title="Spaced repetition: reveal the line and browse variations">Give up</button>
+        <button id="srPrev" title="Spaced repetition: go back to the previous position">Previous</button>
+        <span id="status" class="status">disconnected</span>
+      </div>
+    </div>
+
     <div class="app">
       <div class="left">
         <div id="board" class="cg-wrap"></div>
-        <div class="controls">
-          <button id="flip">Flip</button>
-          <button id="reset">Reset</button>
-          <button id="srNew" title="Spaced repetition: new random position">New</button>
-          <button id="srContinue" title="Spaced repetition: continue in the same line">Continue</button>
-          <button id="srPrev" title="Spaced repetition: previous position">Prev</button>
-          <span id="status" class="status">disconnected</span>
-        </div>
       </div>
       <div class="right">
         <div class="panel">
@@ -37,6 +41,11 @@
             <div id="message" class="message"></div>
           </div>
         </div>
+
+        <div class="panel tree-panel" id="treePanel">
+          <div id="variation-tree" class="variation-tree"></div>
+        </div>
+
         <div class="panel logpanel">
           <div class="row rowhead">
             <div>Log</div>
