@@ -179,7 +179,7 @@ class PgnChecker:
                 sys.stderr.write(f"Failed to save cache: {exc}\n")
             self.session.close()
 
-        return f"Added {self.moves_added} moves"
+        return f"Added {self.session.moves_added} moves"
 
     def close(self):
         self.session.close()
@@ -215,7 +215,7 @@ class PgnChecker:
                 not mc.move.uci() in pgn_ucis])
     
     def fill_gaps(self, gaps: list[GapsInfo]):
-        self.moves_added = 0
+        self.session.moves_added = 0
         for gaps_info in self.session.progress.iter(gaps):
             node = gaps_info.node
             self.act_on_gap_data_local(node, gaps_info)
@@ -647,7 +647,7 @@ class PgnChecker:
 
     def seek_move_consistency(self, node: Node):
         self.make_move_coupling_dict(node)
-        self.moves_added = 0
+        self.session.moves_added = 0
         l = self.move_replacements(self.move_coupling, eval_eps=0.15, sleep_s=1.0)
         for parent, alt_move, diff in self.session.progress.iter(l):
             child = next((child for child in parent.variations if child.move == alt_move), None)

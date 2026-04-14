@@ -106,6 +106,14 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     }
   }
 
+  function commonPrefixLength(a, b) {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return i;
+  }
+
+  const MAX_FORWARD_PLIES = 2;
+
   function renderTreeNode(node, currentPath, nodePath = []) {
     const isCurrent = JSON.stringify(nodePath) === JSON.stringify(currentPath);
     const div = document.createElement("div");
@@ -130,7 +138,21 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
       div.appendChild(posSpan);
     }
 
-    if (node.children && node.children.length > 0) {
+    const cpl = commonPrefixLength(nodePath, currentPath || []);
+    const depthFromCurrent = nodePath.length - cpl;
+
+    const isAncestor = nodePath.length <= (currentPath || []).length && cpl === nodePath.length;
+
+    let shouldRenderChildren = true;
+
+    if (!isAncestor) {
+      // we are at or ahead of current node → limit forward depth
+      if (depthFromCurrent >= MAX_FORWARD_PLIES) {
+        shouldRenderChildren = false;
+      }
+    }
+
+    if (node.children && node.children.length > 0 && shouldRenderChildren) {
       const childrenDiv = document.createElement("div");
       childrenDiv.className = "tree-children";
       for (let i = 0; i < node.children.length; i++) {

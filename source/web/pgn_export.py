@@ -14,7 +14,6 @@ class ExportedPgn:
     fen: str
     pgn: str
     initial_ply: int
-    first_illegal_move: Optional[str] = None
 
 
 def export_pgn_subtree(
@@ -40,7 +39,6 @@ def export_pgn_subtree(
 
     work_board = start_board.copy(stack=False)
 
-    first_illegal_move: Optional[str] = None
     preferred_ply = 0
 
     def copy_children(
@@ -51,7 +49,7 @@ def export_pgn_subtree(
         depth: int,
         on_preferred_line: bool,
     ) -> None:
-        nonlocal first_illegal_move, preferred_ply
+        nonlocal preferred_ply
 
         children: list[tuple[int, chess.pgn.GameNode]] = list(enumerate(session.variations(src)))
         preferred_idx: int | None = None
@@ -89,5 +87,4 @@ def export_pgn_subtree(
         fen=start_fen,
         pgn=pgn_text,
         initial_ply=preferred_ply,
-        first_illegal_move=first_illegal_move,
     )
