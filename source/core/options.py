@@ -175,6 +175,16 @@ class CheckerOptions(RepertoireOptions):
 
 @dataclass
 class SpacedRepetitionOptions(RepertoireOptions):
+    starting_pos: str = field(
+        default="",
+        metadata={"label": "Starting Position (FEN)"}
+    )
+    
+    start_range: int = field(
+        default=5,
+        metadata={"label": "Propmpts ? Moves From Starting Pos", "min": 0, "max": 30,}
+    )
+    
     non_file_move_frequency: float = field(
         default=0.20,
         metadata={

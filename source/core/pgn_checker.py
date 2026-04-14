@@ -70,7 +70,6 @@ class GapsInfo:
 
 class PgnChecker:
     def __init__(self, options: CheckerOptions, progress_cb=None, report_cb=None):
-        options.starting_pos = fen(options.starting_pos)  # all fens are normalized
         options.adaptive_an = True  # TODO
 
             # if not self.options.input_pgn:

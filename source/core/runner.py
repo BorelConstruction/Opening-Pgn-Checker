@@ -435,7 +435,7 @@ class PgnSession:
         return score_rate(md, self.options.side)
 
     
-    def _set_starting_pos(self, game: chess.pgn.GameNode):
+    def _set_starting_pos(self, game: Node):
         if self.options.starting_pos:
             self.starting_node = find_node_by_position(game, self.options.starting_pos)
         else:
