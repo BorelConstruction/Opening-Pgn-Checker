@@ -31,8 +31,72 @@ class PromptState:
     anchor_node: Node
 
     def __bool__(self):
-        return self.node is not None 
+        return self.node is not None
 
+class Hints():
+    """
+    Manages the state of hints (circles) for the current prompt.
+
+    The logic basically is: for a pawn move, the first hint is all pawns on the board and the second hint is the pawn to move.
+    For other moves, the first hint is the piece to move and the second hint is the target square.
+
+    We stop providing additional hints when current hints already determine a single move.
+    """
+    def __init__(self, board: Union[Node, chess.Board], uci: str):
+        if isinstance(board, Node):
+            board = board.board()
+        self.board = board
+        self.starting_square = uci[:2]
+        self.target_square = uci[2:4]
+        self.determines_move = False
+        self.circle_coords = []
+
+    @property
+    def circles(self) -> list[Circle]:
+        return [Circle(c) for c in self.circle_coords]
+    
+    @property
+    def piece_to_move(self):
+        return self.board.piece_at(chess.parse_square(self.starting_square)).piece_type
+
+    def add_hint(self):
+        if self.determines_move:
+            return
+        
+        if self.piece_to_move == chess.PAWN:
+            # first hint
+            if not self.circle_coords:
+                side = self.board.turn
+                our_pawns = self.board.pieces(chess.PAWN, side)
+                self.circle_coords = [chess.square_name(sq) for sq in our_pawns]
+                self.determines_move = self._count_moves_determined() == 1
+
+            # second hint
+            elif len(self.circle_coords) > 1:
+                self.circle_coords = [self.starting_square]
+                self.determines_move = self._count_moves_determined() == 1
+
+            # final hint
+            else:
+                self.circle_coords.append(self.target_square)
+                self.determines_move = True
+
+        else:
+            if not self.circle_coords:
+                self.circle_coords.append(self.starting_square)
+                self.determines_move = self._count_moves_determined() == 1
+
+            elif len(self.circle_coords) == 1:
+                self.circle_coords.append(self.target_square)
+                self.determines_move = True
+
+    def _count_moves_determined(self) -> int:
+        return sum(self._count_moves_from_square(c) for c in self.circle_coords)
+    
+    def _count_moves_from_square(self, square_name):
+        square_index = chess.parse_square(square_name)
+        return sum(1 for move in self.board.legal_moves if move.from_square == square_index)
+                
 
 class SpacedRepetitionFeature:
     def __init__(self, options: SpacedRepetitionOptions, progress_cb=None, report_cb=None) -> None:
@@ -161,7 +225,6 @@ class SpacedRepetitionController:
         if self._prompt.debug_msg:
             message = f"{message} {self._prompt.debug_msg}"
 
-        self.hints = []
         self._show_prompt(message=message)
         self._broadcast_ui_state()
 
@@ -195,20 +258,18 @@ class SpacedRepetitionController:
     def provide_hint(self) -> None:
         if self._mode != "guess":
             return
-        if len(self.hints) >= 2:
-            return
-
+        
         try:
             expected_uci = self._session.variations(self._prompt.node)[0].move.uci()
         except Exception:
             expected_uci = self._session.query(fen(self._prompt.node), "q-eval").move.uci()
 
-        if not self.hints:
-            self.hints.append(Circle(expected_uci[:2]))
-        else:             
-            self.hints.append(Circle(expected_uci[2:4]))
+        if not hasattr(self, 'hints') or self.hints.board != self._prompt.node.board():
+            self.hints = Hints(self._prompt.node, expected_uci)
 
-        self._show_prompt(circles = self.hints, message='Hint provided.')
+        self.hints.add_hint()
+
+        self._show_prompt(circles = self.hints.circles, message=str(self.hints.circle_coords))
 
     def handle_guess(self, uci: str) -> None:
         if self._mode != "guess":
@@ -296,7 +357,6 @@ class SpacedRepetitionController:
         message = f"Correct: {node_san(chosen)}. Continue along the line."
         if selection_debug:
             message = f"{message} {selection_debug}"
-        self.hints = []
         self._show_prompt(message=message)
 
     def _show_prompt(self, *, message: str, **kwargs) -> None:

@@ -196,6 +196,7 @@ class PgnChecker:
         self.session.traverse(root_node, visit=visit)
 
     def find_fill_gaps(self, game_node: Node):
+        self.session.progress.reset()
         self.session.report_message("Finding gaps...")
         gaps = self.find_gaps(game_node)
         self.session.report_message("Filling gaps...")

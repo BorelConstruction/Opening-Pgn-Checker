@@ -112,7 +112,7 @@ class CacheDict(OnGetItemMixin[K], KeyDefaultDict[K, V]):
         cache = cls(lambda fen: pos_cache_factory({"fen": fen}))
         cache.default_cache_path = path
         if not os.path.exists(path):
-            sys.stderr.write("\nCache file does not exist, starting with an empty cache.")
+            sys.stderr.write(f"\nCache file does not exist, starting with an empty cache {path}.\n")
             return cache
         
         with open(path, "r", encoding="utf-8") as f:
