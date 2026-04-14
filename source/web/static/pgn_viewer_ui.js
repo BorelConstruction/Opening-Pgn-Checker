@@ -6,6 +6,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   const srContinueBtn = document.getElementById("srContinue");
   const srGiveUpBtn = document.getElementById("srGiveUp");
   const srPrevBtn = document.getElementById("srPrev");
+  const srHintBtn = document.getElementById("srHint");
 
   const treePanel = document.getElementById("treePanel");
   const treeContainer = document.getElementById("variation-tree");
@@ -198,6 +199,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   srContinueBtn.addEventListener("click", () => send({ type: "sr_continue" }));
   srGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
   srPrevBtn.addEventListener("click", () => send({ type: "sr_prev" }));
+  srHintBtn.addEventListener("click", () => send({ type: "sr_hint" }));
 
   refreshButtons();
 

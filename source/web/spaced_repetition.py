@@ -11,6 +11,8 @@ import chess.pgn
 from chess.pgn import GameNode as Node
 from dataclasses import dataclass
 
+from source.web.board.contracts import Circle
+
 # from source.web.app import BoardHub
 
 from ..core.boardtools import fen, node_san, uci_from_lichess_to_pgn, uci_from_lichess_to_pgn
@@ -159,6 +161,7 @@ class SpacedRepetitionController:
         if self._prompt.debug_msg:
             message = f"{message} {self._prompt.debug_msg}"
 
+        self.hints = []
         self._show_prompt(message=message)
         self._broadcast_ui_state()
 
@@ -188,6 +191,24 @@ class SpacedRepetitionController:
         self._prompt.off_file = False
         self._after_our_move_node = None
         self._show_prompt(message="Continue. Your move.")
+
+    def provide_hint(self) -> None:
+        if self._mode != "guess":
+            return
+        if len(self.hints) >= 2:
+            return
+
+        try:
+            expected_uci = self._session.variations(self._prompt.node)[0].move.uci()
+        except Exception:
+            expected_uci = self._session.query(fen(self._prompt.node), "q-eval").move.uci()
+
+        if not self.hints:
+            self.hints.append(Circle(expected_uci[:2]))
+        else:             
+            self.hints.append(Circle(expected_uci[2:4]))
+
+        self._show_prompt(circles = self.hints, message='Hint provided.')
 
     def handle_guess(self, uci: str) -> None:
         if self._mode != "guess":
@@ -275,14 +296,16 @@ class SpacedRepetitionController:
         message = f"Correct: {node_san(chosen)}. Continue along the line."
         if selection_debug:
             message = f"{message} {selection_debug}"
+        self.hints = []
         self._show_prompt(message=message)
 
-    def _show_prompt(self, *, message: str) -> None:
+    def _show_prompt(self, *, message: str, **kwargs) -> None:
         self._hub.set_from_node(
             self._prompt.node,
             orientation=self._orientation,
             message=message,
             allow_moves=True,
+            **kwargs
         )
 
 

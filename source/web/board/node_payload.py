@@ -8,7 +8,7 @@ from .pgn_annotations import parse_comment
 
 def payload_from_node(node: Any, *, orientation: str = "white", message: str = "Loaded from PGN node") -> dict:
     """
-    Converts a python-chess `chess.pgn.GameNode` into a JSON payload compatible with:
+    Converts a python-chess 'chess.pgn.GameNode' into a JSON payload compatible with:
     - POST /api/set
     - websocket message {"type":"set", ...}
     """
