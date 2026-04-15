@@ -22,6 +22,23 @@ function setStatus(text, ok) {
   statusEl.classList.toggle("ok", !!ok);
 }
 
+let lastServerState = null;
+
+function handleAfterMove(orig, dest) {
+  const uci = maybePromote(orig, dest);
+
+  if (srUi.isReviewMode && srUi.isReviewMode()) {
+    const ok = srUi.handleReviewMove && srUi.handleReviewMove(uci);
+    if (!ok) {
+      // Shouldn't happen because we restrict dests in review mode, but resync just in case.
+      fetchState().catch(() => {});
+    }
+    return;
+  }
+
+  send({ type: "move", uci });
+}
+
 const ground = Chessground(boardEl, {
   coordinates: true,
   highlight: { lastMove: true, check: true },
@@ -33,10 +50,7 @@ const ground = Chessground(boardEl, {
     dests: new Map(),
     showDests: true,
     events: {
-      after: (orig, dest) => {
-        const uci = maybePromote(orig, dest);
-        send({ type: "move", uci });
-      },
+      after: handleAfterMove,
     },
   },
 });
@@ -46,6 +60,24 @@ function maybePromote(orig, dest) {
   if (!piece || piece.role !== "pawn") return `${orig}${dest}`;
   const rank = dest[1];
   if (rank !== "1" && rank !== "8") return `${orig}${dest}`;
+
+  // In review mode, try to pick the only promotion present in the file (if unambiguous).
+  if (srUi.isReviewMode && srUi.isReviewMode() && srUi.getReviewNextUcis) {
+    const nextUcis = srUi.getReviewNextUcis();
+    const prefix = `${orig}${dest}`;
+    const promoUcis = nextUcis.filter((u) => typeof u === "string" && u.startsWith(prefix) && u.length === 5);
+    const unique = Array.from(new Set(promoUcis));
+    if (unique.length === 1) return unique[0];
+
+    if (unique.length > 1) {
+      const allowed = Array.from(new Set(unique.map((u) => u[4]).filter(Boolean)));
+      const label = allowed.length ? `Promotion (${allowed.join("/")}):` : "Promotion (q/r/b/n):";
+      const choice = (prompt(label, allowed[0] || "q") || allowed[0] || "q").trim().toLowerCase();
+      const promo = allowed.includes(choice) ? choice : allowed[0] || "q";
+      return `${orig}${dest}${promo}`;
+    }
+  }
+
   const choice = (prompt("Promotion (q/r/b/n):", "q") || "q").trim().toLowerCase();
   const promo = ["q", "r", "b", "n"].includes(choice) ? choice : "q";
   return `${orig}${dest}${promo}`;
@@ -59,7 +91,37 @@ function getPieceAt(square) {
   return pieces[square] || null;
 }
 
+function applyReviewDests() {
+  if (!srUi.isReviewMode || !srUi.isReviewMode()) return;
+  if (!srUi.getReviewDests) return;
+
+  const dests = srUi.getReviewDests();
+  ground.set({
+    movable: {
+      free: false,
+      color: (lastServerState && lastServerState.turn) || "both",
+      dests: toDests(dests),
+      showDests: true,
+      events: { after: handleAfterMove },
+    },
+  });
+}
+
+function applyServerDests() {
+  if (!lastServerState) return;
+  ground.set({
+    movable: {
+      free: false,
+      color: lastServerState.turn || "both",
+      dests: toDests(lastServerState.dests),
+      showDests: true,
+      events: { after: handleAfterMove },
+    },
+  });
+}
+
 function applyState(state) {
+  lastServerState = state;
   fenEl.value = state.fen || "";
   msgEl.textContent = state.message || "";
 
@@ -74,10 +136,7 @@ function applyState(state) {
       dests: toDests(state.dests),
       showDests: true,
       events: {
-        after: (orig, dest) => {
-          const uci = maybePromote(orig, dest);
-          send({ type: "move", uci });
-        },
+        after: handleAfterMove,
       },
     },
   });
@@ -166,6 +225,11 @@ function connect() {
     if (msg.type === "sr_state") {
       try {
         await srUi.applySrState(msg.sr);
+        if (srUi.isReviewMode && srUi.isReviewMode()) {
+          applyReviewDests();
+        } else {
+          applyServerDests();
+        }
       } catch (err) {
         const message = err && err.message ? err.message : String(err);
         log(`sr ui error: ${message}`);

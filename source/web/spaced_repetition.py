@@ -425,6 +425,8 @@ class SpacedRepetitionController:
         self._prompt.off_file = False
         line_length = self._choose_prompt_line_length(node)
 
+        self._prompt.anchor_node = node
+
         # we'll do line_length or line_length-1 steps total
         for step in range(line_length - 2):
             next_node, _ = self._choose_move(node, maybe_off_book=False)
@@ -432,7 +434,7 @@ class SpacedRepetitionController:
                 return False
             node = next_node
             if step == self._session.options.start_ply:
-                self._prompt.anchor_node = node
+                self._prompt.anchor_node = node # TODO
 
 
         if node.turn() == self._side:

@@ -21,6 +21,59 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     return state.active && state.mode === "review";
   }
 
+  function getReviewContext() {
+    if (!isReviewMode() || !state.review || !state.review.tree) return null;
+
+    const tree = state.review.tree;
+    const currentPath = Array.isArray(state.review.currentPath) ? state.review.currentPath : [];
+    const node = findNodeAtPath(tree, currentPath);
+    if (!node) return null;
+
+    return { tree, currentPath, node };
+  }
+
+  function getReviewNextUcis() {
+    const ctx = getReviewContext();
+    if (!ctx) return [];
+
+    const children = Array.isArray(ctx.node.children) ? ctx.node.children : [];
+    return children.map((c) => (c && typeof c.uci === "string" ? c.uci : "")).filter(Boolean);
+  }
+
+  function getReviewDests() {
+    const ctx = getReviewContext();
+    if (!ctx) return {};
+
+    const children = Array.isArray(ctx.node.children) ? ctx.node.children : [];
+    const out = {};
+    for (const child of children) {
+      const uci = child && typeof child.uci === "string" ? child.uci : "";
+      if (!uci || uci.length < 4) continue;
+      const orig = uci.slice(0, 2);
+      const dest = uci.slice(2, 4);
+      if (!out[orig]) out[orig] = new Set();
+      out[orig].add(dest);
+    }
+
+    const obj = {};
+    for (const [orig, set] of Object.entries(out)) {
+      obj[orig] = Array.from(set).sort();
+    }
+    return obj;
+  }
+
+  function handleReviewMove(uci) {
+    const ctx = getReviewContext();
+    if (!ctx) return false;
+
+    const children = Array.isArray(ctx.node.children) ? ctx.node.children : [];
+    const idx = children.findIndex((child) => child && child.uci === uci);
+    if (idx < 0) return false;
+
+    send({ type: "sr_goto", path: [...ctx.currentPath, idx] });
+    return true;
+  }
+
   function refreshButtons() {
     const active = !!state.active;
     srNewBtn.disabled = !active;
@@ -208,5 +261,8 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     isReviewMode,
     handleFlip,
     handleReset,
+    getReviewDests,
+    getReviewNextUcis,
+    handleReviewMove,
   };
 }
