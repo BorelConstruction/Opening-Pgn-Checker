@@ -7,14 +7,20 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   const srGiveUpBtn = document.getElementById("srGiveUp");
   const srPrevBtn = document.getElementById("srPrev");
   const srHintBtn = document.getElementById("srHint");
+  const srSearchMoveBtn = document.getElementById("srSearchMove");
 
   const treePanel = document.getElementById("treePanel");
   const treeContainer = document.getElementById("variation-tree");
+
+  const searchMovePanel = document.getElementById("searchMovePanel");
+  const searchMoveTitle = document.getElementById("searchMoveTitle");
+  const searchMoveResults = document.getElementById("searchMoveResults");
 
   const state = {
     active: false,
     mode: "idle", // idle | guess | review
     review: null,
+    searchMove: null,
   };
 
   function isReviewMode() {
@@ -40,7 +46,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     return children.map((c) => (c && typeof c.uci === "string" ? c.uci : "")).filter(Boolean);
   }
 
-  function getReviewDests() {
+  function getMoveDests() {
     const ctx = getReviewContext();
     if (!ctx) return {};
 
@@ -80,6 +86,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     srContinueBtn.disabled = !active || state.mode !== "guess";
     srGiveUpBtn.disabled = !active || state.mode !== "guess";
     srPrevBtn.disabled = !active;
+    srSearchMoveBtn.disabled = !active || state.mode !== "review";
   }
 
   function findNodeAtPath(tree, path) {
@@ -224,6 +231,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     state.active = !!sr.active;
     state.mode = sr.mode || "idle";
     state.review = sr.review || null;
+    state.searchMove = sr.searchMove || null;
 
     refreshButtons();
 
@@ -235,6 +243,74 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     } else {
       treePanel.style.display = "none";
       treeContainer.innerHTML = "";
+    }
+
+    const hasSearch = isReviewMode() && state.searchMove && Array.isArray(state.searchMove.results);
+    if (!hasSearch) {
+      searchMovePanel.style.display = "none";
+      searchMoveTitle.textContent = "Search move";
+      searchMoveResults.innerHTML = "";
+      return;
+    }
+
+    const results = state.searchMove.results || [];
+    const query = state.searchMove.query || {};
+    const queryMove = typeof query.move === "string" ? query.move : "";
+    const count = typeof state.searchMove.count === "number" ? state.searchMove.count : results.length;
+
+    searchMovePanel.style.display = "block";
+    searchMoveTitle.textContent = queryMove ? `Search move: ${queryMove} (${count})` : `Search move (${count})`;
+    searchMoveResults.innerHTML = "";
+
+    const currentPath = Array.isArray(state.review.currentPath) ? state.review.currentPath : [];
+
+    if (!results.length) {
+      const empty = document.createElement("div");
+      empty.className = "search-empty";
+      empty.textContent = "No occurrences found";
+      searchMoveResults.appendChild(empty);
+      return;
+    }
+
+    for (const item of results) {
+      const path = Array.isArray(item.path) ? item.path : [];
+      const isCurrent = JSON.stringify(path) === JSON.stringify(currentPath);
+
+      const div = document.createElement("div");
+      div.className = `search-item ${isCurrent ? "current" : ""}`;
+      div.addEventListener("click", (event) => {
+        event.stopPropagation();
+        send({ type: "sr_goto", path });
+      });
+
+      const startDots = document.createElement("span");
+      startDots.className = "search-ellipsis";
+      startDots.textContent = "…";
+      div.appendChild(startDots);
+
+      const prevSpan = document.createElement("span");
+      const prevText = typeof item.prev === "string" && item.prev.trim() ? item.prev : "start";
+      prevSpan.className = `search-prev ${item.matchPrev ? "match" : ""}`;
+      prevSpan.textContent = prevText;
+      div.appendChild(prevSpan);
+
+      const moveSpan = document.createElement("span");
+      moveSpan.className = "search-move";
+      moveSpan.textContent = typeof item.move === "string" ? item.move : "";
+      div.appendChild(moveSpan);
+
+      const nextSpan = document.createElement("span");
+      const nextText = typeof item.next === "string" && item.next.trim() ? item.next : ".";
+      nextSpan.className = `search-next ${item.matchNext ? "match" : ""}`;
+      nextSpan.textContent = nextText;
+      div.appendChild(nextSpan);
+
+      const endDots = document.createElement("span");
+      endDots.className = "search-ellipsis";
+      endDots.textContent = "…";
+      div.appendChild(endDots);
+
+      searchMoveResults.appendChild(div);
     }
   }
 
@@ -253,6 +329,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   srGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
   srPrevBtn.addEventListener("click", () => send({ type: "sr_prev" }));
   srHintBtn.addEventListener("click", () => send({ type: "sr_hint" }));
+  srSearchMoveBtn.addEventListener("click", () => send({ type: "sr_search_move" }));
 
   refreshButtons();
 
@@ -261,7 +338,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     isReviewMode,
     handleFlip,
     handleReset,
-    getReviewDests,
+    getMoveDests,
     getReviewNextUcis,
     handleReviewMove,
   };

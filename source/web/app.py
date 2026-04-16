@@ -219,6 +219,12 @@ async def ws(ws: WebSocket) -> None:
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
+            elif msg_type == "sr_search_move":
+                try:
+                    sr_controller.search_move()
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
             elif msg_type == "sr_goto":
                 path = msg.get("path")
                 if not isinstance(path, list) or not all(isinstance(i, int) for i in path):

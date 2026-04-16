@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 import os
 import random
 import sys
@@ -11,6 +12,8 @@ import chess.pgn
 from chess.pgn import GameNode as Node
 from dataclasses import dataclass
 
+from source.core.caching import CacheDict
+from source.core.traversal import iter_nodes
 from source.web.board.contracts import Circle
 
 # from source.web.app import BoardHub
@@ -149,12 +152,25 @@ class SpacedRepetitionController:
 
         self._prompt = PromptState(node=None, off_file=False, debug_msg="", anchor_node=None)
         self._prompt_history = []
+        self._search_move_payload: Optional[dict[str, Any]] = None
+
+        self.probs_cache = CacheDict(lambda path: self._get_move_probs(path), item_to_json=json.dumps,
+                                     item_from_json=json.loads, save_path=self._probs_cache_name())
+
+    def _get_move_probs(self, path: str) -> dict[str, float]:
+        node = node_at_path(self._session.variations, self._active_game, path)
+        return self._child_probs(node, self._session.variations(node))
+
+    def _probs_cache_name(self) -> str:
+        return default_repertoire_cache_path(base=os.path.join("cache", "sr_probs"), options=self._cfg)
+      
 
     def ui_state(self) -> dict[str, Any]:
         return {
             "active": self.active,
             "mode": self._mode,
             "review": self._review_payload if self.active and self._mode == "review" else None,
+            "searchMove": self._search_move_payload if self.active and self._mode == "review" else None,
         }
 
     def start(self, options: SpacedRepetitionOptions, session: Optional[RepertoireSession] = None) -> None:
@@ -210,13 +226,14 @@ class SpacedRepetitionController:
         for move_data in data.get("moves", []):
             uci = uci_from_lichess_to_pgn(move_data["uci"])
             count = move_data.get("white", 0) + move_data.get("draws", 0) + move_data.get("black", 0)
-            weights[uci] = float(count)
+            weights[uci] = float(count)+1 # give a chance to every move
         return weights
 
     def new_random(self, *, message: str = "New position. Make your move.") -> None:
         self._mode = "guess"
         self._review_payload = None
         self._review_path = None
+        self._search_move_payload = None
 
         self._after_our_move_node = None
         self._previous_prompt = deepcopy(self._prompt)
@@ -254,6 +271,91 @@ class SpacedRepetitionController:
         self._prompt.off_file = False
         self._after_our_move_node = None
         self._show_prompt(message="Continue. Your move.")
+
+    def search_move(self):
+        if self._mode != "review":
+            return
+
+        tree_root = self._active_game
+        review_path = self._review_path
+
+        query_node = node_at_path(self._session.variations, self._tree_root, list(review_path))
+        query_move = getattr(query_node, "move", None)
+        if query_move is None:
+            return
+
+        end_ply = self._session.options.end_ply
+        query_prev_uci = None
+        query_next_uci = None
+
+        parent = getattr(query_node, "parent", None)
+        if parent is not None and getattr(parent, "move", None) is not None:
+            query_prev_uci = parent.move.uci()
+
+        query_children = [c for c in self._session.variations(query_node) if c.ply() <= end_ply]
+        if query_children and getattr(query_children[0], "move", None) is not None:
+            query_next_uci = query_children[0].move.uci()
+
+        def safe_san(n: Optional[Node] = None) -> str:
+            if DEBUG_MODE:
+                return node_san(n) if n else ""
+            try:
+                return node_san(n)
+            except Exception:
+                return ""
+
+        query_san = safe_san(query_node)
+        query_prev_san = safe_san(parent)
+        query_next_san = safe_san(query_children[0]) if query_children else ""
+
+        results: list[dict[str, Any]] = []
+
+        def visit(node: Node, path: list[int]) -> None:
+            if getattr(node, "move", None) is not None and node.move == query_move:
+                prev_node = getattr(node, "parent", None)
+                prev_uci = None
+                if prev_node is not None and getattr(prev_node, "move", None) is not None:
+                    prev_uci = prev_node.move.uci()
+
+                children = [c for c in self._session.variations(node) if c.ply() <= end_ply]
+                next_node = children[0] if children else None
+                next_uci = None
+                if next_node is not None and getattr(next_node, "move", None) is not None:
+                    next_uci = next_node.move.uci()
+
+                results.append(
+                    {
+                        "path": list(path),
+                        "prev": safe_san(prev_node),
+                        "move": safe_san(node),
+                        "next": safe_san(next_node),
+                        "matchPrev": bool(query_prev_uci and prev_uci and prev_uci == query_prev_uci),
+                        "matchNext": bool(query_next_uci and next_uci and next_uci == query_next_uci),
+                    }
+                )
+
+            if node.ply() >= end_ply:
+                return
+
+            children = list(self._session.variations(node))
+            for idx, child in enumerate(children):
+                if child.ply() > end_ply:
+                    continue
+                visit(child, [*path, idx])
+
+        visit(tree_root, [])
+
+        self._search_move_payload = {
+            "query": {
+                "path": list(review_path),
+                "move": query_san,
+                "prev": query_prev_san,
+                "next": query_next_san,
+            },
+            "results": results,
+            "count": len(results),
+        }
+        self._broadcast_ui_state()
 
     def provide_hint(self) -> None:
         if self._mode != "guess":
@@ -399,6 +501,7 @@ class SpacedRepetitionController:
             # if by the moment start_ply there is branching already, other lines have to be checked
             # long-term, we give the user the choice of which position to start from and in which range to generate
             self._session._set_starting_pos(game)
+            self._active_game = game
             self._tree_root = self._session.starting_node
             node = deepcopy(self._tree_root)
             while not (success := self._choose_prompt(node)):
@@ -472,7 +575,7 @@ class SpacedRepetitionController:
 
         children = self._session.variations(parent)
         if not children:
-            # if there are no moves for us in the file but we are still here, that's impoper usage
+            # if there are no moves for us in the file but we are still here, that's improper usage
             if parent.turn() == self._side:
                 return False, ""
             # if there are no moves for them, we can try anyway
@@ -501,8 +604,11 @@ class SpacedRepetitionController:
                     return False, ""
             # Fall through to normal logic
 
-        weights = self._child_weights(parent, children)
+        # weights = self._child_weights(parent, children)
+        # weights = self._child_probs(parent, children)
+        weights = self.probs_cache[tuple(path_from_root(self._session.variations, self._active_game, parent))]
         choice = self._rng_choice(children, weights)
+        # self._recompute_child_probs(parent.variations[0], -.5)
         return choice, self._format_rng_weights(children, weights)
 
     def _mainline_node_at_ply(self, game: Any, ply: int) -> Any:
@@ -563,7 +669,7 @@ class SpacedRepetitionController:
         if self._mode != "review":
             raise RuntimeError("Browsing is only available in review mode")
 
-        node = node_at_path(self._session, self._tree_root, path)
+        node = node_at_path(self._session.variations, self._tree_root, path)
 
         self._review_path = list(path)
         self._review_payload["currentPath"] = list(path)
@@ -585,15 +691,16 @@ class SpacedRepetitionController:
 
     def _enter_review_mode(self, *, node: chess.pgn.GameNode, message: str) -> None:
         self._mode = "review"
+        self._search_move_payload = None
         end_ply = self._session.options.end_ply
-        self._review_path = path_from_root(self._session, self._tree_root, node)
+        self._review_path = path_from_root(self._session.variations, self._tree_root, node)
         exported = export_pgn_subtree(
             self._session,
             self._tree_root,
             end_ply=end_ply,
             prefer_mainline_path=self._review_path,
         )
-        tree = build_variation_tree(self._session, self._tree_root, end_ply=end_ply)
+        tree = build_variation_tree(self._session.variations, self._tree_root, end_ply=end_ply)
         self._review_payload = {
             "fen": exported.fen,
             "pgn": exported.pgn,
@@ -626,6 +733,25 @@ class SpacedRepetitionController:
             weights.append(move_weights.get(uci, 0.0))
 
         return weights
+    
+    def _child_probs(self, node: Node, variations: list[Node]) -> list[float]:
+        weights = self._child_weights(node, variations)
+        total = sum(weights)
+        return [weight / total for weight in weights]
+    
+    def _recompute_child_probs(self, node: Node, diff: float) -> None:
+        """
+        Make moves of a line less (or more) likely to appear,
+        thus adapting to user's need to see it again.
+        """
+        node_path = tuple(path_from_root(self._session.variations, self._tree_root, node))
+        factor = 1.0 + diff
+        while node_path:
+            self.probs_cache[node_path][node_path[-1]] *= factor
+            total = sum(self.probs_cache[node_path])
+            for p in self.probs_cache[node_path]:
+                p /= total
+            node_path = node_path[:-1]
 
 
     def _rng_choice(self, items: list[K], weights: Optional[list[float]]=None) -> K:

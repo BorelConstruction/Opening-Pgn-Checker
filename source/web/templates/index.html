@@ -22,6 +22,7 @@
         <button id="srGiveUp" title="Spaced repetition: reveal the line and browse variations">Give up</button>
         <button id="srPrev" title="Spaced repetition: go back to the previous position">Previous</button>
         <button id="srHint" title="Spaced repetition: get a hint">Hint</button>
+        <button id="srSearchMove" title="Spaced repetition: search occurrences of the last move">Search move</button>
         <span id="status" class="status">disconnected</span>
       </div>
     </div>
@@ -45,6 +46,13 @@
 
         <div class="panel tree-panel" id="treePanel">
           <div id="variation-tree" class="variation-tree"></div>
+        </div>
+
+        <div class="panel search-panel" id="searchMovePanel">
+          <div class="search-head">
+            <div id="searchMoveTitle" class="search-title">Search move</div>
+          </div>
+          <div id="searchMoveResults" class="search-results"></div>
         </div>
 
         <div class="panel logpanel">

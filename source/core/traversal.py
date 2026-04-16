@@ -63,3 +63,19 @@ def traverse(node: Node,
                 progress.step()
         return post(node, child_results, v_res)
     return v_res
+
+def iter_nodes(node: Node, tp: TraversalPolicy = None):
+    if tp is None:
+        tp = TraversalPolicy()
+    start_ply, end_ply, get_children = tp
+
+    if start_ply <= node.ply() <= end_ply:
+        yield node
+
+    if node.ply() == end_ply:
+        return
+
+    variations = get_children(node)
+
+    for n in variations:
+        yield from iter_nodes(n, tp)

@@ -91,11 +91,11 @@ function getPieceAt(square) {
   return pieces[square] || null;
 }
 
-function applyReviewDests() {
+function applyMouseMove() {
   if (!srUi.isReviewMode || !srUi.isReviewMode()) return;
-  if (!srUi.getReviewDests) return;
+  if (!srUi.getMoveDests) return;
 
-  const dests = srUi.getReviewDests();
+  const dests = srUi.getMoveDests();
   ground.set({
     movable: {
       free: false,
@@ -226,7 +226,7 @@ function connect() {
       try {
         await srUi.applySrState(msg.sr);
         if (srUi.isReviewMode && srUi.isReviewMode()) {
-          applyReviewDests();
+          applyMouseMove();
         } else {
           applyServerDests();
         }
