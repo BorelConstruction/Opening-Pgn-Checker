@@ -182,7 +182,7 @@ class SpacedRepetitionOptions(RepertoireOptions):
     
     start_range: int = field(
         default=5,
-        metadata={"label": "Propmpts ? Moves From Starting Pos", "min": 0, "max": 30,}
+        metadata={"label": "Prompts ? Moves From Starting Pos", "min": 0, "max": 30,}
     )
     
     non_file_move_frequency: float = field(

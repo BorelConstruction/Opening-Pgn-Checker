@@ -249,7 +249,12 @@ class PgnSession:
 
         self._normalize_fens() # has to be done before cache loading
 
-        self.cache = CacheDict(lambda fen: PosCache(fen))
+        def item_from_json(payload: dict) -> PosCache:
+            pc = PosCache.from_dict(self, payload)
+            fen = pc.fen
+            return fen, pc
+        self.cache = CacheDict(lambda fen: PosCache(fen), item_to_json=lambda k, v: v.to_dict(),
+                                item_from_json=item_from_json)
 
         self.load_cache()
 
@@ -291,8 +296,7 @@ class PgnSession:
             if self._default_cache_path is None:
                 raise ValueError("No cache path provided and no default_cache_path configured")
             path = self._default_cache_path()
-        pos_cache_factory = lambda payload: PosCache.from_dict(self, payload)
-        self.cache = CacheDict.from_dict(path, pos_cache_factory)
+        self.cache.load_from_file(path)
         return True
 
     def save_cache(self, path: Optional[str] = None):

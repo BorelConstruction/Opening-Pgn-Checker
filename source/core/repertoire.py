@@ -10,8 +10,7 @@ from .options import RepertoireOptions
 from .runner import PgnSession
 
 
-def default_repertoire_cache_path(options: RepertoireOptions) -> str:
-    base = "cache"
+def default_repertoire_cache_path(options: RepertoireOptions, base = "cache") -> str:
     name = "cache"
     if options.input_pgn:
         name = os.path.splitext(os.path.basename(options.input_pgn))[0]

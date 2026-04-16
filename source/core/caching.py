@@ -49,8 +49,14 @@ class KeyDefaultDict(dict[K, V], Generic[K, V]):
    
 
 class CacheDict(OnGetItemMixin[K], KeyDefaultDict[K, V]):
-    def __init__(self, factory: Callable[[K], V], auto_save: bool = True, save_path: Optional[str] = None):
+    def __init__(self, factory: Callable[[K], V], 
+                 item_to_json: Callable[[K, V], dict],
+                 item_from_json: Callable[[dict], tuple[K, V]],
+                 auto_save: bool = True, 
+                 save_path: Optional[str] = None):
         super().__init__(factory)
+        self.item_to_json = item_to_json
+        self.item_from_json = item_from_json
         self._saving = False
         self.autosave_interval = 180 # seconds
         self._last_save_t = time.monotonic()
@@ -85,7 +91,7 @@ class CacheDict(OnGetItemMixin[K], KeyDefaultDict[K, V]):
             self.default_cache_path = path
             payload = {
                 "version": 1,
-                "items": [pc.to_dict() for pc in self.values()],
+                "items": [self.item_to_json(k, v) for k, v in self.items()],
             }
             dir_ = os.path.dirname(path)
             os.makedirs(dir_, exist_ok=True) if dir_ else None
@@ -107,20 +113,18 @@ class CacheDict(OnGetItemMixin[K], KeyDefaultDict[K, V]):
         finally:
             self._saving = False
 
-    @classmethod
-    def from_dict(cls, path: str, pos_cache_factory: Callable) -> CacheDict[K, V]:
-        cache = cls(lambda fen: pos_cache_factory({"fen": fen}))
-        cache.default_cache_path = path
+    def load_from_file(self, path: str) -> bool:
+        path = path or self.default_cache_path
+        self.default_cache_path = path
         if not os.path.exists(path):
             sys.stderr.write(f"\nCache file does not exist, starting with an empty cache {path}.\n")
-            return cache
+            return False
         
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
 
         items = payload.get("items", [])
         for item in items:
-            # pc = PosCache.from_dict(self, item)
-            pc = pos_cache_factory(item)
-            cache[pc.fen] = pc
-        return cache
+            k, v = self.item_from_json(item)
+            self[k] = v
+        return True
