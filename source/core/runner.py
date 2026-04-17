@@ -253,7 +253,7 @@ class PgnSession:
             pc = PosCache.from_dict(self, payload)
             fen = pc.fen
             return fen, pc
-        self.cache = CacheDict(lambda fen: PosCache(fen), item_to_json=lambda k, v: v.to_dict(),
+        self.cache = CacheDict(lambda fen: PosCache(fen), item_to_json=lambda i: i[1].to_dict(),
                                 item_from_json=item_from_json)
 
         self.load_cache()

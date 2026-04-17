@@ -155,14 +155,14 @@ class SpacedRepetitionController:
         self._search_move_payload: Optional[dict[str, Any]] = None
 
         self.probs_cache = CacheDict(lambda path: self._get_move_probs(path), item_to_json=json.dumps,
-                                     item_from_json=json.loads, save_path=self._probs_cache_name())
+                                     item_from_json=json.loads)
 
     def _get_move_probs(self, path: str) -> dict[str, float]:
         node = node_at_path(self._session.variations, self._active_game, path)
-        return self._child_probs(node, self._session.variations(node))
+        return self._child_freqs(node, self._session.variations(node))
 
     def _probs_cache_name(self) -> str:
-        return default_repertoire_cache_path(base=os.path.join("cache", "sr_probs"), options=self._cfg)
+        return default_repertoire_cache_path(base=os.path.join("cache", "sr_probs"), options=self._session.options)
       
 
     def ui_state(self) -> dict[str, Any]:
@@ -179,6 +179,7 @@ class SpacedRepetitionController:
             options,
             default_cache_path=lambda: default_repertoire_cache_path(options),
         )
+        self.probs_cache.load_from_file(self._probs_cache_name())
         self._side = chess.WHITE if options.play_white else chess.BLACK
         self._orientation = "white" if options.play_white else "black"
 
@@ -226,7 +227,7 @@ class SpacedRepetitionController:
         for move_data in data.get("moves", []):
             uci = uci_from_lichess_to_pgn(move_data["uci"])
             count = move_data.get("white", 0) + move_data.get("draws", 0) + move_data.get("black", 0)
-            weights[uci] = float(count)+1 # give a chance to every move
+            weights[uci] = float(count)
         return weights
 
     def new_random(self, *, message: str = "New position. Make your move.") -> None:
@@ -605,7 +606,7 @@ class SpacedRepetitionController:
             # Fall through to normal logic
 
         # weights = self._child_weights(parent, children)
-        # weights = self._child_probs(parent, children)
+        # weights = self._child_freqs(parent, children)
         weights = self.probs_cache[tuple(path_from_root(self._session.variations, self._active_game, parent))]
         choice = self._rng_choice(children, weights)
         # self._recompute_child_probs(parent.variations[0], -.5)
@@ -663,7 +664,7 @@ class SpacedRepetitionController:
         else:
             message = "Gave up (off-file prompt). Browse the repertoire tree or click New."
 
-        self._enter_review_mode(node=self._prompt.anchor_node, message=message)
+        self._enter_review_mode(node=self._prompt.node, message=message)
 
     def goto_review_path(self, path: list[int]) -> None:
         if self._mode != "review":
@@ -719,6 +720,11 @@ class SpacedRepetitionController:
         self._broadcast_ui_state()
 
     def _child_weights(self, node: Node, variations: list[Node]) -> list[float]:
+        """
+        Return the list of weights for each child of 'node'. A weight 
+        is the amount of move occurrences in the DB. (TODO: add masters' moves with higher weight)
+        plus one. Plus one ensures 1) we give every move a chance; 2) we won't divide by 0 when normalizing.
+        """
         if node.turn() == self._side:
             # TODO: we may want to assign higher weights to file's main line
             return [1.0] * len(variations)
@@ -730,11 +736,14 @@ class SpacedRepetitionController:
         weights = []
         for child in variations:
             uci = child.move.uci()
-            weights.append(move_weights.get(uci, 0.0))
+            weights.append(move_weights.get(uci, 1.0))
 
         return weights
     
-    def _child_probs(self, node: Node, variations: list[Node]) -> list[float]:
+    def _child_freqs(self, node: Node, variations: list[Node]) -> list[float]:
+        """
+        Return a list of frequences for each child of 'node'
+        """
         weights = self._child_weights(node, variations)
         total = sum(weights)
         return [weight / total for weight in weights]

@@ -91,7 +91,7 @@ class CacheDict(OnGetItemMixin[K], KeyDefaultDict[K, V]):
             self.default_cache_path = path
             payload = {
                 "version": 1,
-                "items": [self.item_to_json(k, v) for k, v in self.items()],
+                "items": [self.item_to_json((k, v)) for (k, v) in self.items()],
             }
             dir_ = os.path.dirname(path)
             os.makedirs(dir_, exist_ok=True) if dir_ else None
