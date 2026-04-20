@@ -24,7 +24,7 @@ import chess
 import chess.pgn
 import collections
 from abc import ABC, abstractmethod
-from typing import Callable, Union, Optional, Any
+from typing import Callable, TypeAlias, Union, Optional, Any
 
 import networkx as nx
 from pyvis.network import Network
@@ -35,16 +35,16 @@ from .boardtools import *
 from .options import cache_filename_from_string
 
 # Type aliases
-Board       = chess.Board
-Move        = chess.Move
-Node        = chess.pgn.GameNode
-DbStats     = dict[str, int]
-GetChildrenFunc = Callable[[Node], list[Node]]
-GetDbStatsFunc  = Callable[[Node], DbStats]
-EdgeWeights = dict[str, float]
-GetEdgeWeightsFunc = Callable[[Node, DbStats], EdgeWeights]
-EdgeFilterFunc  = Callable[[str, str, dict[str, Any]], bool]
-EdgeWidthFunc   = Callable[[str, str, dict[str, Any]], float]
+Board : TypeAlias    = chess.Board
+Move : TypeAlias     = chess.Move
+Node : TypeAlias     = chess.pgn.GameNode
+DbStats : TypeAlias         = dict[str, int]
+GetChildrenFunc : TypeAlias = Callable[[Node], list[Node]]
+GetDbStatsFunc : TypeAlias  = Callable[[Node], DbStats]
+EdgeWeights: TypeAlias      = dict[str, float]
+GetEdgeWeightsFunc : TypeAlias = Callable[[Node, DbStats], EdgeWeights]
+EdgeFilterFunc : TypeAlias     = Callable[[str, str, dict[str, Any]], bool]
+EdgeWidthFunc : TypeAlias      = Callable[[str, str, dict[str, Any]], float]
 
 
 def get_or_create_child(node, move: Union[str, Move]):
@@ -354,7 +354,7 @@ class InclusionGraphRunner:
     Manages InclusionGraph building and visualisation.
     """
 
-    def __init__(self, options, progress_cb=None, report_cb=None):
+    def __init__(self, options, progress_reporter=None, report_cb=None):
         if not hasattr(options, "side"):
             options.side = chess.WHITE
         if hasattr(options, "starting_pos"):
@@ -365,7 +365,7 @@ class InclusionGraphRunner:
 
         self.session = PgnSession(
             options,
-            progress_cb=progress_cb,
+            progress_reporter=progress_reporter,
             report_cb=report_cb,
             default_cache_path=default_cache_path,
         )
@@ -401,8 +401,8 @@ class InclusionGraphRunner:
         def get_db_stats(node: chess.pgn.GameNode) -> DbStats:
             return {child.move.uci(): 1 for child in node.variations}
  
-        with open(self.session.options.input_pgn, encoding="utf-8") as pgnFile:
-            node = chess.pgn.read_game(pgnFile)
+        with open(self.session.options.input_pgn, encoding="utf-8") as pgn_file:
+            node = chess.pgn.read_game(pgn_file)
             self.session._set_starting_pos(node)
   
         g = PgnInclusionGraph(get_children=default_children, get_db_stats=get_db_stats, report=self.session.report_position)
@@ -522,8 +522,8 @@ def build_inclusion_graph(
         inv_total = 1.0 / float(total)
         return {uci: count * inv_total for uci, count in stats.items()}
 
-    with open(pgn_path, encoding="utf-8") as pgnFile:
-        root = chess.pgn.read_game(pgnFile)
+    with open(pgn_path, encoding="utf-8") as pgn_file:
+        root = chess.pgn.read_game(pgn_file)
 
     graph = PgnInclusionGraph(get_children=get_children, get_db_stats=get_db_stats, edge_weights=get_edge_weights)
 

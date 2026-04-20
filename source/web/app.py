@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .board.contracts import Arrow, Circle
 from .board.session import BoardSession
-from .spaced_repetition import SpacedRepetitionController
+from .spaced_repetition import AppController
 
 
 def _format_exception_detail() -> str:
@@ -99,7 +99,7 @@ def _log_move(uci: str, _state: Any) -> None:
 manager = ConnectionManager()
 board = BoardSession(on_move=_log_move)
 hub = BoardHub(board=board, manager=manager)
-sr_controller = SpacedRepetitionController(hub)
+sr_controller = AppController(hub)
 
 
 @app.on_event("startup")
