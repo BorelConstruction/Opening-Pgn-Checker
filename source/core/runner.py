@@ -231,7 +231,7 @@ class PgnSession:
     def __init__(
         self,
         options: CoreOptions,
-        progress_cb=None,
+        progress_reporter=None,
         report_cb=None,
         *,
         default_cache_path: Optional[Callable[[], str]] = None,
@@ -242,7 +242,7 @@ class PgnSession:
 
         self._finalizer = weakref.finalize(self, self._cleanup)
 
-        self.progress = Progress(progress_cb)
+        self.progress = Progress(progress_reporter)
         self.report = report_cb or (lambda *_: None)
 
         self._default_cache_path = default_cache_path
@@ -262,6 +262,12 @@ class PgnSession:
         self._engine = None
         self.init_client()
         self._init_queries()
+
+        self._init_game()
+
+    def _init_game(self): # TODO: multiple games
+        with open(self.options.input_pgn, encoding="utf-8") as pgn_file:
+            self.game = chess.pgn.read_game(pgn_file)
 
 
     def _normalize_fens(self):
@@ -439,7 +445,9 @@ class PgnSession:
         return score_rate(md, self.options.side)
 
     
-    def _set_starting_pos(self, game: Node):
+    def _set_starting_pos(self, game: Node = None):
+        if game is None:
+            game = self.game
         if self.options.starting_pos:
             self.starting_node = find_node_by_position(game, self.options.starting_pos)
         else:
@@ -585,9 +593,9 @@ class Runner:
     runs it, and owns its lifetime.
     """
 
-    def __init__(self, options: CoreOptions, progress_cb=None, report_cb=None):
+    def __init__(self, options: CoreOptions, progress_reporter=None, report_cb=None):
         self.options = options
-        self._progress_cb = progress_cb
+        self._progress_reporter = progress_reporter
         self._report_cb = report_cb
         self._feature = None
 
@@ -598,13 +606,13 @@ class Runner:
         from .inclusions_graph import InclusionGraphRunner
 
         if isinstance(self.options, CheckerOptions):
-            self._feature = PgnChecker(self.options, self._progress_cb, self._report_cb)
+            self._feature = PgnChecker(self.options, self._progress_reporter, self._report_cb)
         elif isinstance(self.options, GraphOptions):
-            self._feature = InclusionGraphRunner(self.options, self._progress_cb, self._report_cb)
+            self._feature = InclusionGraphRunner(self.options, self._progress_reporter, self._report_cb)
         elif isinstance(self.options, SpacedRepetitionOptions):
             from ..web.spaced_repetition import SpacedRepetitionFeature
 
-            self._feature = SpacedRepetitionFeature(self.options, self._progress_cb, self._report_cb)
+            self._feature = SpacedRepetitionFeature(self.options, self._progress_reporter, self._report_cb)
             return self._feature.run()
         else:
             raise ValueError(f"Unsupported options type: {type(self.options).__name__}")

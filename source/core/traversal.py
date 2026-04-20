@@ -6,6 +6,8 @@ from collections.abc import Callable
 import chess
 from chess.pgn import GameNode as Node
 
+# from source.core.runner import Progress
+
 
 def default_children(node):
     return node.variations
@@ -30,7 +32,7 @@ def traverse(node: Node,
                 post: Callable = None,
                 reasons_to_stop: Callable = None,
                 tp: TraversalPolicy = None,
-                progress = None):
+                progress: 'Progress' = None):
     if tp is None:
         tp = TraversalPolicy()
     start_ply, end_ply, get_children = tp

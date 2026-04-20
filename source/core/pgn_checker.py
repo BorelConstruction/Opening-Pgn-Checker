@@ -69,41 +69,12 @@ class GapsInfo:
 
 
 class PgnChecker:
-    def __init__(self, options: CheckerOptions, progress_cb=None, report_cb=None):
+    def __init__(self, options: CheckerOptions, progress_reporter: Progress = None, report_cb=None):
         options.adaptive_an = True  # TODO
-
-            # if not self.options.input_pgn:
-            #     raise ValueError("No opening PGN selected")
-
-            # with open(self.options.input_pgn, encoding="utf-8") as pgnFile:
-            #     game = chess.pgn.read_game(pgnFile)
-            # if game is None:
-            #     raise ValueError(f"Failed to parse PGN: {self.options.input_pgn}")
-
-            # moves_uci: list[str] = []
-            # node: Node = game
-            # PLY_LIMIT = 20  # first 10 moves
-            # while node.variations and node.ply() < PLY_LIMIT:
-            #     node = node.variations[0]
-            #     moves_uci.append(node.move.uci())
-
-            # if not moves_uci:
-            #     raise ValueError(f"No moves found in PGN: {self.options.input_pgn}")
-
-            # # Prefer an existing cache for a shorter prefix, so extending the PGN mainline
-            # # doesn't force a brand-new cache file.
-            # for prefix_len in range(min(PLY_LIMIT, len(moves_uci)), 8, -1):
-            #     signature = ' '.join(moves_uci[:prefix_len])
-            #     candidate = cache_filename_from_string("pgn_checker", signature)
-            #     if os.path.exists(candidate):
-            #         return candidate
-
-            # signature = ' '.join(moves_uci)
-            # return cache_filename_from_string("pgn_checker", signature)
 
         self.session = RepertoireSession(
             options,
-            progress_cb=progress_cb,
+            progress_reporter=progress_reporter,
             report_cb=report_cb,
             default_cache_path=lambda: default_repertoire_cache_path(options),
         )
@@ -141,9 +112,9 @@ class PgnChecker:
     @clock
     def run(self):
         try:
-            with open(self.session.options.input_pgn, encoding="utf-8") as pgnFile:
+            with open(self.session.options.input_pgn, encoding="utf-8") as pgn_file:
                 while True:
-                    node = chess.pgn.read_game(pgnFile)
+                    node = chess.pgn.read_game(pgn_file)
 
                     if node is None:
                         break
@@ -703,22 +674,6 @@ def compute_question_marks(eval_was: float, eval_became: float) -> list[int]:
     elif eval_became - eval_was > 0.4:
         return [chess.pgn.NAG_DUBIOUS_MOVE]
     return []
-
-    
-
-def checkpoint_pgn(game, output_path: str):
-    dir_ = os.path.dirname(output_path)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=dir_,
-        delete=False
-    ) as tmp:
-        tmp.write(str(game))   # or game.accept(exporter)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-
-    os.replace(tmp.name, output_path)
 
 
 

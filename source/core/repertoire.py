@@ -53,7 +53,7 @@ class RepertoireSession(PgnSession):
     def __init__(
         self,
         options: RepertoireOptions,
-        progress_cb=None,
+        progress_reporter=None,
         report_cb=None,
         *,
         default_cache_path: Optional[Callable[[], str]] = None,
@@ -61,7 +61,7 @@ class RepertoireSession(PgnSession):
         options.side = chess.WHITE if options.play_white else chess.BLACK
         super().__init__(
             options,
-            progress_cb=progress_cb,
+            progress_reporter=progress_reporter,
             report_cb=report_cb,
             default_cache_path=default_cache_path or (lambda: default_repertoire_cache_path(options)),
         )
