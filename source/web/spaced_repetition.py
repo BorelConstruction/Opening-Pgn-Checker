@@ -54,19 +54,21 @@ class MoveInterpreter():
 
     def interpret(self, uci: Any) -> Signal:
         if self._prompt.off_file:
-            self._handle_off_file_guess(uci)
-        else:
-            self._handle_file_guess(uci)
+            return self._handle_off_file_guess(uci)
+        return self._handle_file_guess(uci)
+
+    def summarize(self) -> Feedback:
+        pass
 
     def _handle_file_guess(self, uci: str) -> None:
         expected_moves = self._session.variations(self._prompt.node)
         if not expected_moves:
-            return MoveGrade(MoveSignal.NO_MOVES)
+            return MoveSignal(MoveGrade.NO_MOVES)
 
         chosen_node = next((n for n in expected_moves if n.move.uci() == uci_from_lichess_to_pgn(uci)), None)
         if chosen_node:
             self._grades.append(MoveSignal(MoveGrade.CORRECT))
-            return MoveGrade(MoveSignal(MoveGrade.CORRECT, chosen_node))
+            return MoveSignal(MoveGrade.CORRECT, chosen_node)
 
         # the user didn't guess -- prepare feedback on this
         expected_sans = ", ".join(
@@ -108,8 +110,9 @@ class MoveInterpreter():
 
         return MoveSignal(grade, msg=msg)
 
-    def summarize(self) -> Feedback:
-        pass
+    
+    def _evaluate_move(self, position: Union[chess.Board, Node], move: Union[chess.Move, str]) -> float:
+        return self._session.q_eval_move(position, move).eval
 
 class LineGenerator():
     def __init__(self, session: RepertoireSession, root: Node, start_range: int, prompt_state: PromptState,
@@ -129,13 +132,20 @@ class LineGenerator():
         self.start_range = start_range
 
         self._edge_probs = CacheDict(lambda path: self._get_move_probs(path), item_to_json=json.dumps,
-                                     item_from_json=json.loads)
+                                     item_from_json=json.loads, auto_save=False)
         self._edge_probs.load_from_file(probs_cache_name)
 
     def is_finished(self) -> bool:
         return self._is_finished
+    
+    def finish_prompt(self) -> None:
+        self._is_finished = True
+        # self._recompute_child_probs(self._prompt.node, -1)
+        # self._edge_probs.serialize()
 
     def start_prompt(self, spec_id: SpecId) -> None:
+        self._spec_id = spec_id
+        self._is_finished = False
         self._review_payload = None
         self._review_path = None
         self._search_move_payload = None
@@ -157,7 +167,7 @@ class LineGenerator():
         node = deepcopy(self._root)
         while not (success := self._choose_prompt(node)):
             # we may add some moves to node while choosing, so reset to the file contents
-            node = deepcopy(self._tree_root)
+            node = deepcopy(self._root)
 
     def current_spec_id(self):
         return self._spec_id
@@ -171,15 +181,18 @@ class LineGenerator():
                 self._prompt.node = signal.response_node
                 self._advance_line(chosen=self._prompt.node)
             else:
-                self._enter_review_mode(node=self._prompt.node, message=signal.msg)
+                self._prompt.debug_msg = signal.msg
+                return self._prompt
 
         else:
             # for now we don't do anything after an off-file guess
-            self._is_finished = True
+            self.finish_prompt()
+            return
 
         if not self._is_finished:
-            self.show_prompt(message=signal.msg)
+            self._prompt.debug_msg=signal.msg
 
+        return self._prompt
 
     def _advance_line(self, chosen: Node) -> None:
         assert chosen.turn() != self._session.options.side, "Chosen move should be ours"
@@ -187,8 +200,8 @@ class LineGenerator():
         next_node, selection_debug = self._choose_move(chosen)
 
         if next_node is False:
-            self._is_finished = True
             self._prompt.debug_msg = selection_debug
+            self.finish_prompt()
             return
 
         self._prompt.node = next_node
@@ -258,7 +271,7 @@ class LineGenerator():
         children = self._session.variations(parent)
         if not children:
             # if there are no moves for us in the file but we are still here, that's improper usage
-            if parent.turn() == self.self._session.options.side:
+            if parent.turn() == self._session.options.side:
                 return False, ""
             # if there are no moves for them, we can try anyway
             off_book = True
@@ -288,7 +301,7 @@ class LineGenerator():
 
         # weights = self._child_weights(parent, children)
         # weights = self._child_freqs(parent, children)
-        weights = self._edge_probs[tuple(path_from_root(self._session.variations, self._session.game, parent))]
+        weights = self._edge_probs[tuple(path_from_root(self._session.game, parent, self._session.variations))]
         choice = self._rng_choice(children, weights)
         # self._recompute_child_probs(parent.variations[0], -.5)
         return choice, self._format_rng_weights(children, weights)
@@ -371,7 +384,7 @@ class LineGenerator():
         return [weight / total for weight in weights]
     
     def _get_move_probs(self, path: str) -> dict[str, float]:
-        node = node_at_path(self._session.variations, self._session.game, path)
+        node = node_at_path(self._session.game, path, self._session.variations)
         return self._child_freqs(node, self._session.variations(node))
     
     def _recompute_child_probs(self, node: Node, diff: float) -> None:
@@ -379,12 +392,15 @@ class LineGenerator():
         Make moves of a line less (or more) likely to appear,
         thus adapting to user's need to see it again.
         """
-        node_path = tuple(path_from_root(self._session.variations, self._tree_root, node))
+        if not node: # can happen if "New" is clicked before we started
+            return
+        
+        node_path = tuple(path_from_root(self._session.game, node, self._session.variations))
         factor = 1.0 + diff
         while node_path:
-            self.probs_cache[node_path][node_path[-1]] *= factor
-            total = sum(self.probs_cache[node_path])
-            for p in self.probs_cache[node_path]:
+            self._edge_probs[node_path][node_path[-1]] *= factor
+            total = sum(self._edge_probs[node_path])
+            for p in self._edge_probs[node_path]:
                 p /= total
             node_path = node_path[:-1]
 
@@ -431,10 +447,6 @@ class LineGenerator():
         probs = [weight / total for weight in weights[:5]]
         prob_entries = [f"{p:.1%}" for p in probs]
         return f"rng weights: {', '.join(entries)}; probs: {', '.join(prob_entries)}"
-
-
-    def _evaluate_move(self, position: Union[chess.Board, Node], move: Union[chess.Move, str]) -> float:
-        return self._session.q_eval_move(position, move).eval
 
 @dataclass
 class PromptState:
@@ -586,26 +598,29 @@ class AppController:
             options,
             default_cache_path=lambda: default_repertoire_cache_path(options),
         )
-        # self.probs_cache.load_from_file(self._probs_cache_name())
-        self._prompt = PromptState(node=None, off_file=False, debug_msg="", anchor_node=None)
         self._orientation = "white" if options.play_white else "black"
         
-        self._session._set_starting_pos()
-
         self._log.prompts.load_from_file(self._log_cache_name())
         self._generator : Generator = LineGenerator(self._session, self._session.starting_node, 
                                                     self._cfg.start_range, self._prompt, self._probs_cache_name(), self._cfg.non_file_move_frequency)
         self._interpreter : Interpreter = MoveInterpreter(self._session, self._prompt)
-        self._rep_controller : RepetitionController = RepetitionController(NaiveScheduler(), self._generator, 
+        self._rep_controller : RepetitionController = RepetitionController(NaiveScheduler(self._log), self._generator, 
                                                                            self._interpreter, self._log, lambda prompt: self.show_prompt(prompt))
 
         if options.preload_db:
             self._prefetch_db_stats()
 
+        self.start_next_prompt()
+
+        self._broadcast_ui_state()
+
+    def start_next_prompt(self) -> None:
+        # self._generator.finish_prompt()
         self.active = True
         self._rep_controller.start_next_prompt()
 
     def show_prompt(self, prompt: str = None, **kwargs) -> None:
+        self._mode = "guess"
         self._hub.set_from_node(
             prompt.node,
             orientation=self._orientation,
@@ -641,7 +656,7 @@ class AppController:
         tree_root = self._session.game
         review_path = self._review_path
 
-        query_node = node_at_path(self._session.variations, self._tree_root, list(review_path))
+        query_node = node_at_path(self._session.game, list(review_path), self._session.variations)
         query_move = getattr(query_node, "move", None)
         if query_move is None:
             return
@@ -739,32 +754,9 @@ class AppController:
         if self._mode != "guess":
             raise RuntimeError("Not currently in guess mode")
         
-        if self._prompt.off_file:
-            self._handle_off_file_guess(uci)
-        else:
-            self._handle_file_guess(uci)
-
-
-    def _show_after_move(self, node: Any = None, board: Optional[chess.Board] = None, *, message: str) -> None:
-        if node is None and board is None:
-            self.new_random(message=message)
-            return
-
-        if node is not None:
-            self._hub.set_from_node(
-                node,
-                orientation=self._orientation,
-                message=message,
-                allow_moves=False,
-            )
-            return
-
-        self._hub.set_fen(
-            fen(board),
-            orientation=self._orientation,
-            message=message,
-            allow_moves=False,
-        )
+        continue_prompt = self._rep_controller.on_user_response(uci)
+        if not continue_prompt:
+            self._enter_review_mode(node=self._prompt.node, message="Correct. Browse the tree or click New.")
 
 
     def _mainline_node_at_ply(self, game: Any, ply: int) -> Any:
@@ -793,7 +785,7 @@ class AppController:
         if self._mode != "review":
             raise RuntimeError("Browsing is only available in review mode")
 
-        node = node_at_path(self._session.variations, self._tree_root, path)
+        node = node_at_path(self._session.starting_node, path, self._session.variations)
 
         self._review_path = list(path)
         self._review_payload["currentPath"] = list(path)
@@ -813,18 +805,18 @@ class AppController:
             self._prompt_history[-2:] = self._prompt_history[:-3:-1]
             self.show_prompt(message="Back to previous prompt. Make your move.")
 
-    def _enter_review_mode(self, *, node: chess.pgn.GameNode, message: str) -> None:
+    def _enter_review_mode(self, node: chess.pgn.GameNode, message: Optional[str] = "") -> None:
         self._mode = "review"
         self._search_move_payload = None
         end_ply = self._session.options.end_ply
-        self._review_path = path_from_root(self._session.variations, self._tree_root, node)
+        self._review_path = path_from_root(self._session.starting_node, node, self._session.variations)
         exported = export_pgn_subtree(
             self._session,
-            self._tree_root,
+            self._session.starting_node,
             end_ply=end_ply,
             prefer_mainline_path=self._review_path,
         )
-        tree = build_variation_tree(self._session.variations, self._tree_root, end_ply=end_ply)
+        tree = build_variation_tree(self._session.variations, self._session.starting_node, end_ply=end_ply)
         self._review_payload = {
             "fen": exported.fen,
             "pgn": exported.pgn,

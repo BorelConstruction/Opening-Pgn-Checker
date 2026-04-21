@@ -264,6 +264,7 @@ class PgnSession:
         self._init_queries()
 
         self._init_game()
+        self._set_starting_pos()
 
     def _init_game(self): # TODO: multiple games
         with open(self.options.input_pgn, encoding="utf-8") as pgn_file:
@@ -446,6 +447,8 @@ class PgnSession:
 
     
     def _set_starting_pos(self, game: Node = None):
+        if not hasattr(self.options, "starting_pos"):
+            return
         if game is None:
             game = self.game
         if self.options.starting_pos:

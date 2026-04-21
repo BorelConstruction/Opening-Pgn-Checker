@@ -38,16 +38,8 @@ SpecId: TypeAlias = Hashable
 
 PromptId: TypeAlias = Hashable
 
-class Scheduler(Protocol):
-    """Chooses what to practice next (policy only)."""
-
-    def next(self) -> SpecId:
-        """Select next spec."""
-        ...
-    
-    def feedback(self) -> None:
-        """Update scheduling policy based on completed prompt."""
-        ...
+class Prompt:
+    ...
     
 class Feedback:
     """
@@ -59,6 +51,18 @@ class Feedback:
 class Signal(Protocol):
     """Fine-grained signal produced per user action."""
     ...
+
+class Scheduler(Protocol):
+    """Chooses what to practice next (policy only)."""
+
+    def next(self) -> SpecId:
+        """Select next spec."""
+        ...
+    
+    def feedback(self, spec_id: SpecId, feedback: Feedback) -> None:
+        """Update scheduling policy based on completed prompt."""
+        ...
+
 
 class Interpreter(Protocol):
     """Pure component that assesses user responses.
@@ -87,7 +91,7 @@ class Generator(Protocol):
     - prompt lifecycle
     """
 
-    def start_prompt(self, spec_id: SpecId) -> None:
+    def start_prompt(self, spec_id: SpecId) -> Prompt:
         """Start generating a new prompt of given type."""
         ...
     def on_response(self, response: Any) -> None:
@@ -112,7 +116,6 @@ class Generator(Protocol):
         ...
 
 
-
 class SessionLog(Protocol):
     """Passive storage of session history."""
 
@@ -134,7 +137,7 @@ class RepetitionController():
         generator: Generator,
         interpreter: Interpreter,
         session_log: SessionLog,
-        show_prompt: Callable
+        show_prompt: Callable[[Prompt], None],
     ):
         self.scheduler = scheduler
         self.generator = generator
@@ -148,10 +151,13 @@ class RepetitionController():
         prompt = self.generator.start_prompt(spec_id)
         self.show_prompt(prompt)
 
-    def on_user_response(self, response: Any) -> None:
+    def on_user_response(self, response: Any) -> bool:
+        """
+        Process user response.
+        Returns True if the prompt should continue, False if it should terminate."""
         signal = self.interpreter.interpret(response)
 
-        self.generator.on_response(response, signal)
+        prompt = self.generator.on_response(response, signal)
 
         if self.generator.is_finished():
             prompt_id = self.generator.current_prompt_id()
@@ -163,3 +169,8 @@ class RepetitionController():
             self.session_log.record_feedback(prompt_id, feedback)
 
             self.scheduler.feedback(spec_id, feedback)
+
+            return False
+        else:
+            self.show_prompt(prompt)
+            return True

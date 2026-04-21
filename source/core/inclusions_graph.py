@@ -400,10 +400,6 @@ class InclusionGraphRunner:
          
         def get_db_stats(node: chess.pgn.GameNode) -> DbStats:
             return {child.move.uci(): 1 for child in node.variations}
- 
-        with open(self.session.options.input_pgn, encoding="utf-8") as pgn_file:
-            node = chess.pgn.read_game(pgn_file)
-            self.session._set_starting_pos(node)
   
         g = PgnInclusionGraph(get_children=default_children, get_db_stats=get_db_stats, report=self.session.report_position)
         g.build(

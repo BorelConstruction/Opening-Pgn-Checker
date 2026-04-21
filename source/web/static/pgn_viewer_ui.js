@@ -3,7 +3,6 @@
 export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   // log("Creating PGN Viewer UI");
   const srNewBtn = document.getElementById("srNew");
-  const srContinueBtn = document.getElementById("srContinue");
   const srGiveUpBtn = document.getElementById("srGiveUp");
   const srPrevBtn = document.getElementById("srPrev");
   const srHintBtn = document.getElementById("srHint");
@@ -83,7 +82,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   function refreshButtons() {
     const active = !!state.active;
     srNewBtn.disabled = !active;
-    srContinueBtn.disabled = !active || state.mode !== "guess";
     srGiveUpBtn.disabled = !active || state.mode !== "guess";
     srPrevBtn.disabled = !active;
     srSearchMoveBtn.disabled = !active || state.mode !== "review";
@@ -325,7 +323,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   document.addEventListener("keydown", handleKeyNavigation);
 
   srNewBtn.addEventListener("click", () => send({ type: "sr_new" }));
-  srContinueBtn.addEventListener("click", () => send({ type: "sr_continue" }));
   srGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
   srPrevBtn.addEventListener("click", () => send({ type: "sr_prev" }));
   srHintBtn.addEventListener("click", () => send({ type: "sr_hint" }));

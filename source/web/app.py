@@ -191,15 +191,10 @@ async def ws(ws: WebSocket) -> None:
 
             elif msg_type == "sr_new":
                 try:
-                    sr_controller.new_random()
+                    sr_controller.start_next_prompt()
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
             
-            elif msg_type == "sr_continue":
-                try:
-                    sr_controller.continue_line()
-                except Exception as exc:
-                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
             elif msg_type == "sr_give_up":
                 try:

@@ -112,31 +112,18 @@ class PgnChecker:
     @clock
     def run(self):
         try:
-            with open(self.session.options.input_pgn, encoding="utf-8") as pgn_file:
-                while True:
-                    node = chess.pgn.read_game(pgn_file)
+            game = self.session.game
 
-                    if node is None:
-                        break
+            self.fill_the_TT(game)
+            total = sum(1 for _ in self.session.cache if self.session.cache[_].TTed)
+            self.session.progress.set_total(total)
 
-                    self.fill_the_TT(node)
-                    
-                    self.session.cache.enable_auto_save()
-                    total = sum(1 for _ in self.session.cache if self.session.cache[_].TTed)
-                    self.session.progress.set_total(total)
-                    output_game = node  # no need to copy the way it currently works
-                    self.make_headers(output_game)
-
-                    self.session._set_starting_pos(output_game)
-                    self.make_move_coupling_dict(output_game) # MOVE
-                    node = self.session.starting_node
-
-                    sys.stderr.write('starting to traverse...')
-
-                    for action in self.pipeline():
-                        action(node)
-
-                    print(output_game, file=open(self.session.options.output_pgn, "a", encoding="utf-8"), end="\n\n") # "a" for adding
+            self.make_headers(game)
+            # self.make_move_coupling_dict(game) # MOVE
+            sys.stderr.write('starting to traverse...')
+            for action in self.pipeline():
+                action(game)
+            print(game, file=open(self.session.options.output_pgn, "a", encoding="utf-8"), end="\n\n") # "a" for adding
 
         except Exception as e:
             sys.stderr.write(f"Error: {traceback.format_exc()}\n")

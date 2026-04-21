@@ -61,9 +61,9 @@ def build_variation_tree(get_children: Callable[[Node], list[Node]], root: Node,
 
 
 def node_at_path(
-    get_children: Callable[[Node], list[Node]],
     root: Node,
     path: list[int],
+    get_children: Callable[[Node], list[Node]]
 ) -> Node:
     node: Node = root
     for idx in path:
@@ -74,7 +74,7 @@ def node_at_path(
     return node
 
 
-def path_from_root(get_children: Callable[[Node], list[Node]], root: Node, node: Node) -> list[int]:
+def path_from_root(root: Node, node: Node, get_children: Callable[[Node], list[Node]]) -> list[int]:
     if node is root:
         return []
 
