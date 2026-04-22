@@ -114,7 +114,7 @@ class PgnChecker:
         try:
             game = self.session.game
 
-            self.fill_the_TT(game)
+            self.session.fill_the_TT(game)
             total = sum(1 for _ in self.session.cache if self.session.cache[_].TTed)
             self.session.progress.set_total(total)
 
@@ -146,12 +146,7 @@ class PgnChecker:
 
     def __exit__(self, exc_type, exc, tb):
         self.close()
-    
-    def fill_the_TT(self, root_node: Node):
-        def visit(node: Node):
-            self.session._record_position_in_TT(node)
 
-        self.session.traverse(root_node, visit=visit)
 
     def find_fill_gaps(self, game_node: Node):
         self.session.progress.reset()

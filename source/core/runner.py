@@ -459,6 +459,12 @@ class PgnSession:
     def count_nodes(self, root_node):
         return count_nodes(root_node, self.traversal_restrictions())
     
+    def fill_the_TT(self, root_node: Node):
+        def visit(node: Node):
+            self._record_position_in_TT(node)
+
+        self.traverse(root_node, visit=visit)
+    
     def _add_variation(self, node: Node, move: Union[str, chess.Board], to_main: bool = False):
         if isinstance(move, str):
             move = chess.Move.from_uci(move)

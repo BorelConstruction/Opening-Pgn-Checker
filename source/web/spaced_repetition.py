@@ -6,7 +6,7 @@ import json
 import os
 import random
 import sys
-from typing import Any, Optional, TypeVar, Union
+from typing import Any, Iterable, Optional, TypeVar, Union
 
 import chess
 import chess.pgn
@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from source.core.caching import CacheDict
 from source.core.traversal import iter_nodes
 from source.web.board.contracts import Circle
+from source.web.board.session import UCI
 from source.web.scheduler_implem import NaiveScheduler
 
 # from source.web.app import BoardHub
@@ -26,6 +27,8 @@ from ..core.repertoire import RepertoireSession, default_repertoire_cache_path
 from .pgn_export import export_pgn_subtree
 from .variation_tree import node_at_path, path_from_root, build_variation_tree
 from .scheduler_protocol import *
+
+# TODO: add transpotitioning moves to the move list?
 
 K = TypeVar("K")
 
@@ -39,7 +42,7 @@ class MoveGrade(Enum):
 class MoveSignal():
     move_grade: MoveGrade
     response_node: Optional[Node] = None
-    msg: Optional[str] = None
+    msg: str = ""
 
 
 class MoveInterpreter():
@@ -100,7 +103,7 @@ class MoveInterpreter():
         best_reply_san = node_san(self._prompt.node, best_reply) if best_reply else "None"
         san = node_san(self._prompt.node)
         msg = f"Off-file {san}. Your move: eval {move_eval:+.2f} after {reply_to_user}."
-        if uci == best_reply.uci():
+        if eval - move_eval < 0.2 or eval > 0.9*move_eval:
             msg += " Good guess!"
             grade = MoveGrade.CORRECT
         else:
@@ -131,17 +134,19 @@ class LineGenerator():
         # max of how far we move from the root
         self.start_range = start_range
 
-        self._edge_probs = CacheDict(lambda path: self._get_move_probs(path), item_to_json=json.dumps,
+        self._edge_probs = CacheDict(lambda fen: {}, item_to_json=json.dumps,
                                      item_from_json=json.loads, auto_save=False)
         self._edge_probs.load_from_file(probs_cache_name)
+
+        self._session.fill_the_TT(self._session.game)
 
     def is_finished(self) -> bool:
         return self._is_finished
     
     def finish_prompt(self) -> None:
         self._is_finished = True
-        # self._recompute_child_probs(self._prompt.node, -1)
-        # self._edge_probs.serialize()
+        self._recompute_line_move_probs(self._prompt.node, -0.5)
+        self._edge_probs.serialize()
 
     def start_prompt(self, spec_id: SpecId) -> None:
         self._spec_id = spec_id
@@ -155,13 +160,7 @@ class LineGenerator():
         else:
             return
 
-        if self._prompt.debug_msg:
-            message = self._prompt.debug_msg
-        else:
-            message = ""
-
         return self._prompt
-        # self._broadcast_ui_state()
 
     def _choose_random_prompt(self) -> PromptState:
         node = deepcopy(self._root)
@@ -190,11 +189,15 @@ class LineGenerator():
             return
 
         if not self._is_finished:
-            self._prompt.debug_msg=signal.msg
+            self._prompt.debug_msg+=signal.msg
 
         return self._prompt
 
     def _advance_line(self, chosen: Node) -> None:
+        """
+        Choose a move to continue along the line and
+        update self._prompt accordingly.
+        """
         assert chosen.turn() != self._session.options.side, "Chosen move should be ours"
         self._prompt.node = chosen
         next_node, selection_debug = self._choose_move(chosen)
@@ -269,7 +272,7 @@ class LineGenerator():
         off_book = maybe_off_book and self._rng.random() < self.non_file_move_freq
 
         children = self._session.variations(parent)
-        if not children:
+        if not children: # TODO: transp
             # if there are no moves for us in the file but we are still here, that's improper usage
             if parent.turn() == self._session.options.side:
                 return False, ""
@@ -299,16 +302,23 @@ class LineGenerator():
                     return False, ""
             # Fall through to normal logic
 
-        # weights = self._child_weights(parent, children)
-        # weights = self._child_freqs(parent, children)
-        weights = self._edge_probs[tuple(path_from_root(self._session.game, parent, self._session.variations))]
-        choice = self._rng_choice(children, weights)
-        # self._recompute_child_probs(parent.variations[0], -.5)
-        return choice, self._format_rng_weights(children, weights)
+        if self._edge_probs[fen(parent)]:
+            probs = self._edge_probs[fen(parent)]
+        else:
+            probs = self._get_moves_and_freqs(parent)
+            self._edge_probs[fen(parent)] = probs
+        choice = self._rng_choice(list(probs.keys()), list(probs.values()))
+        
+        # find the node corresponding to the choice
+        for n in self._session.cache[fen(parent)].TTed:
+            for m in n.variations:
+                if m.uci() == choice:
+                    return m, self._format_rng_weights(probs.keys(), probs.values())
+                
 
     def _find_off_book_move(self, node: Node) -> tuple[Optional[chess.Move], str]:
         """Find an off-book DB move with frequency >= 5% and score_rate <= 75%."""
-        move_weights = self._get_move_weights(node)
+        move_weights = self._get_db_moves_and_nums(node)
         if not move_weights:
             return None, "no children"
         
@@ -338,7 +348,50 @@ class LineGenerator():
         debug_text = self._format_rng_weights(list(moves), list(weights))
         return move, debug_text
     
-    def _get_move_weights(self, position: Any) -> dict[str, float]:
+    def _get_moves_and_freqs(self, node: Node) -> dict[str, float]:
+        """
+        Return a dict UCI -> frequency for children of all nodes with
+        the same position as 'node'.
+        """
+        moves = set()
+        for n in self._session.cache[fen(node)].TTed:
+            moves.update(m.move.uci() for m in n.variations)
+
+        return self._child_freqs(node, moves)
+    
+    def _child_freqs(self, node: Node, variations: Iterable[UCI]) -> dict[UCI, float]:
+        """
+        Return a dict UCI -> frequency for moves of the board of 'node'
+        that are present in 'variations'.
+        """
+        weights = self._child_nums(node, variations)
+        total = sum(weights.values())
+        if total == 0: # should not happen, really
+            return {}
+        return {uci: weights[uci] / total for uci in weights}
+    
+    
+    def _child_nums(self, node: Node, variations: Iterable[UCI]) -> dict[UCI, int]:
+        """
+        Return the dict UCI -> weights for each move of the board of 'node' present in 'variations'. A weight 
+        is the amount of move occurrences in the DB. (TODO: add masters' moves with higher weight)
+        plus one. Plus one ensures 1) we give every move a chance; 2) we won't divide by 0 when normalizing.
+        """
+        if node.turn() == self._session.options.side:
+            # TODO: we may want to assign higher weights to file's main line
+            return {uci: 1.0 for uci in variations}
+        
+        move_weights = self._get_db_moves_and_nums(node)
+        if not move_weights:
+            return {uci: 1.0 for uci in variations}
+
+        weights = {}
+        for uci in variations:
+            weights[uci] = move_weights.get(uci, 1.0)
+
+        return weights
+    
+    def _get_db_moves_and_nums(self, position: Any) -> dict[UCI, float]:
         """
         Returns a dict mapping UCI strings to move counts (weights).
         """
@@ -354,40 +407,8 @@ class LineGenerator():
             weights[uci] = float(count)
         return weights
     
-    def _child_weights(self, node: Node, variations: list[Node]) -> list[float]:
-        """
-        Return the list of weights for each child of 'node'. A weight 
-        is the amount of move occurrences in the DB. (TODO: add masters' moves with higher weight)
-        plus one. Plus one ensures 1) we give every move a chance; 2) we won't divide by 0 when normalizing.
-        """
-        if node.turn() == self._session.options.side:
-            # TODO: we may want to assign higher weights to file's main line
-            return [1.0] * len(variations)
-        
-        move_weights = self._get_move_weights(node)
-        if not move_weights:
-            return [1.0] * len(variations)
-
-        weights = []
-        for child in variations:
-            uci = child.move.uci()
-            weights.append(move_weights.get(uci, 1.0))
-
-        return weights
     
-    def _child_freqs(self, node: Node, variations: list[Node]) -> list[float]:
-        """
-        Return a list of frequences for each child of 'node'
-        """
-        weights = self._child_weights(node, variations)
-        total = sum(weights)
-        return [weight / total for weight in weights]
-    
-    def _get_move_probs(self, path: str) -> dict[str, float]:
-        node = node_at_path(self._session.game, path, self._session.variations)
-        return self._child_freqs(node, self._session.variations(node))
-    
-    def _recompute_child_probs(self, node: Node, diff: float) -> None:
+    def _recompute_line_move_probs(self, node: Node, diff: float) -> None:
         """
         Make moves of a line less (or more) likely to appear,
         thus adapting to user's need to see it again.
@@ -395,14 +416,17 @@ class LineGenerator():
         if not node: # can happen if "New" is clicked before we started
             return
         
-        node_path = tuple(path_from_root(self._session.game, node, self._session.variations))
         factor = 1.0 + diff
-        while node_path:
-            self._edge_probs[node_path][node_path[-1]] *= factor
-            total = sum(self._edge_probs[node_path])
-            for p in self._edge_probs[node_path]:
-                p /= total
-            node_path = node_path[:-1]
+
+        while fen(self._session.game) != fen(node):
+            move = node.move
+            node = node.parent
+            parent_dict = self._edge_probs[fen(node)]
+            try:
+                parent_dict[move.uci()] *= factor
+            except KeyError: # can happen if the move is off-book
+                pass
+            normalize_freqs(parent_dict)
 
 
     def _rng_choice(self, items: list[K], weights: Optional[list[float]]=None) -> K:
@@ -431,7 +455,9 @@ class LineGenerator():
             return ""
 
         entries = []
-        for item, weight in zip(items[:5], weights[:5]):
+        items = list(items)[:5]
+        weights = list(weights)[:5]
+        for item, weight in zip(items, weights):
             uci = None
             if hasattr(item, "move") and getattr(item, "move") is not None:
                 uci = item.move.uci()
@@ -444,7 +470,7 @@ class LineGenerator():
         if len(items) > 5:
             entries.append("...")
 
-        probs = [weight / total for weight in weights[:5]]
+        probs = [weight / total for weight in weights]
         prob_entries = [f"{p:.1%}" for p in probs]
         return f"rng weights: {', '.join(entries)}; probs: {', '.join(prob_entries)}"
 
@@ -534,6 +560,9 @@ class PromptLog:
     def record_feedback(self, prompt_id: PromptId, feedback: Feedback) -> None:
         pass
 
+    def serialize(self) -> str:
+        self.prompts.serialize()
+
 
 class SpacedRepetitionFeature:
     def __init__(self, options: SpacedRepetitionOptions, progress_reporter=None, report_cb=None) -> None:
@@ -612,11 +641,12 @@ class AppController:
 
         self.start_next_prompt()
 
-        self._broadcast_ui_state()
 
     def start_next_prompt(self) -> None:
         # self._generator.finish_prompt()
         self.active = True
+        self._mode = "guess"
+        self._broadcast_ui_state()
         self._rep_controller.start_next_prompt()
 
     def show_prompt(self, prompt: str = None, **kwargs) -> None:
@@ -756,6 +786,7 @@ class AppController:
         
         continue_prompt = self._rep_controller.on_user_response(uci)
         if not continue_prompt:
+            self._log.serialize()
             self._enter_review_mode(node=self._prompt.node, message="Correct. Browse the tree or click New.")
 
 
@@ -839,3 +870,9 @@ class AppController:
         self._session.close()
         self._session = None
 
+def normalize_freqs(freqs: dict[Any, float]) -> None:
+    total = sum(freqs.values())
+    if total <= 0.0:
+        return
+    for k in freqs:
+        freqs[k] /= total

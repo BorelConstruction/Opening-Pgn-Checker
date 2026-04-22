@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import threading
 from dataclasses import replace
-from typing import Any, Optional
+from typing import Any, Optional, TypeAlias
 
 import chess
 
 from .contracts import Arrow, BoardState, Circle, MoveCallback, WebBoard
 from .pgn_annotations import parse_comment
 
+UCI: TypeAlias = str
 
 class BoardSession(WebBoard):
     def __init__(self, *, on_move: Optional[MoveCallback] = None):
