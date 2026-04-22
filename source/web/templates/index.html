@@ -47,13 +47,6 @@
           <div id="variation-tree" class="variation-tree"></div>
         </div>
 
-        <div class="panel search-panel" id="searchMovePanel">
-          <div class="search-head">
-            <div id="searchMoveTitle" class="search-title">Search move</div>
-          </div>
-          <div id="searchMoveResults" class="search-results"></div>
-        </div>
-
         <div class="panel logpanel">
           <div class="row rowhead">
             <div>Log</div>
@@ -61,6 +54,16 @@
           </div>
           <pre id="log" class="log"></pre>
         </div>
+      </div>
+    </div>
+
+    <div class="search-overlay" id="searchMoveOverlay" hidden>
+      <div class="panel search-panel" id="searchMovePanel" role="dialog" aria-modal="true" aria-labelledby="searchMoveTitle">
+        <div class="search-head">
+          <div id="searchMoveTitle" class="search-title">Search move</div>
+          <button id="searchMoveClose" type="button" class="search-close" aria-label="Close search results">Close</button>
+        </div>
+        <div id="searchMoveResults" class="search-results"></div>
       </div>
     </div>
 

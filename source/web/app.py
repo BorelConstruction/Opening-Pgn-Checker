@@ -216,7 +216,7 @@ async def ws(ws: WebSocket) -> None:
 
             elif msg_type == "sr_search_move":
                 try:
-                    sr_controller.search_move()
+                    sr_controller.search_nodes_by_move()
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 

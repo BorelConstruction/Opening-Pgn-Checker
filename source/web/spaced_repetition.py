@@ -14,7 +14,7 @@ from chess.pgn import GameNode as Node
 from dataclasses import dataclass
 
 from source.core.caching import CacheDict
-from source.core.traversal import iter_nodes
+from source.core.traversal import TraversalPolicy, iter_nodes
 from source.web.board.contracts import Circle
 from source.web.board.session import UCI
 from source.web.scheduler_implem import NaiveScheduler
@@ -604,6 +604,7 @@ class AppController:
         self._prompt = PromptState(node=None, off_file=False, debug_msg="", anchor_node=None)
         self._log : SessionLog = PromptLog()
 
+        self._review_view_root_path: list[int] = []
         self._search_move_payload: Optional[dict[str, Any]] = None
 
 
@@ -679,29 +680,29 @@ class AppController:
             self._session.traverse(game, visit=visit)
 
 
-    def search_move(self):
+    def search_nodes_by_move(self):
+        """
+        Search for nodes with the same move as in the current review position
+        and display the results.
+        Results are displayed with the previous and the following moves, emphasizing them if
+        they are the same as in the current review node.
+        """
         if self._mode != "review":
             return
 
-        tree_root = self._session.game
-        review_path = self._review_path
-
-        query_node = node_at_path(self._session.game, list(review_path), self._session.variations)
-        query_move = getattr(query_node, "move", None)
-        if query_move is None:
-            return
+        root = self._session.game
+        review_path = getattr(self, "_review_path", None)
 
         end_ply = self._session.options.end_ply
-        query_prev_uci = None
-        query_next_uci = None
 
-        parent = getattr(query_node, "parent", None)
-        if parent is not None and getattr(parent, "move", None) is not None:
-            query_prev_uci = parent.move.uci()
+        try:
+            query_node = node_at_path(root, list(review_path), self._session.variations)
+        except Exception:
+            return
 
-        query_children = [c for c in self._session.variations(query_node) if c.ply() <= end_ply]
-        if query_children and getattr(query_children[0], "move", None) is not None:
-            query_next_uci = query_children[0].move.uci()
+        query_move = query_node.move
+        if query_move is None:
+            return
 
         def safe_san(n: Optional[Node] = None) -> str:
             if DEBUG_MODE:
@@ -709,55 +710,49 @@ class AppController:
             try:
                 return node_san(n)
             except Exception:
-                return ""
+                try:
+                    return n.move.uci()
+                except Exception:
+                    return ""
 
-        query_san = safe_san(query_node)
-        query_prev_san = safe_san(parent)
-        query_next_san = safe_san(query_children[0]) if query_children else ""
+        query_parent = query_node.parent
+        query_prev_uci = query_parent.move.uci() if query_parent.move is not None else None
+        query_children = [c for c in self._session.variations(query_node) if c.ply() <= end_ply]
+        query_next = query_children[0] if query_children else None
+        query_next_uci = query_next.move.uci() if query_next else None
 
+        tp = TraversalPolicy(start_ply=1, end_ply=end_ply, get_children=self._session.variations)
         results: list[dict[str, Any]] = []
+        for node in iter_nodes(root, tp):
+            if node.move != query_move:
+                continue
 
-        def visit(node: Node, path: list[int]) -> None:
-            if getattr(node, "move", None) is not None and node.move == query_move:
-                prev_node = getattr(node, "parent", None)
-                prev_uci = None
-                if prev_node is not None and getattr(prev_node, "move", None) is not None:
-                    prev_uci = prev_node.move.uci()
+            path = path_from_root(root, node, self._session.variations)
 
-                children = [c for c in self._session.variations(node) if c.ply() <= end_ply]
-                next_node = children[0] if children else None
-                next_uci = None
-                if next_node is not None and getattr(next_node, "move", None) is not None:
-                    next_uci = next_node.move.uci()
+            parent = node.parent
+            prev_uci = parent.move.uci() if getattr(parent, "move", None) is not None else None
 
-                results.append(
-                    {
-                        "path": list(path),
-                        "prev": safe_san(prev_node),
-                        "move": safe_san(node),
-                        "next": safe_san(next_node),
-                        "matchPrev": bool(query_prev_uci and prev_uci and prev_uci == query_prev_uci),
-                        "matchNext": bool(query_next_uci and next_uci and next_uci == query_next_uci),
-                    }
-                )
+            children = [c for c in self._session.variations(node) if c.ply() <= end_ply]
+            next_node = children[0] if children else None
+            next_uci = next_node.move.uci() if next_node else None
 
-            if node.ply() >= end_ply:
-                return
-
-            children = list(self._session.variations(node))
-            for idx, child in enumerate(children):
-                if child.ply() > end_ply:
-                    continue
-                visit(child, [*path, idx])
-
-        visit(tree_root, [])
+            results.append(
+                {
+                    "path": list(path),
+                    "prev": safe_san(parent),
+                    "move": safe_san(node),
+                    "next": safe_san(next_node),
+                    "matchPrev": bool(query_prev_uci and prev_uci and prev_uci == query_prev_uci),
+                    "matchNext": bool(query_next_uci and next_uci and next_uci == query_next_uci),
+                }
+            )
 
         self._search_move_payload = {
             "query": {
                 "path": list(review_path),
-                "move": query_san,
-                "prev": query_prev_san,
-                "next": query_next_san,
+                "move": safe_san(query_node),
+                "prev": safe_san(query_parent),
+                "next": safe_san(query_next),
             },
             "results": results,
             "count": len(results),
@@ -816,10 +811,14 @@ class AppController:
         if self._mode != "review":
             raise RuntimeError("Browsing is only available in review mode")
 
-        node = node_at_path(self._session.starting_node, path, self._session.variations)
+        root = self._session.game
+        node = node_at_path(root, path, self._session.variations)
 
         self._review_path = list(path)
         self._review_payload["currentPath"] = list(path)
+        if not list(path)[:len(self._review_view_root_path)] == list(self._review_view_root_path):
+            self._review_view_root_path = list(path)
+            self._review_payload["viewRootPath"] = list(self._review_view_root_path)
         self._hub.set_from_node(
             node,
             orientation=self._orientation,
@@ -840,14 +839,15 @@ class AppController:
         self._mode = "review"
         self._search_move_payload = None
         end_ply = self._session.options.end_ply
-        self._review_path = path_from_root(self._session.starting_node, node, self._session.variations)
+        self._review_path = path_from_root(self._session.game, node, self._session.variations)
+        self._review_view_root_path = path_from_root(self._session.game, self._session.starting_node, self._session.variations)
         exported = export_pgn_subtree(
             self._session,
-            self._session.starting_node,
+            self._session.game,
             end_ply=end_ply,
             prefer_mainline_path=self._review_path,
         )
-        tree = build_variation_tree(self._session.variations, self._session.starting_node, end_ply=end_ply)
+        tree = build_variation_tree(self._session.variations, self._session.game, end_ply=end_ply)
         self._review_payload = {
             "fen": exported.fen,
             "pgn": exported.pgn,
@@ -855,6 +855,7 @@ class AppController:
             "orientation": self._orientation,
             "tree": tree,
             "currentPath": self._review_path,
+            "viewRootPath": list(self._review_view_root_path),
         }
 
         self._hub.set_from_node(
