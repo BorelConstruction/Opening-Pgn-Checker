@@ -243,10 +243,12 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
       return;
     }
 
+    // Keep arrow keys owned by review navigation even when the path cannot change.
+    event.preventDefault();
+
     const currentPath = Array.isArray(state.review.currentPath) ? state.review.currentPath : [];
     const newPath = getArrowNavigationPath(state.review.tree, currentPath, direction);
     if (JSON.stringify(newPath) !== JSON.stringify(currentPath)) {
-      event.preventDefault();
       send({ type: 'sr_goto', path: newPath });
     }
   }

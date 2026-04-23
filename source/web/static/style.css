@@ -8,6 +8,7 @@
   --board-min: 260px;
   --board-max: 520px;
   --board-size: clamp(var(--board-min), min(var(--board-max), calc(100vw - 36px), calc(100vh - 220px)), var(--board-max));
+  --app-max-width: 1200px;
 }
 
 html,
@@ -23,7 +24,7 @@ body {
 }
 
 .app {
-  max-width: 1200px;
+  max-width: var(--app-max-width);
   margin: 0 auto;
   padding: 0 18px 18px;
   display: grid;
@@ -33,7 +34,7 @@ body {
 }
 
 .topbar {
-  max-width: 1200px;
+  max-width: var(--app-max-width);
   margin: 0 auto;
   padding: 18px 18px 0;
   position: sticky;
@@ -126,12 +127,22 @@ button:hover {
   inset: 0;
   z-index: 40;
   display: flex;
-  justify-content: flex-end;
+  justify-content: center;
   align-items: flex-start;
   padding: 86px 18px 18px;
   background: rgba(2, 6, 23, 0.35);
   backdrop-filter: blur(2px);
   box-sizing: border-box;
+}
+
+.search-overlay::before {
+  content: "";
+  width: min(
+    calc(100vw - 36px),
+    calc((var(--app-max-width) - 36px - var(--board-size) - 18px) / 2)
+  );
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
 .search-overlay[hidden] {
@@ -208,22 +219,36 @@ button:hover {
 
 .tree-node {
   margin: 2px 0;
-  padding: 2px 4px;
-  border-radius: 4px;
+  padding: 3px 8px;
+  border-radius: 8px;
   cursor: pointer;
+  border: 1px solid transparent;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
 }
 
 .tree-node:hover {
+  border-color: rgba(56, 189, 248, 0.25);
   background: rgba(56, 189, 248, 0.1);
 }
 
 .tree-node.current {
-  background: rgba(56, 189, 248, 0.2);
-  font-weight: bold;
+  border-color: rgba(56, 189, 248, 0.6);
+  background: rgba(56, 189, 248, 0.16);
+  box-shadow:
+    3px 0 0 0 rgba(56, 189, 248, 0.9) inset,
+    0 0 0 1px rgba(56, 189, 248, 0.18) inset;
 }
 
 .tree-move {
   color: var(--text);
+}
+
+.tree-node.current .tree-move {
+  color: #bfe9ff;
+  font-weight: 700;
 }
 
 .tree-children {

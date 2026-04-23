@@ -27,8 +27,8 @@ def export_pgn_subtree(
     """
     Export the PGN subtree rooted at 'root' as a standalone PGN string.
 
-    The returned PGN starts from `root.board()` (returned as `fen`), and includes
-    all variations selected by `session.variations(...)`.
+    The returned PGN starts from 'root.board()' (returned as 'fen'), and includes
+    all variations selected by 'session.variations(...)'.
     """
 
     start_board = root.board()

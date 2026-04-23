@@ -465,7 +465,7 @@ def make_get_db_stats(
       {"moves": [{"uci": "e2e4", "white": 100, "draws": 50, "black": 30}, ...]}
     """
     def get_db_stats(node: Node) -> DbStats:
-        pos = node.board().fen()
+        pos = fen(node)
         response = safe_get_games(opening_explorer, position=pos, **kwargs)
 
         result: DbStats = {}
