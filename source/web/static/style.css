@@ -240,6 +240,11 @@ button:hover {
 
 .tree-node {
   margin: 2px 0;
+}
+
+.tree-row {
+  display: block;
+  width: 100%;
   padding: 3px 8px;
   border-radius: 8px;
   cursor: pointer;
@@ -250,12 +255,12 @@ button:hover {
     color 120ms ease;
 }
 
-.tree-node:hover {
+.tree-row:hover {
   border-color: rgba(56, 189, 248, 0.25);
   background: rgba(56, 189, 248, 0.1);
 }
 
-.tree-node.current {
+.tree-node.current > .tree-row {
   border-color: rgba(56, 189, 248, 0.6);
   background: rgba(56, 189, 248, 0.16);
   box-shadow:
@@ -263,16 +268,48 @@ button:hover {
     0 0 0 1px rgba(56, 189, 248, 0.18) inset;
 }
 
-.tree-row {
-  display: block;
-  width: 100%;
+.tree-node.past > .tree-children,
+.tree-node.past > .tree-children .tree-children {
+  padding-left: 8px;
+  border-left: 1px solid rgba(56, 189, 248, 0.16);
+  border-radius: 12px 0 0 12px;
+  background: linear-gradient(
+    90deg,
+    rgba(56, 189, 248, 0.1) 0%,
+    rgba(56, 189, 248, 0.05) 42%,
+    rgba(56, 189, 248, 0.015) 72%,
+    rgba(56, 189, 248, 0) 100%
+  );
+}
+
+.tree-node.current > .tree-children,
+.tree-node.current > .tree-children .tree-children {
+  padding-left: 8px;
+  border-left: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 12px 0 0 12px;
+  background: linear-gradient(
+    90deg,
+    rgba(148, 163, 184, 0.08) 0%,
+    rgba(148, 163, 184, 0.04) 42%,
+    rgba(148, 163, 184, 0.015) 72%,
+    rgba(148, 163, 184, 0) 100%
+  );
 }
 
 .tree-move {
   color: var(--text);
 }
 
-.tree-node.current .tree-move {
+.tree-node.past > .tree-row > .tree-move {
+  color: var(--text);
+  font-weight: 400;
+}
+
+.tree-node.future > .tree-row > .tree-move {
+  color: #94a3b8;
+}
+
+.tree-node.current > .tree-row > .tree-move {
   color: #bfe9ff;
   font-weight: 700;
 }

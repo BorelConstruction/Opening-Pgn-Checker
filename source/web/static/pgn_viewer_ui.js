@@ -345,7 +345,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     return i;
   }
 
-  const MAX_FORWARD_PLIES = 2;
+  const MIN_FORWARD_PLIES_SHOWN = 7;
 
   function pathIsPrefix(prefix, path) {
     if (!Array.isArray(prefix) || !Array.isArray(path)) return false;
@@ -356,11 +356,20 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     return true;
   }
 
-  function renderTreeNode(node, currentPath, nodePath = [], basePath = [], globalCurrentPath = []) {
+  function getPathRelation(nodePath, currentPath) {
+    if (pathsEqual(nodePath, currentPath)) return "current";
+    if (pathIsPrefix(nodePath, currentPath)) return "past";
+    if (pathIsPrefix(currentPath, nodePath)) return "future";
+    return "branch";
+  }
+
+  function renderTreeNode(node, nodePath = [], basePath = [], globalCurrentPath = []) {
     const globalPath = [...basePath, ...nodePath];
+    const normalizedCurrentPath = Array.isArray(globalCurrentPath) ? globalCurrentPath : [];
     const isCurrent = pathsEqual(globalPath, globalCurrentPath);
+    const pathRelation = getPathRelation(globalPath, normalizedCurrentPath);
     const div = document.createElement("div");
-    div.className = `tree-node ${isCurrent ? 'current' : ''}`;
+    div.className = `tree-node ${pathRelation} ${isCurrent ? 'current' : ''}`.trim();
     div.dataset.path = JSON.stringify(globalPath);
 
     const row = document.createElement("div");
@@ -385,16 +394,16 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
       row.appendChild(posSpan);
     }
 
-    const cpl = commonPrefixLength(nodePath, currentPath || []);
-    const depthFromCurrent = nodePath.length - cpl;
+    const cpl = commonPrefixLength(globalPath, normalizedCurrentPath);
+    const depthFromCurrent = globalPath.length - cpl;
 
-    const isAncestor = nodePath.length <= (currentPath || []).length && cpl === nodePath.length;
+    const isPastOrCurrent = pathRelation === "past" || pathRelation === "current";
 
     let shouldRenderChildren = true;
 
-    if (!isAncestor) {
-      // we are at or ahead of current node → limit forward depth
-      if (depthFromCurrent >= MAX_FORWARD_PLIES) {
+    if (!isPastOrCurrent) {
+      // Keep a usable click target window in front of the current node when the user backs up.
+      if (depthFromCurrent >= MIN_FORWARD_PLIES_SHOWN) {
         shouldRenderChildren = false;
       }
     }
@@ -404,7 +413,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
       childrenDiv.className = "tree-children";
       for (let i = 0; i < node.children.length; i++) {
         const child = node.children[i];
-        childrenDiv.appendChild(renderTreeNode(child, currentPath, [...nodePath, i], basePath, globalCurrentPath));
+        childrenDiv.appendChild(renderTreeNode(child, [...nodePath, i], basePath, globalCurrentPath));
       }
       div.appendChild(childrenDiv);
     }
@@ -428,10 +437,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
       const globalCurrentPath = Array.isArray(state.review.currentPath) ? state.review.currentPath : [];
       const viewRootPath = Array.isArray(state.review.viewRootPath) ? state.review.viewRootPath : [];
       const viewRootNode = findNodeAtPath(tree, viewRootPath) || tree;
-      const relativeCurrentPath = pathIsPrefix(viewRootPath, globalCurrentPath)
-        ? globalCurrentPath.slice(viewRootPath.length)
-        : [];
-      const treeRoot = renderTreeNode(viewRootNode, relativeCurrentPath, [], viewRootPath, globalCurrentPath);
+      const treeRoot = renderTreeNode(viewRootNode, [], viewRootPath, globalCurrentPath);
       treeContainer.appendChild(treeRoot);
       return;
     }
