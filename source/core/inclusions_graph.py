@@ -357,11 +357,11 @@ class InclusionGraphRunner:
     def __init__(self, options, progress_reporter=None, report_cb=None):
         if not hasattr(options, "side"):
             options.side = chess.WHITE
-        if hasattr(options, "starting_pos"):
-            options.starting_pos = fen(options.starting_pos)
+        if hasattr(options, "starting_fen"):
+            options.starting_fen = fen(options.starting_fen)
 
         def default_cache_path() -> str:
-            return cache_filename_from_string("graph", options.starting_pos)
+            return cache_filename_from_string("graph", options.starting_fen)
 
         self.session = PgnSession(
             options,
@@ -384,7 +384,7 @@ class InclusionGraphRunner:
             return self.session.query(fen(node), "db_lichess")
   
         root = chess.pgn.Game()
-        root.setup(self.session.options.starting_pos)
+        root.setup(self.session.options.starting_fen)
   
         g = DBInclusionGraph(
             get_games=get_games,

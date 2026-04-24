@@ -6,6 +6,7 @@ import json
 import os
 import random
 import sys
+import threading
 from typing import Any, Iterable, Optional, TypeVar, Union
 
 import chess
@@ -22,7 +23,7 @@ from source.web.scheduler_implem import NaiveScheduler
 
 # from source.web.app import BoardHub
 
-from ..core.boardtools import fen, node_moves, node_san, uci_from_lichess_to_pgn, uci_from_lichess_to_pgn
+from ..core.boardtools import fen, node_moves, node_san, uci_from_lichess_to_pgn
 from ..core.options import SpacedRepetitionOptions, DEBUG_MODE
 from ..core.repertoire import RepertoireSession, default_repertoire_cache_path
 from .pgn_export import export_pgn_subtree
@@ -165,6 +166,12 @@ class LineGenerator():
         self._recompute_line_move_probs(self._prompt.node, -ease)
         self._edge_probs.serialize()
 
+    def set_start(self, root: Optional[Node] = None, start_range: Optional[int] = None) -> None:
+        if root:
+            self._root = root
+        if start_range:
+            self.start_range = start_range
+
     def start_prompt(self, spec_id: SpecId) -> None:
         self._spec_id = spec_id
         self._is_finished = False
@@ -286,7 +293,7 @@ class LineGenerator():
         Determines changes in self._prompt.off_file.
         Returns the resulting node and a debug string.
 
-        If a choice could not be made, returns (False, "").
+        If a choice could not be made, returns (False, ...).
         """
         off_book = maybe_off_book and self._rng.random() < self.non_file_move_freq
 
@@ -611,6 +618,12 @@ class SpacedRepetitionFeature:
 MAX_REVIEW_TREE_DEPTH_FROM_VIEW_ROOT = 5
 
 
+@dataclass(frozen=True)
+class ReviewDbStatsTask:
+    request_id: int
+    position_fen: str
+
+
 class AppController:
     """
     Owns chess-related objects, reacts to user actions.
@@ -628,6 +641,10 @@ class AppController:
         self._review_base_root_path: list[int] = []
         self._review_view_root_path: list[int] = []
         self._search_move_payload: Optional[dict[str, Any]] = None
+        self._review_db_stats_lock = threading.Lock()
+        self._review_db_stats_pending: Optional[ReviewDbStatsTask] = None
+        self._review_db_stats_inflight = False
+        self._review_db_stats_request_id = 0
 
 
     def _probs_cache_name(self) -> str:
@@ -695,6 +712,170 @@ class AppController:
     def _broadcast_ui_state(self) -> None:
         self._hub.broadcast({"type": "sr_state", "sr": self.ui_state()})
 
+    def _next_review_db_stats_request_id(self) -> int:
+        self._review_db_stats_request_id += 1
+        return self._review_db_stats_request_id
+
+    def _loading_review_db_stats(self, position: Union[Node, chess.Board, str]) -> dict[str, Any]:
+        position_fen = fen(position)
+        return {
+            "fen": position_fen,
+            "loading": True,
+            "totalGames": 0,
+            "white": 0,
+            "draws": 0,
+            "black": 0,
+            "moves": [],
+        }
+
+    def _error_review_db_stats(self, position: Union[Node, chess.Board, str], exc: Exception) -> dict[str, Any]:
+        position_fen = fen(position)
+        return {
+            "fen": position_fen,
+            "totalGames": 0,
+            "white": 0,
+            "draws": 0,
+            "black": 0,
+            "moves": [],
+            "error": str(exc),
+        }
+
+    def _db_result_count(self, data: dict[str, Any], key: str) -> int:
+        value = data.get(key, 0)
+        if not isinstance(value, int):
+            raise TypeError(f"Database stats field {key!r} must be an int")
+        return value
+
+    def _build_review_db_stats(self, position: Union[Node, chess.Board, str], stats: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(stats, dict):
+            raise TypeError("Database stats payload must be a dict")
+
+        position_fen = fen(position)
+        position_white = self._db_result_count(stats, "white")
+        position_draws = self._db_result_count(stats, "draws")
+        position_black = self._db_result_count(stats, "black")
+
+        raw_moves = stats.get("moves", [])
+        if not isinstance(raw_moves, list):
+            raise TypeError("Database stats payload must contain a moves list")
+
+        board = chess.Board(position_fen)
+        moves: list[dict[str, Any]] = []
+        for move_data in raw_moves:
+            if not isinstance(move_data, dict):
+                raise TypeError("Database stats move entry must be a dict")
+
+            lichess_uci = move_data.get("uci")
+            if not isinstance(lichess_uci, str) or not lichess_uci:
+                raise TypeError("Database stats move entry must contain a UCI string")
+
+            white = self._db_result_count(move_data, "white")
+            draws = self._db_result_count(move_data, "draws")
+            black = self._db_result_count(move_data, "black")
+
+            uci = uci_from_lichess_to_pgn(lichess_uci)
+            san = board.san(chess.Move.from_uci(uci))
+            moves.append(
+                {
+                    "uci": uci,
+                    "san": san,
+                    "gameCount": white + draws + black,
+                    "white": white,
+                    "draws": draws,
+                    "black": black,
+                }
+            )
+
+        return {
+            "fen": position_fen,
+            "totalGames": position_white + position_draws + position_black,
+            "white": position_white,
+            "draws": position_draws,
+            "black": position_black,
+            "moves": moves,
+        }
+
+    def _review_db_stats(
+        self,
+        position: Union[Node, chess.Board, str],
+        *,
+        cached_only: bool = False,
+    ) -> Optional[dict[str, Any]]:
+        position_fen = fen(position)
+        if cached_only:
+            stats = self._session.query(position_fen, "db_lichess", cache_only=True)
+            if stats is None:
+                return None
+        else:
+            stats = self._session.query(position_fen, "db_lichess")
+        return self._build_review_db_stats(position_fen, stats)
+
+    def _set_review_db_stats(self, db_stats: dict[str, Any]) -> None:
+        self._review_payload["dbStats"] = db_stats
+
+    def _prepare_review_db_stats(self, node: Node) -> Optional[ReviewDbStatsTask]:
+        position_fen = fen(node)
+        request_id = self._next_review_db_stats_request_id()
+        self._review_payload["dbStatsRequestId"] = request_id
+
+        cached_stats = self._review_db_stats(position_fen, cached_only=True)
+        if cached_stats is not None:
+            self._set_review_db_stats(cached_stats)
+            return None
+
+        self._set_review_db_stats(self._loading_review_db_stats(position_fen))
+        return ReviewDbStatsTask(
+            request_id=request_id,
+            position_fen=position_fen,
+        )
+
+    def _queue_review_db_stats(self, task: ReviewDbStatsTask) -> None:
+        with self._review_db_stats_lock:
+            self._review_db_stats_pending = task
+            if self._review_db_stats_inflight:
+                return
+            self._review_db_stats_inflight = True
+
+        worker = threading.Thread(target=self._review_db_stats_worker, name="review-db-stats", daemon=True)
+        worker.start()
+
+    def _broadcast_review_db_stats(self, request_id: int) -> None:
+        if self._review_payload is None:
+            raise RuntimeError("Review payload is not initialized")
+
+        self._hub.broadcast(
+            {
+                "type": "sr_review_db_stats",
+                "review": {
+                    "requestId": request_id,
+                    "dbStats": self._review_payload.get("dbStats"),
+                },
+            }
+        )
+
+    def _review_db_stats_worker(self) -> None:
+        while True:
+            with self._review_db_stats_lock:
+                task = self._review_db_stats_pending
+                if task is None:
+                    self._review_db_stats_inflight = False
+                    return
+                self._review_db_stats_pending = None
+
+            try:
+                db_stats = self._review_db_stats(task.position_fen)
+            except Exception as exc:
+                db_stats = self._error_review_db_stats(task.position_fen, exc)
+
+            if not self.active or self._mode != "review" or self._review_payload is None:
+                continue
+
+            if self._review_payload.get("dbStatsRequestId") != task.request_id:
+                continue
+
+            self._set_review_db_stats(db_stats)
+            self._broadcast_review_db_stats(task.request_id)
+
     def _broadcast_review_navigation(self) -> None:
         
         if not self.active or self._mode != "review":
@@ -708,6 +889,8 @@ class AppController:
                 "review": {
                     "currentPath": list(self._review_path),
                     "viewRootPath": list(self._review_view_root_path),
+                    "dbStatsRequestId": self._review_payload.get("dbStatsRequestId"),
+                    "dbStats": self._review_payload.get("dbStats"),
                 },
             }
         )
@@ -848,7 +1031,7 @@ class AppController:
         continue_prompt = self._rep_controller.on_user_response(uci)
         if not continue_prompt:
             self._log.serialize()
-            self._enter_review_mode(node=self._prompt.node, message="Correct. Browse the tree or click New.")
+            self._enter_review_mode(node=self._prompt.node)
         else:
             self.show_prompt()
 
@@ -890,6 +1073,8 @@ class AppController:
     def goto_review_path(self, path: list[int]) -> None:
         if self._mode != "review":
             raise RuntimeError("Browsing is only available in review mode")
+        if self._review_payload is None:
+            raise RuntimeError("Review payload is not initialized")
 
         root = self._session.game
         node = node_at_path(root, path, self._session.variations)
@@ -898,6 +1083,7 @@ class AppController:
         self._review_payload["currentPath"] = list(path)
         self._review_view_root_path = self._review_view_root_path_for(self._review_path)
         self._review_payload["viewRootPath"] = list(self._review_view_root_path)
+        stats_task = self._prepare_review_db_stats(node)
         self._hub.set_from_node(
             node,
             orientation=self._orientation,
@@ -905,6 +1091,20 @@ class AppController:
             allow_moves=False,
         )
         self._broadcast_review_navigation()
+        if stats_task is not None:
+            self._queue_review_db_stats(stats_task)
+
+    def study_from_here(self) -> None:
+        if self._mode != "review":
+            raise RuntimeError("Study root can only be changed in review mode")
+
+        node = node_at_path(self._session.game, list(self._review_path), self._session.variations)
+        position_fen = fen(node)
+        self._cfg.starting_fen = position_fen
+        self._session.options.starting_fen = position_fen
+        self._session.starting_node = node
+        self._generator.set_start(root=node)
+        self._enter_review_mode(node=node, message="Study root updated. Click New to practice from here.")
 
     def prev_prompt(self) -> None:
         if len(self._prompt_history) > 1:
@@ -937,7 +1137,10 @@ class AppController:
             "tree": tree,
             "currentPath": self._review_path,
             "viewRootPath": list(self._review_view_root_path),
+            "dbStatsRequestId": None,
+            "dbStats": None,
         }
+        stats_task = self._prepare_review_db_stats(node)
 
         self._hub.set_from_node(
             node,
@@ -946,6 +1149,8 @@ class AppController:
             allow_moves=False,
         )
         self._broadcast_ui_state()
+        if stats_task is not None:
+            self._queue_review_db_stats(stats_task)
 
 
     def _close_session(self) -> None:

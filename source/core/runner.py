@@ -2,7 +2,7 @@ import copy
 import sys
 import weakref
 from dataclasses import dataclass
-from typing import Callable, NamedTuple, Optional, Union, TypeVar
+from typing import Any, Callable, NamedTuple, Optional, Union, TypeVar
 from collections.abc import Callable
 # from __future__ import annotations # to resolve Runner<->EvalProvider... I'll just annotate with a str.
 from abc import ABC, abstractmethod
@@ -51,10 +51,14 @@ class PosCache:
         self.TTed : list[Node] = [] # "seen in the relevant part of the pgn file"
         self._data = {}
 
-    def get(self, label, query_fn):
-        if label not in self._data:
-            self._data[label] = query_fn(self.fen)
-        return self._data[label]
+    def has(self, label: str) -> bool:
+        return label in self._data
+
+    def __getitem__(self, key):
+        return self._data[key]
+    
+    def __setitem__(self, key, value):
+        self._data[key] = value
 
     def to_dict(self) -> dict:
         data = {}
@@ -228,6 +232,14 @@ class EvalProvider(QueryResult):
 
 
 class PgnSession:
+    """
+    A context for a single PGN file.
+    
+    Caches expensive query results.
+    Manages the engine and the database access.
+    Provides a number of helper functions tied
+    to a PGN tree.
+    """
     def __init__(
         self,
         options: CoreOptions,
@@ -264,7 +276,7 @@ class PgnSession:
         self._init_queries()
 
         self._init_game()
-        self._set_starting_pos()
+        self._set_starting_fen()
 
     def _init_game(self): # TODO: multiple games
         with open(self.options.input_pgn, encoding="utf-8") as pgn_file:
@@ -272,8 +284,8 @@ class PgnSession:
 
 
     def _normalize_fens(self):
-        if hasattr(self.options, "starting_pos"):
-            self.options.starting_pos = fen(self.options.starting_pos)
+        if hasattr(self.options, "starting_fen"):
+            self.options.starting_fen = fen(self.options.starting_fen)
 
     def _init_queries(self):
         pov = getattr(self.options, "side", WHITE)
@@ -292,10 +304,17 @@ class PgnSession:
             "q-eval": quick_eval_provider,
         }
 
-    def query(self, fen: str, type: str):
-        if fen in self.cache:
+    def query(self, fen: str, type: str, cache_only=False):
+        if cache_only:
+            if fen not in self.cache or not self.cache[fen].has(type):
+                return None
+            return self.cache[fen][type]
+        if self.cache[fen].has(type):
             sys.stderr.write(f"Using cache for {fen}\n")
-        return self.cache[fen].get(type, self._queries[type])
+            return self.cache[fen][type]
+        result = self._queries[type](fen)
+        self.cache[fen][type] = result
+        return result
 
     def load_cache(self, path: Optional[str] = None) -> bool:
         self.report_message("Loading cache...")
@@ -446,13 +465,13 @@ class PgnSession:
         return score_rate(md, self.options.side)
 
     
-    def _set_starting_pos(self, game: Node = None):
-        if not hasattr(self.options, "starting_pos"):
+    def _set_starting_fen(self, game: Node = None):
+        if not hasattr(self.options, "starting_fen"):
             return
         if game is None:
             game = self.game
-        if self.options.starting_pos:
-            self.starting_node = find_node_by_position(game, self.options.starting_pos)
+        if self.options.starting_fen:
+            self.starting_node = find_node_by_position(game, self.options.starting_fen)
         else:
             self.starting_node = game
 

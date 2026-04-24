@@ -1,5 +1,6 @@
 import { Chessground } from "https://unpkg.com/chessground@9.2.1/dist/chessground.min.js";
 import { createPgnViewerUi } from "./pgn_viewer_ui.js";
+import { createReviewDbStatsUi } from "./review_db_stats_ui.js";
 
 const boardEl = document.getElementById("board");
 const logEl = document.getElementById("log");
@@ -184,6 +185,7 @@ const srUi = createPgnViewerUi({
   onFlipBoard: () => ground.toggleOrientation(),
   onResetBoard: () => send({ type: "set", fen: "startpos" }),
 });
+const dbStatsUi = createReviewDbStatsUi();
 
 function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -225,6 +227,7 @@ function connect() {
     if (msg.type === "sr_state") {
       try {
         await srUi.applySrState(msg.sr);
+        dbStatsUi.applySrState(msg.sr);
         if (srUi.isReviewMode && srUi.isReviewMode()) {
           applyMouseMove();
         } else {
@@ -241,11 +244,23 @@ function connect() {
     if (msg.type === "sr_review_nav") {
       try {
         await srUi.applyReviewNavigation(msg.review);
+        dbStatsUi.applyReviewNavigation(msg.review);
         if (srUi.isReviewMode && srUi.isReviewMode()) {
           applyMouseMove();
         } else {
           applyServerDests();
         }
+      } catch (err) {
+        const message = err && err.message ? err.message : String(err);
+        log(`sr ui error: ${message}`);
+        console.error("sr ui error:", err);
+      }
+      return;
+    }
+
+    if (msg.type === "sr_review_db_stats") {
+      try {
+        dbStatsUi.applyReviewDbStats(msg.review);
       } catch (err) {
         const message = err && err.message ? err.message : String(err);
         log(`sr ui error: ${message}`);

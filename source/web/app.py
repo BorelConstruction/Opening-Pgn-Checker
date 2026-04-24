@@ -224,6 +224,12 @@ async def ws(ws: WebSocket) -> None:
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
+            elif msg_type == "sr_study_from_here":
+                try:
+                    sr_controller.study_from_here()
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
             elif msg_type == "sr_search_move":
                 try:
                     sr_controller.search_nodes_by_move()

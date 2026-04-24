@@ -20,6 +20,7 @@
         <button id="srNew" title="Spaced repetition: new random position">New</button>
         <button id="srPrev" title="Spaced repetition: go back to the previous position">Previous</button>
         <button id="srHint" title="Spaced repetition: get a hint">Hint</button>
+        <button id="srStudyFromHere" title="Spaced repetition: use the current review position as the study start">Study from here</button>
         <button id="srSearchMove" title="Spaced repetition: search occurrences of the last move">Search move</button>
         <span id="status" class="status">disconnected</span>
       </div>
@@ -28,6 +29,13 @@
     <div class="app">
       <div class="left">
         <div id="board" class="cg-wrap"></div>
+        <div class="panel review-db-stats-panel" id="reviewDbStatsPanel" hidden>
+          <div class="review-db-stats-panel-head">
+            <div class="review-db-stats-title">Database stats</div>
+            <div id="reviewDbStatsSummary" class="review-db-stats-summary"></div>
+          </div>
+          <div id="reviewDbStatsList" class="review-db-stats-list"></div>
+        </div>
       </div>
       <div class="right">
         <div class="panel">

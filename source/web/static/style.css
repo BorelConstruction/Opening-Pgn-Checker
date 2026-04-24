@@ -53,6 +53,12 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.left {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
 .controls {
   display: flex;
   gap: 10px;
@@ -108,6 +114,116 @@ button:hover {
 
 .guess-actions[hidden] {
   display: none;
+}
+
+.review-db-stats-panel[hidden] {
+  display: none;
+}
+
+.review-db-stats-panel {
+  min-height: 72px;
+}
+
+.review-db-stats-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.review-db-stats-title {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.review-db-stats-summary {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.review-db-stats-list {
+  display: grid;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.review-db-stats-item {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 6px 8px;
+  background: rgba(2, 6, 23, 0.35);
+}
+
+.review-db-stats-move {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.review-db-stats-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.review-db-stats-bar {
+  display: flex;
+  min-height: 18px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.review-db-stats-bar-segment {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.review-db-stats-bar-segment.white {
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+.review-db-stats-bar-segment.draws {
+  background: #64748b;
+  color: #f8fafc;
+}
+
+.review-db-stats-bar-segment.black {
+  background: #020617;
+  color: #f8fafc;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.review-db-stats-empty,
+.review-db-stats-error {
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(2, 6, 23, 0.35);
+}
+
+.review-db-stats-empty {
+  color: var(--muted);
+}
+
+.review-db-stats-error {
+  color: #fecaca;
 }
 
 .search-panel {

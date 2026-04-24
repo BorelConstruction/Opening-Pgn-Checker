@@ -5,6 +5,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   const srNewBtn = document.getElementById("srNew");
   const srPrevBtn = document.getElementById("srPrev");
   const srHintBtn = document.getElementById("srHint");
+  const srStudyFromHereBtn = document.getElementById("srStudyFromHere");
   const srSearchMoveBtn = document.getElementById("srSearchMove");
 
   const treePanel = document.getElementById("treePanel");
@@ -160,10 +161,12 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   function refreshButtons() {
     const active = !!state.active;
     const isGuess = active && state.mode === "guess";
+    const isReview = active && state.mode === "review";
     srNewBtn.disabled = !active;
     srPrevBtn.disabled = !active;
     srHintBtn.disabled = !isGuess;
-    srSearchMoveBtn.disabled = !active || state.mode !== "review";
+    srStudyFromHereBtn.disabled = !isReview;
+    srSearchMoveBtn.disabled = !isReview;
     srGuessGiveUpBtn.disabled = !isGuess;
     srGuessFinishBtn.disabled = !isGuess;
     srGuessTooEasyBtn.disabled = !isGuess;
@@ -505,6 +508,12 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
 
     state.review.currentPath = clonePath(review.currentPath);
     state.review.viewRootPath = clonePath(review.viewRootPath);
+    if (Object.prototype.hasOwnProperty.call(review, "dbStatsRequestId")) {
+      state.review.dbStatsRequestId = review.dbStatsRequestId;
+    }
+    if (Object.prototype.hasOwnProperty.call(review, "dbStats")) {
+      state.review.dbStats = review.dbStats || null;
+    }
 
     renderReviewTree();
     renderSearchMove();
@@ -531,6 +540,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   srNewBtn.addEventListener("click", () => send({ type: "sr_new" }));
   srPrevBtn.addEventListener("click", () => send({ type: "sr_prev" }));
   srHintBtn.addEventListener("click", () => send({ type: "sr_hint" }));
+  srStudyFromHereBtn.addEventListener("click", () => send({ type: "sr_study_from_here" }));
   srGuessGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
   srGuessFinishBtn.addEventListener("click", () => send({ type: "sr_finish_prompt" }));
   srGuessTooEasyBtn.addEventListener("click", () => send({ type: "sr_finish_prompt", ease: 0.5 }));

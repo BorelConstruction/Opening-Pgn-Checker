@@ -46,8 +46,6 @@ def default_repertoire_cache_path(options: RepertoireOptions, base = "cache") ->
 class RepertoireSession(PgnSession):
     """
     A 'PgnSession' configured for repertoire-like features.
-
-    Mainly, caching is determined by the line, not a single position.
     """
 
     def __init__(

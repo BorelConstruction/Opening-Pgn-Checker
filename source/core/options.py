@@ -87,7 +87,7 @@ class RepertoireOptions(CoreOptions):
         default=6,
         metadata={
             "label": "Start on Move",
-            "min": 2,
+            "min": 1,
             "max": 60,
             "ui_group": "analysis_move_range",
             "ui_group_order": 1,
@@ -116,7 +116,7 @@ class RepertoireOptions(CoreOptions):
 @dataclass
 class CheckerOptions(RepertoireOptions):
     # --- WHAT TO WORK WITH ---
-    starting_pos: str = field(
+    starting_fen: str = field(
         default="",
         metadata={"label": "Starting Position (FEN)"}
     )
@@ -175,7 +175,7 @@ class CheckerOptions(RepertoireOptions):
 
 @dataclass
 class SpacedRepetitionOptions(RepertoireOptions):
-    starting_pos: str = field(
+    starting_fen: str = field(
         default="",
         metadata={"label": "Starting Position (FEN)"}
     )
@@ -221,7 +221,7 @@ class GraphOptions(CoreOptions):
         }
     )
     
-    starting_pos: str = field(
+    starting_fen: str = field(
         default="",
         metadata={"label": "Starting Position (FEN)"}
     )
