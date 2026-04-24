@@ -18,7 +18,6 @@
         <button id="flip">Flip</button>
         <button id="reset">Reset</button>
         <button id="srNew" title="Spaced repetition: new random position">New</button>
-        <button id="srGiveUp" title="Spaced repetition: reveal the line and browse variations">Give up</button>
         <button id="srPrev" title="Spaced repetition: go back to the previous position">Previous</button>
         <button id="srHint" title="Spaced repetition: get a hint">Hint</button>
         <button id="srSearchMove" title="Spaced repetition: search occurrences of the last move">Search move</button>
@@ -44,6 +43,11 @@
         </div>
 
         <div class="panel tree-panel" id="treePanel">
+          <div id="guessActions" class="guess-actions" hidden>
+            <button id="srGuessGiveUp" type="button" title="Spaced repetition: reveal the line and browse variations">Give Up</button>
+            <button id="srGuessFinish" type="button" title="Spaced repetition: reveal the line, browse variations, and mark that no further learning is needed">Don't Need to Learn Further</button>
+            <button id="srGuessTooEasy" type="button" title="Spaced repetition: reveal the line, browse variations, and mark this prompt as too easy">Too Easy</button>
+          </div>
           <div id="variation-tree" class="variation-tree"></div>
         </div>
 

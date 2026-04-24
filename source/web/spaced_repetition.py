@@ -41,7 +41,6 @@ class MoveGrade(Enum):
 @dataclass
 class MoveSignal():
     move_grade: MoveGrade
-    response_node: Optional[Node] = None
     msg: str = ""
 
 
@@ -63,6 +62,12 @@ class MoveInterpreter():
     def summarize(self) -> Feedback:
         pass
 
+    def expected_uci(self) -> Optional[UCI]:
+        try:
+            return self._session.variations(self._prompt.node)[0].move.uci() # TODO: transp
+        except Exception:
+            return self._session.query(fen(self._prompt.node), "q-eval").move.uci()
+
     def _handle_file_guess(self, uci: str) -> None:
         expected_moves = self._session.variations(self._prompt.node)
         if not expected_moves:
@@ -71,7 +76,7 @@ class MoveInterpreter():
         chosen_node = next((n for n in expected_moves if n.move.uci() == uci_from_lichess_to_pgn(uci)), None)
         if chosen_node:
             self._grades.append(MoveSignal(MoveGrade.CORRECT))
-            return MoveSignal(MoveGrade.CORRECT, chosen_node)
+            return MoveSignal(MoveGrade.CORRECT)
 
         # the user didn't guess -- prepare feedback on this
         expected_sans = ", ".join(
@@ -118,6 +123,14 @@ class MoveInterpreter():
         return self._session.q_eval_move(position, move).eval
 
 class LineGenerator():
+    """
+    The class responsible for prompt generation. Does not judge user responses,
+    a pure execution engine.
+    Prompts are generated move by move. A move may be randomnly chosen from a file,
+    or picked by a chess engine.
+
+    Keeps the result of generating in self._prompt.
+    """
     def __init__(self, session: RepertoireSession, root: Node, start_range: int, prompt_state: PromptState,
                  probs_cache_name: str, non_file_freq: float) -> None:
         self._session = session
@@ -143,9 +156,9 @@ class LineGenerator():
     def is_finished(self) -> bool:
         return self._is_finished
     
-    def finish_prompt(self) -> None:
+    def finish_prompt(self, ease=0.25) -> None:
         self._is_finished = True
-        self._recompute_line_move_probs(self._prompt.node, -0.5)
+        self._recompute_line_move_probs(self._prompt.node, -ease)
         self._edge_probs.serialize()
 
     def start_prompt(self, spec_id: SpecId) -> None:
@@ -177,7 +190,8 @@ class LineGenerator():
     def on_response(self, uci: str, signal: MoveSignal) -> None:
         if not self._prompt.off_file:
             if signal.move_grade == MoveGrade.CORRECT:
-                self._prompt.node = signal.response_node
+                self._prompt.node = next((n for n in self._session.variations(self._prompt.node) 
+                                          if n.move.uci() == uci_from_lichess_to_pgn(uci)))
                 self._advance_line(chosen=self._prompt.node)
             else:
                 self._prompt.debug_msg = signal.msg
@@ -185,6 +199,7 @@ class LineGenerator():
 
         else:
             # for now we don't do anything after an off-file guess
+            self._prompt.debug_msg = signal.msg
             self.finish_prompt()
             return
 
@@ -635,7 +650,7 @@ class AppController:
                                                     self._cfg.start_range, self._prompt, self._probs_cache_name(), self._cfg.non_file_move_frequency)
         self._interpreter : Interpreter = MoveInterpreter(self._session, self._prompt)
         self._rep_controller : RepetitionController = RepetitionController(NaiveScheduler(self._log), self._generator, 
-                                                                           self._interpreter, self._log, lambda prompt: self.show_prompt(prompt))
+                                                                           self._interpreter, self._log)
 
         if options.preload_db:
             self._prefetch_db_stats()
@@ -644,13 +659,16 @@ class AppController:
 
 
     def start_next_prompt(self) -> None:
-        # self._generator.finish_prompt()
         self.active = True
         self._mode = "guess"
         self._broadcast_ui_state()
         self._rep_controller.start_next_prompt()
+        self.show_prompt()
 
     def show_prompt(self, prompt: str = None, **kwargs) -> None:
+        if prompt is None:
+            prompt = self._rep_controller.get_prompt_view()
+
         self._mode = "guess"
         self._hub.set_from_node(
             prompt.node,
@@ -684,8 +702,8 @@ class AppController:
         """
         Search for nodes with the same move as in the current review position
         and display the results.
-        Results are displayed with the previous and the following moves, emphasizing them if
-        they are the same as in the current review node.
+        Results are displayed with the previous and the following moves, emphasized if
+        the same as those in the current review node.
         """
         if self._mode != "review":
             return
@@ -763,17 +781,14 @@ class AppController:
         if self._mode != "guess":
             return
         
-        try:
-            expected_uci = self._session.variations(self._prompt.node)[0].move.uci()
-        except Exception:
-            expected_uci = self._session.query(fen(self._prompt.node), "q-eval").move.uci()
+        expected_uci = self._interpreter.expected_uci()
 
         if not hasattr(self, 'hints') or self.hints.board != self._prompt.node.board():
             self.hints = Hints(self._prompt.node, expected_uci)
 
         self.hints.add_hint()
 
-        self.show_prompt(circles = self.hints.circles, message=str(self.hints.circle_coords))
+        self.show_prompt(circles = self.hints.circles)
 
     def handle_guess(self, uci: str) -> None:
         if self._mode != "guess":
@@ -783,6 +798,8 @@ class AppController:
         if not continue_prompt:
             self._log.serialize()
             self._enter_review_mode(node=self._prompt.node, message="Correct. Browse the tree or click New.")
+        else:
+            self.show_prompt()
 
 
     def _mainline_node_at_ply(self, game: Any, ply: int) -> Any:
@@ -795,15 +812,27 @@ class AppController:
         if self._mode != "guess":
             return
 
+        self._reveal_prompt_in_review()
+
+    def finish_prompt(self, ease: float = 0.25) -> None:
+        if self._mode != "guess":
+            return
+
+        self._generator.finish_prompt(ease=ease)
+        self._reveal_prompt_in_review()
+
+    def _reveal_prompt_in_review(self) -> None:
+        if self._mode != "guess":
+            return
+
         if self._prompt.node is not None:
-            expected_moves = list(self._session.variations(self._prompt.node))
-            if expected_moves:
-                expected_sans = ", ".join(node_san(n) for n in expected_moves)
-                message = f"Gave up. Expected: {expected_sans}. Browse the tree or click New."
+            expected_uci = self._interpreter.expected_uci()
+            if expected_uci:
+                message = f"Expected: {expected_uci}. Browse the tree or click New."
             else:
-                message = "Gave up. No moves in file here. Browse the tree or click New."
+                message = "No expected moves here. Browse the tree or click New."
         else:
-            message = "Gave up (off-file prompt). Browse the repertoire tree or click New."
+            message = "Off-file prompt. Browse the repertoire tree or click New."
 
         self._enter_review_mode(node=self._prompt.node, message=message)
 

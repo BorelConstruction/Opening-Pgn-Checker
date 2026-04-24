@@ -96,6 +96,20 @@ button:hover {
   display: none;
 }
 
+.guess-actions {
+  display: grid;
+  gap: 10px;
+}
+
+.guess-actions button {
+  width: 100%;
+  text-align: left;
+}
+
+.guess-actions[hidden] {
+  display: none;
+}
+
 .search-panel {
   width: min(520px, calc(100vw - 36px));
   max-height: min(70vh, 560px);

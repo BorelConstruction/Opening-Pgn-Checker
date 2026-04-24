@@ -3,12 +3,15 @@
 export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   // log("Creating PGN Viewer UI");
   const srNewBtn = document.getElementById("srNew");
-  const srGiveUpBtn = document.getElementById("srGiveUp");
   const srPrevBtn = document.getElementById("srPrev");
   const srHintBtn = document.getElementById("srHint");
   const srSearchMoveBtn = document.getElementById("srSearchMove");
 
   const treePanel = document.getElementById("treePanel");
+  const guessActions = document.getElementById("guessActions");
+  const srGuessGiveUpBtn = document.getElementById("srGuessGiveUp");
+  const srGuessFinishBtn = document.getElementById("srGuessFinish");
+  const srGuessTooEasyBtn = document.getElementById("srGuessTooEasy");
   const treeContainer = document.getElementById("variation-tree");
 
   const searchMoveOverlay = document.getElementById("searchMoveOverlay");
@@ -84,10 +87,14 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
 
   function refreshButtons() {
     const active = !!state.active;
+    const isGuess = active && state.mode === "guess";
     srNewBtn.disabled = !active;
-    srGiveUpBtn.disabled = !active || state.mode !== "guess";
     srPrevBtn.disabled = !active;
+    srHintBtn.disabled = !isGuess;
     srSearchMoveBtn.disabled = !active || state.mode !== "review";
+    srGuessGiveUpBtn.disabled = !isGuess;
+    srGuessFinishBtn.disabled = !isGuess;
+    srGuessTooEasyBtn.disabled = !isGuess;
   }
 
   function closeSearchMoveOverlay() {
@@ -331,8 +338,13 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
 
     refreshButtons();
 
-    if (isReviewMode() && state.review && state.review.tree) {
+    if (state.active && state.mode === "guess") {
       treePanel.style.display = "block";
+      guessActions.hidden = false;
+      treeContainer.innerHTML = "";
+    } else if (isReviewMode() && state.review && state.review.tree) {
+      treePanel.style.display = "block";
+      guessActions.hidden = true;
       treeContainer.innerHTML = "";
       const tree = state.review.tree;
       const globalCurrentPath = Array.isArray(state.review.currentPath) ? state.review.currentPath : [];
@@ -345,6 +357,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
       treeContainer.appendChild(treeRoot);
     } else {
       treePanel.style.display = "none";
+      guessActions.hidden = true;
       treeContainer.innerHTML = "";
     }
     renderSearchMove();
@@ -364,9 +377,11 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   searchMoveCloseBtn.addEventListener("click", closeSearchMoveOverlay);
 
   srNewBtn.addEventListener("click", () => send({ type: "sr_new" }));
-  srGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
   srPrevBtn.addEventListener("click", () => send({ type: "sr_prev" }));
   srHintBtn.addEventListener("click", () => send({ type: "sr_hint" }));
+  srGuessGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
+  srGuessFinishBtn.addEventListener("click", () => send({ type: "sr_finish_prompt" }));
+  srGuessTooEasyBtn.addEventListener("click", () => send({ type: "sr_finish_prompt", ease: 0.5 }));
   srSearchMoveBtn.addEventListener("click", () => {
     state.searchMoveDismissed = false;
     renderSearchMove();

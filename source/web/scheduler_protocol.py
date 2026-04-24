@@ -71,8 +71,6 @@ class Interpreter(Protocol):
 
     Note that it does not only evaluate "quality" of the response --
     it also can return information useful for the generator.
-    TODO: think of better design... It feels like "Interpreter" should not return
-    Node objects, but who returns them then?
     """
 
     def interpret(self, response: Any) -> Signal:
@@ -137,19 +135,19 @@ class RepetitionController():
         generator: Generator,
         interpreter: Interpreter,
         session_log: SessionLog,
-        show_prompt: Callable[[Prompt], None],
     ):
         self.scheduler = scheduler
         self.generator = generator
         self.interpreter = interpreter
         self.session_log = session_log
         self.current_spec_id = None
-        self.show_prompt = show_prompt
 
+    def get_prompt_view(self) -> Prompt:
+        return self._prompt
+    
     def start_next_prompt(self) -> None:
         spec_id = self.scheduler.next()
-        prompt = self.generator.start_prompt(spec_id)
-        self.show_prompt(prompt)
+        self._prompt = self.generator.start_prompt(spec_id)
 
     def on_user_response(self, response: Any) -> bool:
         """
@@ -157,7 +155,7 @@ class RepetitionController():
         Returns True if the prompt should continue, False if it should terminate."""
         signal = self.interpreter.interpret(response)
 
-        prompt = self.generator.on_response(response, signal)
+        self._prompt = self.generator.on_response(response, signal)
 
         if self.generator.is_finished():
             prompt_id = self.generator.current_prompt_id()
@@ -172,5 +170,4 @@ class RepetitionController():
 
             return False
         else:
-            self.show_prompt(prompt)
             return True
