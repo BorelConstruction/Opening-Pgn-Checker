@@ -346,6 +346,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   }
 
   const MIN_FORWARD_PLIES_SHOWN = 7;
+  const TREE_VIEWPORT_MARGIN_RATIO = 0.2;
+  const TREE_VIEWPORT_MIN_MARGIN_PX = 24;
+  let treeViewportSyncPending = false;
 
   function pathIsPrefix(prefix, path) {
     if (!Array.isArray(prefix) || !Array.isArray(path)) return false;
@@ -361,6 +364,40 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     if (pathIsPrefix(nodePath, currentPath)) return "past";
     if (pathIsPrefix(currentPath, nodePath)) return "future";
     return "branch";
+  }
+
+  function ensureCurrentTreeRowVisible() {
+    const currentRow = treeContainer.querySelector(".tree-node.current > .tree-row");
+    if (!(currentRow instanceof HTMLElement)) return;
+
+    const panelRect = treePanel.getBoundingClientRect();
+    const rowRect = currentRow.getBoundingClientRect();
+    const margin = Math.max(
+      TREE_VIEWPORT_MIN_MARGIN_PX,
+      Math.floor(treePanel.clientHeight * TREE_VIEWPORT_MARGIN_RATIO),
+    );
+    const visibleTop = panelRect.top + margin;
+    const visibleBottom = panelRect.bottom - margin;
+
+    if (rowRect.top < visibleTop) {
+      treePanel.scrollTop -= visibleTop - rowRect.top;
+      return;
+    }
+
+    if (rowRect.bottom > visibleBottom) {
+      treePanel.scrollTop += rowRect.bottom - visibleBottom;
+    }
+  }
+
+  function queueTreeViewportSync() {
+    if (treeViewportSyncPending) return;
+
+    // The tree DOM is rebuilt on each review navigation, so wait for layout before correcting scroll.
+    treeViewportSyncPending = true;
+    requestAnimationFrame(() => {
+      treeViewportSyncPending = false;
+      ensureCurrentTreeRowVisible();
+    });
   }
 
   function renderTreeNode(node, nodePath = [], basePath = [], globalCurrentPath = []) {
@@ -439,6 +476,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
       const viewRootNode = findNodeAtPath(tree, viewRootPath) || tree;
       const treeRoot = renderTreeNode(viewRootNode, [], viewRootPath, globalCurrentPath);
       treeContainer.appendChild(treeRoot);
+      queueTreeViewportSync();
       return;
     }
 
@@ -482,6 +520,10 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   }
 
   document.addEventListener("keydown", handleKeyNavigation);
+  window.addEventListener("resize", () => {
+    if (!isReviewMode()) return;
+    queueTreeViewportSync();
+  });
   searchMoveOverlay.addEventListener("click", closeSearchMoveOverlay);
   searchMovePanel.addEventListener("click", (event) => event.stopPropagation());
   searchMoveCloseBtn.addEventListener("click", closeSearchMoveOverlay);

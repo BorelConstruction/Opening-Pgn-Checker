@@ -608,6 +608,8 @@ class SpacedRepetitionFeature:
         self._session.close()
 
 
+MAX_REVIEW_TREE_DEPTH_FROM_VIEW_ROOT = 5
+
 
 class AppController:
     """
@@ -623,6 +625,7 @@ class AppController:
         self._prompt = PromptState(node=None, off_file=False, debug_msg="", anchor_node=None)
         self._log : SessionLog = PromptLog()
 
+        self._review_base_root_path: list[int] = []
         self._review_view_root_path: list[int] = []
         self._search_move_payload: Optional[dict[str, Any]] = None
 
@@ -708,6 +711,23 @@ class AppController:
                 },
             }
         )
+
+    def _common_path_prefix_length(self, left: list[int], right: list[int]) -> int:
+        limit = min(len(left), len(right))
+        prefix_len = 0
+        while prefix_len < limit and left[prefix_len] == right[prefix_len]:
+            prefix_len += 1
+        return prefix_len
+
+    def _review_view_root_path_for(self, current_path: list[int]) -> list[int]:
+        current_view_root = list(self._review_view_root_path)
+        shared_prefix_len = self._common_path_prefix_length(current_view_root, current_path)
+        min_root_len = max(shared_prefix_len, len(current_path) - MAX_REVIEW_TREE_DEPTH_FROM_VIEW_ROOT)
+
+        if list(current_path)[:len(self._review_base_root_path)] == list(self._review_base_root_path):
+            min_root_len = max(min_root_len, len(self._review_base_root_path))
+
+        return list(current_path[:min_root_len])
 
     def _prefetch_db_stats(self) -> None:
         """Pre-warm the cache by querying DB stats that we will need."""
@@ -876,9 +896,8 @@ class AppController:
 
         self._review_path = list(path)
         self._review_payload["currentPath"] = list(path)
-        if not list(path)[:len(self._review_view_root_path)] == list(self._review_view_root_path):
-            self._review_view_root_path = list(path)
-            self._review_payload["viewRootPath"] = list(self._review_view_root_path)
+        self._review_view_root_path = self._review_view_root_path_for(self._review_path)
+        self._review_payload["viewRootPath"] = list(self._review_view_root_path)
         self._hub.set_from_node(
             node,
             orientation=self._orientation,
@@ -900,7 +919,9 @@ class AppController:
         self._search_move_payload = None
         end_ply = self._session.options.end_ply
         self._review_path = path_from_root(self._session.game, node, self._session.variations)
-        self._review_view_root_path = path_from_root(self._session.game, self._session.starting_node, self._session.variations)
+        self._review_base_root_path = path_from_root(self._session.game, self._session.starting_node, self._session.variations)
+        self._review_view_root_path = list(self._review_base_root_path)
+        self._review_view_root_path = self._review_view_root_path_for(self._review_path)
         exported = export_pgn_subtree(
             self._session,
             self._session.game,
