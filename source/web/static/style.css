@@ -220,6 +220,13 @@ button:hover {
   color: var(--text);
 }
 
+.search-similarity {
+  margin-left: auto;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .search-empty {
   color: var(--muted);
   padding: 4px 2px;
@@ -254,6 +261,11 @@ button:hover {
   box-shadow:
     3px 0 0 0 rgba(56, 189, 248, 0.9) inset,
     0 0 0 1px rgba(56, 189, 248, 0.18) inset;
+}
+
+.tree-row {
+  display: block;
+  width: 100%;
 }
 
 .tree-move {

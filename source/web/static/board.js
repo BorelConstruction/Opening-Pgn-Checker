@@ -238,6 +238,22 @@ function connect() {
       return;
     }
 
+    if (msg.type === "sr_review_nav") {
+      try {
+        await srUi.applyReviewNavigation(msg.review);
+        if (srUi.isReviewMode && srUi.isReviewMode()) {
+          applyMouseMove();
+        } else {
+          applyServerDests();
+        }
+      } catch (err) {
+        const message = err && err.message ? err.message : String(err);
+        log(`sr ui error: ${message}`);
+        console.error("sr ui error:", err);
+      }
+      return;
+    }
+
     if (msg.type === "error") {
       log(`error: ${msg.message}`);
       // Log full details to browser console for debugging

@@ -28,6 +28,29 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     searchMoveDismissed: false,
   };
 
+  const reviewNav = {
+    requestedPath: null,
+    queuedPath: null,
+  };
+
+  function clonePath(path) {
+    return Array.isArray(path) ? [...path] : [];
+  }
+
+  function pathsEqual(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i += 1) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+
+  function resetReviewNavigation() {
+    reviewNav.requestedPath = null;
+    reviewNav.queuedPath = null;
+  }
+
   function isReviewMode() {
     return state.active && state.mode === "review";
   }
@@ -73,6 +96,55 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     return obj;
   }
 
+  function getNavigationBasePath() {
+    if (Array.isArray(reviewNav.queuedPath)) return reviewNav.queuedPath;
+    if (Array.isArray(reviewNav.requestedPath)) return reviewNav.requestedPath;
+    return clonePath(state.review && state.review.currentPath);
+  }
+
+  function flushQueuedReviewNavigation() {
+    if (!isReviewMode() || !state.review || !state.review.tree) {
+      resetReviewNavigation();
+      return;
+    }
+    if (Array.isArray(reviewNav.requestedPath)) return;
+    if (!Array.isArray(reviewNav.queuedPath)) return;
+
+    const nextPath = reviewNav.queuedPath;
+    reviewNav.queuedPath = null;
+    if (pathsEqual(nextPath, state.review.currentPath)) return;
+
+    reviewNav.requestedPath = clonePath(nextPath);
+    send({ type: "sr_goto", path: nextPath });
+  }
+
+  function queueReviewNavigation(path) {
+    if (!isReviewMode() || !state.review || !state.review.tree) return;
+
+    const nextPath = clonePath(path);
+    if (Array.isArray(reviewNav.requestedPath)) {
+      if (pathsEqual(nextPath, reviewNav.requestedPath) || pathsEqual(nextPath, reviewNav.queuedPath)) {
+        return;
+      }
+      // Keep only the latest requested destination while one server round-trip is in flight.
+      reviewNav.queuedPath = nextPath;
+      return;
+    }
+
+    if (pathsEqual(nextPath, state.review.currentPath)) return;
+    reviewNav.requestedPath = nextPath;
+    reviewNav.queuedPath = null;
+    send({ type: "sr_goto", path: nextPath });
+  }
+
+  function acknowledgeReviewNavigation(currentPath) {
+    if (!Array.isArray(reviewNav.requestedPath)) return;
+    if (!pathsEqual(currentPath, reviewNav.requestedPath)) return;
+
+    reviewNav.requestedPath = null;
+    flushQueuedReviewNavigation();
+  }
+
   function handleReviewMove(uci) {
     const ctx = getReviewContext();
     if (!ctx) return false;
@@ -81,7 +153,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     const idx = children.findIndex((child) => child && child.uci === uci);
     if (idx < 0) return false;
 
-    send({ type: "sr_goto", path: [...ctx.currentPath, idx] });
+    queueReviewNavigation([...ctx.currentPath, idx]);
     return true;
   }
 
@@ -133,13 +205,13 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
 
     for (const item of results) {
       const path = Array.isArray(item.path) ? item.path : [];
-      const isCurrent = JSON.stringify(path) === JSON.stringify(currentPath);
+      const isCurrent = pathsEqual(path, currentPath);
 
       const div = document.createElement("div");
       div.className = `search-item ${isCurrent ? "current" : ""}`;
       div.addEventListener("click", (event) => {
         event.stopPropagation();
-        send({ type: "sr_goto", path });
+        queueReviewNavigation(path);
       });
 
       const startDots = document.createElement("span");
@@ -163,6 +235,13 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
       nextSpan.className = `search-next ${item.matchNext ? "match" : ""}`;
       nextSpan.textContent = nextText;
       div.appendChild(nextSpan);
+
+      const similaritySpan = document.createElement("span");
+      similaritySpan.className = "search-similarity";
+      const similarity = typeof item.similarity === "number" ? item.similarity : 0;
+      const distance = typeof item.distance === "number" ? item.distance : 0;
+      similaritySpan.textContent = `${Math.round(similarity * 100)}% d=${distance.toFixed(2)}`;
+      div.appendChild(similaritySpan);
 
       const endDots = document.createElement("span");
       endDots.className = "search-ellipsis";
@@ -253,10 +332,10 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     // Keep arrow keys owned by review navigation even when the path cannot change.
     event.preventDefault();
 
-    const currentPath = Array.isArray(state.review.currentPath) ? state.review.currentPath : [];
+    const currentPath = getNavigationBasePath();
     const newPath = getArrowNavigationPath(state.review.tree, currentPath, direction);
-    if (JSON.stringify(newPath) !== JSON.stringify(currentPath)) {
-      send({ type: 'sr_goto', path: newPath });
+    if (!pathsEqual(newPath, currentPath)) {
+      queueReviewNavigation(newPath);
     }
   }
 
@@ -279,27 +358,31 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
 
   function renderTreeNode(node, currentPath, nodePath = [], basePath = [], globalCurrentPath = []) {
     const globalPath = [...basePath, ...nodePath];
-    const isCurrent = JSON.stringify(globalPath) === JSON.stringify(globalCurrentPath);
+    const isCurrent = pathsEqual(globalPath, globalCurrentPath);
     const div = document.createElement("div");
     div.className = `tree-node ${isCurrent ? 'current' : ''}`;
     div.dataset.path = JSON.stringify(globalPath);
+
+    const row = document.createElement("div");
+    row.className = "tree-row";
+    div.appendChild(row);
 
     if (node.san) {
       // This is a move node
       const moveSpan = document.createElement("span");
       moveSpan.className = "tree-move";
       moveSpan.textContent = `${node.moveNumber}${node.color === 'white' ? '.' : '...'} ${node.san}`;
-      moveSpan.addEventListener("click", (event) => {
+      row.addEventListener("click", (event) => {
         event.stopPropagation();
-        send({ type: "sr_goto", path: globalPath });
+        queueReviewNavigation(globalPath);
       });
-      div.appendChild(moveSpan);
+      row.appendChild(moveSpan);
     } else {
       // This is a position node (root)
       const posSpan = document.createElement("span");
       posSpan.className = "tree-position";
       posSpan.textContent = `Position (ply ${node.ply})`;
-      div.appendChild(posSpan);
+      row.appendChild(posSpan);
     }
 
     const cpl = commonPrefixLength(nodePath, currentPath || []);
@@ -329,20 +412,15 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     return div;
   }
 
-  function applySrState(sr) {
-    // log("[DEBUG] applySrState called with sr:");
-    state.active = !!sr.active;
-    state.mode = sr.mode || "idle";
-    state.review = sr.review || null;
-    state.searchMove = sr.searchMove || null;
-
-    refreshButtons();
-
+  function renderReviewTree() {
     if (state.active && state.mode === "guess") {
       treePanel.style.display = "block";
       guessActions.hidden = false;
       treeContainer.innerHTML = "";
-    } else if (isReviewMode() && state.review && state.review.tree) {
+      return;
+    }
+
+    if (isReviewMode() && state.review && state.review.tree) {
       treePanel.style.display = "block";
       guessActions.hidden = true;
       treeContainer.innerHTML = "";
@@ -355,12 +433,38 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
         : [];
       const treeRoot = renderTreeNode(viewRootNode, relativeCurrentPath, [], viewRootPath, globalCurrentPath);
       treeContainer.appendChild(treeRoot);
-    } else {
-      treePanel.style.display = "none";
-      guessActions.hidden = true;
-      treeContainer.innerHTML = "";
+      return;
     }
+
+    treePanel.style.display = "none";
+    guessActions.hidden = true;
+    treeContainer.innerHTML = "";
+  }
+
+  function applySrState(sr) {
+    state.active = !!sr.active;
+    state.mode = sr.mode || "idle";
+    state.review = sr.review || null;
+    state.searchMove = sr.searchMove || null;
+    resetReviewNavigation();
+
+    refreshButtons();
+    renderReviewTree();
     renderSearchMove();
+  }
+
+  function applyReviewNavigation(review) {
+    if (!isReviewMode() || !state.review || !state.review.tree) return;
+    if (!review || !Array.isArray(review.currentPath) || !Array.isArray(review.viewRootPath)) {
+      throw new Error("Invalid review navigation payload");
+    }
+
+    state.review.currentPath = clonePath(review.currentPath);
+    state.review.viewRootPath = clonePath(review.viewRootPath);
+
+    renderReviewTree();
+    renderSearchMove();
+    acknowledgeReviewNavigation(state.review.currentPath);
   }
 
   function handleFlip() {
@@ -392,6 +496,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
 
   return {
     applySrState,
+    applyReviewNavigation,
     isReviewMode,
     handleFlip,
     handleReset,

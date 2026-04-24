@@ -14,6 +14,7 @@ from chess.pgn import GameNode as Node
 from dataclasses import dataclass
 
 from source.core.caching import CacheDict
+from source.core.position_similarity import compare_positions
 from source.core.traversal import TraversalPolicy, iter_nodes
 from source.web.board.contracts import Circle
 from source.web.board.session import UCI
@@ -42,6 +43,8 @@ class MoveGrade(Enum):
 class MoveSignal():
     move_grade: MoveGrade
     msg: str = ""
+    eval_diff: Optional[float] = None
+    rel_eval_diff: Optional[float] = None
 
 
 class MoveInterpreter():
@@ -96,7 +99,8 @@ class MoveInterpreter():
                 msg += f" File move eval {best_expected_eval:+.2f}."
 
         self._grades.append(MoveSignal(MoveGrade.INCORRECT))
-        return MoveSignal(MoveGrade.INCORRECT, msg=msg)
+        rel_eval_diff = (user_eval-best_expected_eval)/best_expected_eval if best_expected_eval else None
+        return MoveSignal(MoveGrade.INCORRECT, msg=msg, eval_diff=user_eval-best_expected_eval, rel_eval_diff=rel_eval_diff)
 
     def _handle_off_file_guess(self, uci: str) -> None:
         ev = self._session.query(fen(self._prompt.node), "q-eval")
@@ -688,6 +692,23 @@ class AppController:
     def _broadcast_ui_state(self) -> None:
         self._hub.broadcast({"type": "sr_state", "sr": self.ui_state()})
 
+    def _broadcast_review_navigation(self) -> None:
+        
+        if not self.active or self._mode != "review":
+            raise RuntimeError("Review navigation broadcast requires active review mode")
+        if self._review_payload is None or self._review_path is None:
+            raise RuntimeError("Review navigation payload is not initialized")
+
+        self._hub.broadcast(
+            {
+                "type": "sr_review_nav",
+                "review": {
+                    "currentPath": list(self._review_path),
+                    "viewRootPath": list(self._review_view_root_path),
+                },
+            }
+        )
+
     def _prefetch_db_stats(self) -> None:
         """Pre-warm the cache by querying DB stats that we will need."""
         def visit(node: Any):
@@ -704,6 +725,7 @@ class AppController:
         and display the results.
         Results are displayed with the previous and the following moves, emphasized if
         the same as those in the current review node.
+        Each result also carries similarity data relative to the current position.
         """
         if self._mode != "review":
             return
@@ -753,6 +775,7 @@ class AppController:
             children = [c for c in self._session.variations(node) if c.ply() <= end_ply]
             next_node = children[0] if children else None
             next_uci = next_node.move.uci() if next_node else None
+            similarity = compare_positions(query_node.board(), node)
 
             results.append(
                 {
@@ -762,8 +785,14 @@ class AppController:
                     "next": safe_san(next_node),
                     "matchPrev": bool(query_prev_uci and prev_uci and prev_uci == query_prev_uci),
                     "matchNext": bool(query_next_uci and next_uci and next_uci == query_next_uci),
+                    "distance": round(similarity.distance, 4),
+                    "similarity": round(similarity.similarity, 4),
                 }
             )
+
+        results.sort(
+            key=lambda item: (-item["similarity"], item["distance"], item["path"])
+        )
 
         self._search_move_payload = {
             "query": {
@@ -771,6 +800,8 @@ class AppController:
                 "move": safe_san(query_node),
                 "prev": safe_san(query_parent),
                 "next": safe_san(query_next),
+                "distance": 0.0,
+                "similarity": 1.0,
             },
             "results": results,
             "count": len(results),
@@ -854,7 +885,7 @@ class AppController:
             message="Browsing variations",
             allow_moves=False,
         )
-        self._broadcast_ui_state()
+        self._broadcast_review_navigation()
 
     def prev_prompt(self) -> None:
         if len(self._prompt_history) > 1:
