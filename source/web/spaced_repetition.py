@@ -12,7 +12,7 @@ from typing import Any, Iterable, Optional, TypeVar, Union
 import chess
 import chess.pgn
 from chess.pgn import GameNode as Node
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from source.core.caching import CacheDict
 from source.core.position_similarity import compare_positions
@@ -48,94 +48,38 @@ class MoveSignal():
     rel_eval_diff: Optional[float] = None
 
 
-class MoveInterpreter():
-    def __init__(self, session: RepertoireSession, prompt_state: PromptState):
-        self._session = session
+@dataclass
+class PromptMovePerformance:
+    hint_requests: int = 0
+    hint_revealed_move: bool = False
+    errors: list[MoveSignal] = field(default_factory=list)
 
-        self._prompt = prompt_state
+    def add_hint(self, determines_move: bool) -> None:
+        self.hint_requests += 1
+        self.hint_revealed_move = self.hint_revealed_move or determines_move
 
-        # to be used in self.feedback()
-        self._grades = []
+    def add_error(self, signal: MoveSignal) -> None:
+        if signal.move_grade != MoveGrade.INCORRECT:
+            raise ValueError("Only incorrect signals may be stored as move errors")
+        self.errors.append(signal)
 
 
-    def interpret(self, uci: Any) -> Signal:
-        if self._prompt.off_file:
-            return self._handle_off_file_guess(uci)
-        return self._handle_file_guess(uci)
-
-    def summarize(self) -> Feedback:
-        pass
-
-    def expected_uci(self) -> Optional[UCI]:
-        try:
-            return self._session.variations(self._prompt.node)[0].move.uci() # TODO: transp
-        except Exception:
-            return self._session.query(fen(self._prompt.node), "q-eval").move.uci()
-
-    def _handle_file_guess(self, uci: str) -> None:
-        expected_moves = self._session.variations(self._prompt.node)
-        if not expected_moves:
-            return MoveSignal(MoveGrade.NO_MOVES)
-
-        chosen_node = next((n for n in expected_moves if n.move.uci() == uci_from_lichess_to_pgn(uci)), None)
-        if chosen_node:
-            self._grades.append(MoveSignal(MoveGrade.CORRECT))
-            return MoveSignal(MoveGrade.CORRECT)
-
-        # the user didn't guess -- prepare feedback on this
-        expected_sans = ", ".join(
-            node_san(n) for n in expected_moves
-        )
-        user_eval = self._evaluate_move(self._prompt.node, uci)
-        best_expected_eval = None
-        evals = [self._evaluate_move(self._prompt.node, n.move.uci())
-                 for n in expected_moves]
-        if evals:
-            best_expected_eval = max(evals)
-
-        msg = f"Wrong. Expected: {expected_sans}."
-        if user_eval is not None:
-            msg += f" Your move eval {user_eval:+.2f}."
-            if best_expected_eval is not None:
-                msg += f" File move eval {best_expected_eval:+.2f}."
-
-        self._grades.append(MoveSignal(MoveGrade.INCORRECT))
-        rel_eval_diff = (user_eval-best_expected_eval)/best_expected_eval if best_expected_eval else None
-        return MoveSignal(MoveGrade.INCORRECT, msg=msg, eval_diff=user_eval-best_expected_eval, rel_eval_diff=rel_eval_diff)
-
-    def _handle_off_file_guess(self, uci: str) -> None:
-        ev = self._session.query(fen(self._prompt.node), "q-eval")
-        eval, best_reply = ev.eval, ev.move
-
-        user_ev = self._session.q_eval_move(self._prompt.node, uci)
-        move_eval, reply_to_user = user_ev.eval, user_ev.move
-
-        best_reply_san = node_san(self._prompt.node, best_reply) if best_reply else "None"
-        san = node_san(self._prompt.node)
-        msg = f"Off-file {san}. Your move: eval {move_eval:+.2f} after {reply_to_user}."
-        if eval - move_eval < 0.2 or eval > 0.9*move_eval:
-            msg += " Good guess!"
-            grade = MoveGrade.CORRECT
-        else:
-            msg += f" Best was {best_reply_san} with evaluation {eval:+.2f}."
-            grade = MoveGrade.INCORRECT # TODO: differentiate b/w off-file and file
-        self._grades.append(grade)
-
-        return MoveSignal(grade, msg=msg)
-
-    
-    def _evaluate_move(self, position: Union[chess.Board, Node], move: Union[chess.Move, str]) -> float:
-        return self._session.q_eval_move(position, move).eval
-
-class LineGenerator():
+class RepetitionEngine():
     """
-    The class responsible for prompt generation. Does not judge user responses,
-    a pure execution engine.
+    The class responsible for prompt generation and response interpretation.
     Prompts are generated move by move. A move may be randomnly chosen from a file,
     or picked by a chess engine.
 
-    Keeps the result of generating in self._prompt.
+    Keeps the result of generating in self._prompt and stores prompt-local
+    performance data so move probabilities can be adjusted from real user behavior.
     """
+    HINT_FACTOR_STEP = 0.10
+    HINT_REVEALS_MOVE_FACTOR = 1.15
+    ERROR_FACTOR_STEP = 0.25
+    ERROR_EVAL_LOSS_SCALE = 0.25
+    ERROR_EVAL_LOSS_CAP = 0.75
+    MIN_MOVE_FACTOR = 0.05
+
     def __init__(self, session: RepertoireSession, root: Node, start_range: int, prompt_state: PromptState,
                  probs_cache_name: str, non_file_freq: float) -> None:
         self._session = session
@@ -157,6 +101,55 @@ class LineGenerator():
         self._edge_probs.load_from_file(probs_cache_name)
 
         self._session.fill_the_TT(self._session.game)
+        self._grades: list[MoveSignal] = []
+        self._move_performance: dict[int, PromptMovePerformance] = {}
+        self._current_hints: Optional[Hints] = None
+        self._temporary_nodes: list[Node] = []
+
+    def summarize(self) -> Feedback:
+        if not self._grades:
+            return Feedback(0.0)
+
+        correct = sum(1 for signal in self._grades if signal.move_grade == MoveGrade.CORRECT)
+        return Feedback(correct / len(self._grades))
+
+    def expected_uci(self) -> Optional[UCI]:
+        if self._prompt.node is None:
+            return None
+
+        expected_node = self._current_expected_node()
+        if expected_node is not None:
+            return expected_node.move.uci()
+
+        best_move = self._session.query(fen(self._prompt.node), "q-eval").move
+        if best_move is None:
+            return None
+        if isinstance(best_move, chess.Move):
+            return best_move.uci()
+        return best_move
+
+    def hint(self) -> list[Circle]:
+        if self._prompt.node is None:
+            raise RuntimeError("Cannot provide a hint without an active prompt")
+
+        expected_uci = self.expected_uci()
+        if expected_uci is None:
+            return []
+
+        if not self._hint_matches_current_prompt(expected_uci):
+            self._current_hints = Hints(self._prompt.node, expected_uci)
+
+        circles_before = tuple(self._current_hints.circle_coords)
+        determined_before = self._current_hints.determines_move
+        self._current_hints.add_hint()
+
+        if (
+            circles_before != tuple(self._current_hints.circle_coords)
+            or determined_before != self._current_hints.determines_move
+        ):
+            self._record_hint(self._current_hints.determines_move)
+
+        return self._current_hints.circles
 
     def is_finished(self) -> bool:
         return self._is_finished
@@ -173,24 +166,40 @@ class LineGenerator():
             self.start_range = start_range
 
     def start_prompt(self, spec_id: SpecId) -> None:
+        self._clear_temporary_nodes()
         self._spec_id = spec_id
         self._is_finished = False
         self._review_payload = None
         self._review_path = None
         self._search_move_payload = None
+        self._grades = []
+        self._move_performance = {}
+        self._current_hints = None
+        self._prompt.debug_msg = ""
+        self._prompt.off_file = False
+        self._prompt.anchor_node = None
 
         if spec_id == "new":
             self._choose_random_prompt()
         else:
-            return
+            raise ValueError(f"Unsupported spec_id: {spec_id!r}")
 
         return self._prompt
 
     def _choose_random_prompt(self) -> PromptState:
-        node = deepcopy(self._root)
-        while not (success := self._choose_prompt(node)):
-            # we may add some moves to node while choosing, so reset to the file contents
-            node = deepcopy(self._root)
+        self._clear_temporary_nodes()
+        while True:
+            try:
+                success = self._choose_prompt(self._root)
+            except Exception:
+                self._clear_temporary_nodes()
+                raise
+
+            if success:
+                return self._prompt
+
+            # we may add some temporary moves while choosing, so reset to the file contents
+            self._clear_temporary_nodes()
 
     def current_spec_id(self):
         return self._spec_id
@@ -198,12 +207,18 @@ class LineGenerator():
     def current_prompt_id(self):
         return ' '.join(node_moves(self._prompt.node))
 
-    def on_response(self, uci: str, signal: MoveSignal) -> None:
+    def on_response(self, uci: str) -> PromptState:
+        signal = self._interpret(uci)
+
         if not self._prompt.off_file:
             if signal.move_grade == MoveGrade.CORRECT:
-                self._prompt.node = next((n for n in self._session.variations(self._prompt.node) 
-                                          if n.move.uci() == uci_from_lichess_to_pgn(uci)))
-                self._advance_line(chosen=self._prompt.node)
+                chosen_node = self._session.child_for_move(
+                    self._prompt.node,
+                    uci_from_lichess_to_pgn(uci),
+                )
+                self._prompt.node = chosen_node
+                self._current_hints = None
+                self._advance_line(chosen=chosen_node)
             else:
                 self._prompt.debug_msg = signal.msg
                 return self._prompt
@@ -211,13 +226,135 @@ class LineGenerator():
         else:
             # for now we don't do anything after an off-file guess
             self._prompt.debug_msg = signal.msg
+            self._current_hints = None
             self.finish_prompt()
-            return
+            return self._prompt
 
         if not self._is_finished:
-            self._prompt.debug_msg+=signal.msg
+            self._prompt.debug_msg += signal.msg
 
         return self._prompt
+
+    def _interpret(self, uci: UCI) -> MoveSignal:
+        if self._prompt.off_file:
+            return self._handle_off_file_guess(uci)
+        return self._handle_file_guess(uci)
+
+    def _current_expected_node(self) -> Optional[Node]:
+        if self._prompt.node is None:
+            return None
+
+        expected_moves = self._session.variations(self._prompt.node)
+        if not expected_moves:
+            return None
+        return expected_moves[0]
+
+    def _move_performance_for(self, node: Node) -> PromptMovePerformance:
+        node_id = id(node)
+        if node_id not in self._move_performance:
+            self._move_performance[node_id] = PromptMovePerformance()
+        return self._move_performance[node_id]
+
+    def _current_feedback_node(self) -> Optional[Node]:
+        if self._prompt.node is None:
+            return None
+
+        expected_node = self._current_expected_node()
+        if expected_node is not None:
+            return expected_node
+        return self._prompt.node
+
+    def _record_hint(self, determines_move: bool) -> None:
+        target = self._current_feedback_node()
+        if target is None:
+            return
+        self._move_performance_for(target).add_hint(determines_move)
+
+    def _record_error(self, signal: MoveSignal) -> None:
+        target = self._current_feedback_node()
+        if target is None:
+            return
+        self._move_performance_for(target).add_error(signal)
+
+    def _hint_matches_current_prompt(self, expected_uci: UCI) -> bool:
+        if self._current_hints is None or self._prompt.node is None:
+            return False
+
+        return (
+            fen(self._current_hints.board) == fen(self._prompt.node)
+            and self._current_hints.starting_square == expected_uci[:2]
+            and self._current_hints.target_square == expected_uci[2:4]
+        )
+
+    def _handle_file_guess(self, uci: UCI) -> MoveSignal:
+        expected_moves = self._session.variations(self._prompt.node)
+        if not expected_moves:
+            signal = MoveSignal(MoveGrade.NO_MOVES)
+            self._grades.append(signal)
+            return signal
+
+        chosen_node = next(
+            (n for n in expected_moves if n.move.uci() == uci_from_lichess_to_pgn(uci)),
+            None,
+        )
+        if chosen_node is not None:
+            signal = MoveSignal(MoveGrade.CORRECT)
+            self._grades.append(signal)
+            return signal
+
+        expected_sans = ", ".join(node_san(n) for n in expected_moves)
+        user_eval = self._evaluate_move(self._prompt.node, uci)
+        evals = [self._evaluate_move(self._prompt.node, n.move.uci()) for n in expected_moves]
+        best_expected_eval = max(evals) if evals else None
+
+        msg = f"Wrong. Expected: {expected_sans}."
+        if best_expected_eval is not None:
+            msg += f" Your move eval {user_eval:+.2f}. File move eval {best_expected_eval:+.2f}."
+
+        eval_diff = None if best_expected_eval is None else user_eval - best_expected_eval
+        rel_eval_diff = None
+        if best_expected_eval not in (None, 0):
+            rel_eval_diff = eval_diff / best_expected_eval
+
+        signal = MoveSignal(
+            MoveGrade.INCORRECT,
+            msg=msg,
+            eval_diff=eval_diff,
+            rel_eval_diff=rel_eval_diff,
+        )
+        self._grades.append(signal)
+        self._record_error(signal)
+        return signal
+
+    def _handle_off_file_guess(self, uci: UCI) -> MoveSignal:
+        ev = self._session.query(fen(self._prompt.node), "q-eval")
+        expected_eval, best_reply = ev.eval, ev.move
+
+        user_ev = self._session.q_eval_move(self._prompt.node, uci)
+        move_eval, reply_to_user = user_ev.eval, user_ev.move
+
+        best_reply_san = node_san(self._prompt.node, best_reply) if best_reply else "None"
+        san = node_san(self._prompt.node)
+        msg = f"Off-file {san}. Your move: eval {move_eval:+.2f} after {reply_to_user}."
+        if expected_eval - move_eval < 0.2 or expected_eval > 0.9 * move_eval:
+            msg += " Good guess!"
+            grade = MoveGrade.CORRECT
+        else:
+            msg += f" Best was {best_reply_san} with evaluation {expected_eval:+.2f}."
+            grade = MoveGrade.INCORRECT  # TODO: differentiate b/w off-file and file
+
+        signal = MoveSignal(
+            grade,
+            msg=msg,
+            eval_diff=move_eval - expected_eval,
+        )
+        self._grades.append(signal)
+        if grade == MoveGrade.INCORRECT:
+            self._record_error(signal)
+        return signal
+
+    def _evaluate_move(self, position: Union[chess.Board, Node], move: Union[chess.Move, str]) -> float:
+        return self._session.q_eval_move(position, move).eval
 
     def _advance_line(self, chosen: Node) -> None:
         """
@@ -287,7 +424,7 @@ class LineGenerator():
         *,
         maybe_off_book: bool = False,
         use_engine: bool = False,
-    ) -> tuple[Node, str]:
+    ) -> tuple[Node | bool, str]:
         """
         Chooses a move randomly to simulate a step along aline. 
         Determines changes in self._prompt.off_file.
@@ -314,13 +451,13 @@ class LineGenerator():
             # Try to find an off-book move with probability non_file_move_freq
             off_book_move, off_book_debug = self._find_off_book_move(parent)
             if off_book_move is not None:
-                child = self._session._add_variation(parent, off_book_move)
+                child = self._add_temporary_node(parent, off_book_move)
                 self._prompt.off_file = True
                 return child, off_book_debug
             elif use_engine:
                 engine_move = self._session.query(fen(parent), "q-eval").move
                 if engine_move:
-                    child = self._session._add_variation(parent, engine_move)
+                    child = self._add_temporary_node(parent, engine_move)
                     self._prompt.off_file = True
                     return child, f"engine-suggested off-book move {engine_move}"
                 else:
@@ -334,13 +471,21 @@ class LineGenerator():
             probs = self._get_moves_and_freqs(parent)
             self._edge_probs[fen(parent)] = probs
         choice = self._rng_choice(list(probs.keys()), list(probs.values()))
-        
-        # find the node corresponding to the choice
-        for n in self._session.cache[fen(parent)].TTed:
-            for m in n.variations:
-                if m.uci() == choice:
-                    return m, self._format_rng_weights(probs.keys(), probs.values())
-                
+
+        return self._session.child_for_move(parent, choice), self._format_rng_weights(probs.keys(), probs.values())
+
+    def _add_temporary_node(
+        self,
+        parent: Node,
+        move: chess.Move | str,
+    ) -> Node:
+        child = self._session._add_variation(parent, move)
+        self._temporary_nodes.append(child)
+        return child
+
+    def _clear_temporary_nodes(self) -> None:
+        while self._temporary_nodes:
+            self._session.remove_variation(self._temporary_nodes.pop())
 
     def _find_off_book_move(self, node: Node) -> tuple[Optional[chess.Move], str]:
         """Find an off-book DB move with frequency >= 5% and score_rate <= 75%."""
@@ -432,6 +577,40 @@ class LineGenerator():
             count = move_data.get("white", 0) + move_data.get("draws", 0) + move_data.get("black", 0)
             weights[uci] = float(count)
         return weights
+
+    def _move_factor(self, node: Node, base_factor: float) -> float:
+        performance = self._move_performance.get(id(node))
+        if performance is None:
+            return max(self.MIN_MOVE_FACTOR, base_factor)
+
+        factor = base_factor
+        if performance.hint_requests:
+            factor += self.HINT_FACTOR_STEP * performance.hint_requests
+        if performance.hint_revealed_move:
+            factor = max(factor, self.HINT_REVEALS_MOVE_FACTOR)
+        if performance.errors:
+            factor += self.ERROR_FACTOR_STEP * len(performance.errors)
+            eval_loss = max(self._error_eval_loss(signal) for signal in performance.errors)
+            factor += min(self.ERROR_EVAL_LOSS_CAP, eval_loss * self.ERROR_EVAL_LOSS_SCALE)
+
+        return max(self.MIN_MOVE_FACTOR, factor)
+
+    def _error_eval_loss(self, signal: MoveSignal) -> float:
+        if signal.eval_diff is None:
+            return 0.0
+        return max(0.0, -signal.eval_diff)
+
+    def _pending_prompt_factor(self, base_factor: float) -> float:
+        if self._prompt.node is None:
+            return base_factor
+        if self._prompt.node.turn() != self._session.options.side:
+            return base_factor
+
+        target = self._current_feedback_node()
+        if target is None:
+            return base_factor
+
+        return self._move_factor(target, base_factor)
     
     
     def _recompute_line_move_probs(self, node: Node, diff: float) -> None:
@@ -442,16 +621,20 @@ class LineGenerator():
         if not node: # can happen if "New" is clicked before we started
             return
         
-        factor = 1.0 + diff
+        base_factor = max(self.MIN_MOVE_FACTOR, 1.0 + diff)
+        running_factor = self._pending_prompt_factor(base_factor)
 
         while fen(self._session.game) != fen(node):
-            move = node.move
-            node = node.parent
+            child = node
+            move = child.move
+            node = child.parent
+            running_factor = max(running_factor, self._move_factor(child, base_factor))
             parent_dict = self._edge_probs[fen(node)]
-            try:
-                parent_dict[move.uci()] *= factor
-            except KeyError: # can happen if the move is off-book
-                pass
+            if move.uci() not in parent_dict:
+                continue
+            # Keep easy lines de-emphasized by default, but pull difficult prompt
+            # prefixes back into the queue when the user needed help on a later move.
+            parent_dict[move.uci()] *= running_factor
             normalize_freqs(parent_dict)
 
 
@@ -668,13 +851,22 @@ class AppController:
             default_cache_path=lambda: default_repertoire_cache_path(options),
         )
         self._orientation = "white" if options.play_white else "black"
+        self._prompt = PromptState(node=None, off_file=False, debug_msg="", anchor_node=None)
         
         self._log.prompts.load_from_file(self._log_cache_name())
-        self._generator : Generator = LineGenerator(self._session, self._session.starting_node, 
-                                                    self._cfg.start_range, self._prompt, self._probs_cache_name(), self._cfg.non_file_move_frequency)
-        self._interpreter : Interpreter = MoveInterpreter(self._session, self._prompt)
-        self._rep_controller : RepetitionController = RepetitionController(NaiveScheduler(self._log), self._generator, 
-                                                                           self._interpreter, self._log)
+        self._rep_engine: RepetitionEngine = RepetitionEngine(
+            self._session,
+            self._session.starting_node,
+            self._cfg.start_range,
+            self._prompt,
+            self._probs_cache_name(),
+            self._cfg.non_file_move_frequency,
+        )
+        self._rep_controller = RepetitionController(
+            NaiveScheduler(self._log),
+            self._rep_engine,
+            self._log,
+        )
 
         if options.preload_db:
             self._prefetch_db_stats()
@@ -1014,15 +1206,8 @@ class AppController:
     def provide_hint(self) -> None:
         if self._mode != "guess":
             return
-        
-        expected_uci = self._interpreter.expected_uci()
 
-        if not hasattr(self, 'hints') or self.hints.board != self._prompt.node.board():
-            self.hints = Hints(self._prompt.node, expected_uci)
-
-        self.hints.add_hint()
-
-        self.show_prompt(circles = self.hints.circles)
+        self.show_prompt(circles=self._rep_engine.hint())
 
     def handle_guess(self, uci: str) -> None:
         if self._mode != "guess":
@@ -1052,7 +1237,7 @@ class AppController:
         if self._mode != "guess":
             return
 
-        self._generator.finish_prompt(ease=ease)
+        self._rep_engine.finish_prompt(ease=ease)
         self._reveal_prompt_in_review()
 
     def _reveal_prompt_in_review(self) -> None:
@@ -1060,7 +1245,7 @@ class AppController:
             return
 
         if self._prompt.node is not None:
-            expected_uci = self._interpreter.expected_uci()
+            expected_uci = self._rep_engine.expected_uci()
             if expected_uci:
                 message = f"Expected: {expected_uci}. Browse the tree or click New."
             else:
@@ -1103,7 +1288,7 @@ class AppController:
         self._cfg.starting_fen = position_fen
         self._session.options.starting_fen = position_fen
         self._session.starting_node = node
-        self._generator.set_start(root=node)
+        self._rep_engine.set_start(root=node)
         self._enter_review_mode(node=node, message="Study root updated. Click New to practice from here.")
 
     def prev_prompt(self) -> None:

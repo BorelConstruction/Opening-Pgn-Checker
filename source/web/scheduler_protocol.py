@@ -1,36 +1,30 @@
 """
 Describes the high-level structure of a spaced repetition manager.
 Components:
- - Scheduler: chooses the type of the next prompt, doesn't know chess
- - Generator: generates propmpts of the chosen type
- - SessionLog: keeps the history of comptleted prompts
- - Interpreter: process feedback and prompt response quality
+ - Scheduler: chooses the next abstract unit to practice
+ - RepetitionEngine: builds prompts, interprets responses, and updates learning state
+ - SessionLog: keeps the history of completed prompts
  - RepetitionController: orchestrates
 
 Core ideas:
  - Scheduler operates on SpecId (abstract "what to practice")
- - Generator produces concrete PromptId / prompt instances
- - Learning happens at the level of transitions (inside Generator / its state)
+ - RepetitionEngine produces concrete PromptId / prompt instances
+ - Learning happens inside RepetitionEngine, where generation and user feedback meet
  - SessionLog is passive (records, does not decide)
- - Interpreter is pure (produces signals, no side effects)
 
- The workflow:
- - Scheduler -SpecId-> RepetitionController -SpecId-> Generator
- - Generator.start_generating() -RepetitionController-> 
- - On user response: 
-    - RepetitionController -response-> Generator
-    - RepetitionController -response-> Interpreter
-    - Interpreter -Signal-> Generator
-    - Generator updates move probabilities
-    - Generator continues or terminates the prompt
+The workflow:
+ - Scheduler -SpecId-> RepetitionController -SpecId-> RepetitionEngine
+ - On user response:
+    - RepetitionController -response-> RepetitionEngine
+    - RepetitionEngine updates move probabilities
+    - RepetitionEngine continues or terminates the prompt
  - On prompt end:
-    - Generator -PromptId-> SessionLog
-    - Interpreter -Feedback-> SessionLog
-    - Interpreter -Feedback-> Scheduler
+    - RepetitionEngine -PromptId-> SessionLog
+    - RepetitionEngine -Feedback-> SessionLog
+    - RepetitionEngine -Feedback-> Scheduler
 """
 
-from abc import ABC, abstractmethod
-from typing import Callable, Protocol, TypeAlias, Hashable, Any
+from typing import Any, Hashable, Protocol, TypeAlias
 
 
 """Abstract identifier of a schedulable unit (no chess knowledge)."""
@@ -38,19 +32,19 @@ SpecId: TypeAlias = Hashable
 
 PromptId: TypeAlias = Hashable
 
+
 class Prompt:
     ...
-    
+
+
 class Feedback:
     """
     Coarse-grained feedback for the scheduler (aggregated over a prompt).
     """
+
     def __init__(self, quality: float):
         self.quality = quality
 
-class Signal(Protocol):
-    """Fine-grained signal produced per user action."""
-    ...
 
 class Scheduler(Protocol):
     """Chooses what to practice next (policy only)."""
@@ -58,47 +52,29 @@ class Scheduler(Protocol):
     def next(self) -> SpecId:
         """Select next spec."""
         ...
-    
+
     def feedback(self, spec_id: SpecId, feedback: Feedback) -> None:
         """Update scheduling policy based on completed prompt."""
         ...
 
 
-class Interpreter(Protocol):
-    """Pure component that assesses user responses.
-
-    We don't call it "Evaluator" to avoid confusion with engine eval.
-
-    Note that it does not only evaluate "quality" of the response --
-    it also can return information useful for the generator.
+class RepetitionEngine(Protocol):
     """
-
-    def interpret(self, response: Any) -> Signal:
-        ...
-
-    def summarize(self) -> Feedback:
-        """Aggregate signals over the prompt."""
-
-class Generator(Protocol):
-    """
-    Produces and manages prompts (domain-specific, e.g. chess).
-
-    Owns:
-    - step-wise generation
-    - internal learning state (e.g. edge weights)
-    - prompt lifecycle
+    Owns prompt generation, response interpretation, and learning state.
     """
 
     def start_prompt(self, spec_id: SpecId) -> Prompt:
         """Start generating a new prompt of given type."""
         ...
-    def on_response(self, response: Any) -> None:
+
+    def on_response(self, response: Any) -> Prompt:
         """
-        Process user response.
-        Should:
-        - update internal state (e.g. edge stats)
-        - advance or terminate prompt
+        Process user response, update internal state, and advance or terminate the prompt.
         """
+        ...
+
+    def summarize(self) -> Feedback:
+        """Aggregate prompt-level feedback for the scheduler."""
         ...
 
     def is_finished(self) -> bool:
@@ -109,8 +85,8 @@ class Generator(Protocol):
         """Identifier of the current prompt."""
         ...
 
-    def get_spec_id(self) -> SpecId:
-        """Spec that produced current prompt."""
+    def current_spec_id(self) -> SpecId:
+        """Spec that produced the current prompt."""
         ...
 
 
@@ -124,50 +100,46 @@ class SessionLog(Protocol):
         ...
 
 
-class RepetitionController():
+class RepetitionController:
     """
-    Orchestrates the spaced repetition loop, routes events.
+    Orchestrates the spaced repetition loop and routes events.
     """
 
     def __init__(
         self,
         scheduler: Scheduler,
-        generator: Generator,
-        interpreter: Interpreter,
+        engine: RepetitionEngine,
         session_log: SessionLog,
     ):
         self.scheduler = scheduler
-        self.generator = generator
-        self.interpreter = interpreter
+        self.engine = engine
         self.session_log = session_log
         self.current_spec_id = None
 
     def get_prompt_view(self) -> Prompt:
         return self._prompt
-    
+
     def start_next_prompt(self) -> None:
         spec_id = self.scheduler.next()
-        self._prompt = self.generator.start_prompt(spec_id)
+        self.current_spec_id = spec_id
+        self._prompt = self.engine.start_prompt(spec_id)
 
     def on_user_response(self, response: Any) -> bool:
         """
         Process user response.
-        Returns True if the prompt should continue, False if it should terminate."""
-        signal = self.interpreter.interpret(response)
+        Returns True if the prompt should continue, False if it should terminate.
+        """
+        self._prompt = self.engine.on_response(response)
 
-        self._prompt = self.generator.on_response(response, signal)
-
-        if self.generator.is_finished():
-            prompt_id = self.generator.current_prompt_id()
-            spec_id = self.generator.current_spec_id()
-
-            feedback = self.interpreter.summarize()
-
-            self.session_log.record_prompt(prompt_id, spec_id)
-            self.session_log.record_feedback(prompt_id, feedback)
-
-            self.scheduler.feedback(spec_id, feedback)
-
-            return False
-        else:
+        if not self.engine.is_finished():
             return True
+
+        prompt_id = self.engine.current_prompt_id()
+        spec_id = self.engine.current_spec_id()
+        feedback = self.engine.summarize()
+
+        self.session_log.record_prompt(prompt_id, spec_id)
+        self.session_log.record_feedback(prompt_id, feedback)
+        self.scheduler.feedback(spec_id, feedback)
+
+        return False

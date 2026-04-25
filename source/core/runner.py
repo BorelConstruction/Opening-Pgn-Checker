@@ -495,11 +495,62 @@ class PgnSession:
         if hasattr(self, "moves_added"):
             self.moves_added += 1
         return child
+
+    def child_for_move(self, parent: Node, move: Union[chess.Move, str]) -> Node:
+        if isinstance(move, chess.Move):
+            move = move.uci()
+
+        for child in self.variations(parent):
+            if child.move.uci() == move:
+                return child
+
+        for cached_parent in self.cache[fen(parent)].TTed:
+            for child in self.variations(cached_parent):
+                if child.move.uci() == move:
+                    return child
+
+        raise RuntimeError(f"Could not resolve move {move!r} from position {fen(parent)!r}")
+
+    def remove_variation(self, node: Node) -> None:
+        parent = getattr(node, "parent", None)
+        if parent is None:
+            raise ValueError("Cannot remove the root node")
+
+        subtree_nodes: list[tuple[str, Node]] = []
+        self._collect_subtree_nodes(node, subtree_nodes)
+        self._detach_variation(parent, node)
+        for position_fen, subtree_node in reversed(subtree_nodes):
+            self._remove_position_from_TT(subtree_node, position_fen)
+
     def _record_position_in_TT(self, node): # TODO: when do we add?
         if not self.cache[fen(node)].TTed:
             self.cache[fen(node)].TTed.append(node) 
         if len(self.cache[fen(node)].TTed) > 1:
             self.cache[fen(node)].TTed.sort(key=lambda n: count_nodes(n))
+
+    def _collect_subtree_nodes(self, node: Node, out: list[tuple[str, Node]]) -> None:
+        out.append((fen(node), node))
+        for child in list(node.variations):
+            self._collect_subtree_nodes(child, out)
+
+    def _detach_variation(self, parent: Node, child: Node) -> None:
+        remove_variation = getattr(parent, "remove_variation", None)
+        if callable(remove_variation):
+            try:
+                remove_variation(child)
+                return
+            except TypeError:
+                remove_variation(child.move)
+                return
+
+        parent.variations.remove(child)
+
+    def _remove_position_from_TT(self, node: Node, position_fen: str) -> None:
+        tted_nodes = self.cache[position_fen].TTed
+        for idx, cached_node in enumerate(tted_nodes):
+            if cached_node is node:
+                del tted_nodes[idx]
+                return
     
     def q_eval_move(self, board: Union[Node, chess.Board], move: Union[chess.Move, str]) -> EngineEval:
         if isinstance(board, Node):
