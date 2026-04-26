@@ -79,6 +79,10 @@ class RepetitionEngine():
     ERROR_EVAL_LOSS_SCALE = 0.25
     ERROR_EVAL_LOSS_CAP = 0.75
     MIN_MOVE_FACTOR = 0.05
+    MOVE_EASE_CORRECT_STEP = 1.0
+    MOVE_EASE_INCORRECT_STEP = 1.0
+    LEARNED_EASE_THRESHOLD = 3.0
+    LEARNED_PROMPT_EXTENSION_PROBABILITY = 0.90
 
     def __init__(self, session: RepertoireSession, root: Node, start_range: int, prompt_state: PromptState,
                  probs_cache_name: str, non_file_freq: float) -> None:
@@ -96,9 +100,13 @@ class RepetitionEngine():
         # max of how far we move from the root
         self.start_range = start_range
 
-        self._edge_probs = CacheDict(lambda fen: {}, item_to_json=json.dumps,
-                                     item_from_json=json.loads, auto_save=False)
-        self._edge_probs.load_from_file(probs_cache_name)
+        self._move_data = CacheDict(
+            lambda position_fen: {},
+            item_to_json=lambda item: json.dumps([item[0], item[1]]),
+            item_from_json=self._movedata_item_from_json,
+            auto_save=False,
+        )
+        self._move_data.load_from_file(probs_cache_name)
 
         self._session.fill_the_TT(self._session.game)
         self._grades: list[MoveSignal] = []
@@ -128,7 +136,7 @@ class RepetitionEngine():
             return best_move.uci()
         return best_move
 
-    def hint(self) -> list[Circle]:
+    def get_hint_circles(self) -> list[Circle]:
         if self._prompt.node is None:
             raise RuntimeError("Cannot provide a hint without an active prompt")
 
@@ -139,15 +147,9 @@ class RepetitionEngine():
         if not self._hint_matches_current_prompt(expected_uci):
             self._current_hints = Hints(self._prompt.node, expected_uci)
 
-        circles_before = tuple(self._current_hints.circle_coords)
-        determined_before = self._current_hints.determines_move
         self._current_hints.add_hint()
 
-        if (
-            circles_before != tuple(self._current_hints.circle_coords)
-            or determined_before != self._current_hints.determines_move
-        ):
-            self._record_hint(self._current_hints.determines_move)
+        self._record_hint(self._current_hints.determines_move)
 
         return self._current_hints.circles
 
@@ -157,7 +159,7 @@ class RepetitionEngine():
     def finish_prompt(self, ease=0.25) -> None:
         self._is_finished = True
         self._recompute_line_move_probs(self._prompt.node, -ease)
-        self._edge_probs.serialize()
+        self._move_data.serialize()
 
     def set_start(self, root: Optional[Node] = None, start_range: Optional[int] = None) -> None:
         if root:
@@ -207,38 +209,80 @@ class RepetitionEngine():
     def current_prompt_id(self):
         return ' '.join(node_moves(self._prompt.node))
 
-    def on_response(self, uci: str) -> PromptState:
-        signal = self._interpret(uci)
-
-        if not self._prompt.off_file:
-            if signal.move_grade == MoveGrade.CORRECT:
-                chosen_node = self._session.child_for_move(
-                    self._prompt.node,
-                    uci_from_lichess_to_pgn(uci),
-                )
-                self._prompt.node = chosen_node
-                self._current_hints = None
-                self._advance_line(chosen=chosen_node)
-            else:
-                self._prompt.debug_msg = signal.msg
-                return self._prompt
-
+    def _movedata_item_from_json(
+        self,
+        payload: Any,
+    ) -> tuple[str, dict[UCI, dict[str, float]]]:
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if isinstance(payload, dict):
+            position_fen = payload["fen"]
+            raw_move_data = payload.get("moves", {})
         else:
-            # for now we don't do anything after an off-file guess
+            position_fen, raw_move_data = payload
+
+        move_data: dict[UCI, dict[str, float]] = {}
+        for uci, raw_entry in raw_move_data.items():
+            if isinstance(raw_entry, dict):
+                move_data[uci] = {
+                    "probability": float(raw_entry["probability"]),
+                    "ease": float(raw_entry.get("ease", 0.0)),
+                }
+            else:
+                move_data[uci] = {
+                    "probability": float(raw_entry),
+                    "ease": 0.0,
+                }
+
+        return position_fen, move_data
+
+    def _move_entry(self, parent: Node, uci: UCI) -> dict[str, float]:
+        move_data = self._move_data[fen(parent)]
+        if not move_data:
+            move_data.update(
+                {
+                    move_uci: {
+                        "probability": probability,
+                        "ease": 0.0,
+                    }
+                    for move_uci, probability in self._get_moves_and_freqs(parent).items()
+                }
+            )
+
+        if uci not in move_data:
+            raise RuntimeError(f"Missing move data for {uci!r} from position {fen(parent)!r}")
+
+        return move_data[uci]
+
+    def _is_learned_move(self, parent: Node, uci: UCI) -> bool:
+        return self._move_entry(parent, uci)["ease"] >= self.LEARNED_EASE_THRESHOLD
+
+    def on_response(self, uci: str) -> PromptState:
+        if self._prompt.off_file:
+            signal = self._handle_off_file_guess(uci)
             self._prompt.debug_msg = signal.msg
-            self._current_hints = None
-            self.finish_prompt()
+            if signal.move_grade == MoveGrade.CORRECT:
+                self._current_hints = None
+                self.finish_prompt()
             return self._prompt
+
+        signal = self._handle_file_guess(uci)
+        if signal.move_grade != MoveGrade.CORRECT:
+            self._prompt.debug_msg = signal.msg
+            return self._prompt
+
+        chosen_node = self._session.child_for_move(
+            self._prompt.node,
+            uci_from_lichess_to_pgn(uci),
+        )
+        self._prompt.node = chosen_node
+        self._current_hints = None
+        self._advance_line(chosen=chosen_node)
 
         if not self._is_finished:
             self._prompt.debug_msg += signal.msg
 
         return self._prompt
-
-    def _interpret(self, uci: UCI) -> MoveSignal:
-        if self._prompt.off_file:
-            return self._handle_off_file_guess(uci)
-        return self._handle_file_guess(uci)
 
     def _current_expected_node(self) -> Optional[Node]:
         if self._prompt.node is None:
@@ -298,6 +342,7 @@ class RepetitionEngine():
             None,
         )
         if chosen_node is not None:
+            self._move_entry(self._prompt.node, chosen_node.move.uci())["ease"] += self.MOVE_EASE_CORRECT_STEP
             signal = MoveSignal(MoveGrade.CORRECT)
             self._grades.append(signal)
             return signal
@@ -323,6 +368,9 @@ class RepetitionEngine():
             rel_eval_diff=rel_eval_diff,
         )
         self._grades.append(signal)
+        target = self._current_feedback_node()
+        if target is not None and target.parent is not None and target.move is not None:
+            self._move_entry(target.parent, target.move.uci())["ease"] -= self.MOVE_EASE_INCORRECT_STEP
         self._record_error(signal)
         return signal
 
@@ -335,13 +383,17 @@ class RepetitionEngine():
 
         best_reply_san = node_san(self._prompt.node, best_reply) if best_reply else "None"
         san = node_san(self._prompt.node)
+        eval_gap = expected_eval - move_eval
         msg = f"Off-file {san}. Your move: eval {move_eval:+.2f} after {reply_to_user}."
-        if expected_eval - move_eval < 0.2 or expected_eval > 0.9 * move_eval:
-            msg += " Good guess!"
+        if eval_gap <= 0.2:
+            msg += " Correct: close enough to the engine move."
             grade = MoveGrade.CORRECT
         else:
-            msg += f" Best was {best_reply_san} with evaluation {expected_eval:+.2f}."
-            grade = MoveGrade.INCORRECT  # TODO: differentiate b/w off-file and file
+            msg += (
+                f" Incorrect: best was {best_reply_san} with evaluation {expected_eval:+.2f}. "
+                "Try again."
+            )
+            grade = MoveGrade.INCORRECT
 
         signal = MoveSignal(
             grade,
@@ -416,6 +468,26 @@ class RepetitionEngine():
         self._prompt.node = next_node
         self._prompt.debug_msg = selection_debug
 
+        while not self._prompt.off_file:
+            expected_node = self._current_expected_node()
+            if expected_node is None:
+                break
+            if not self._is_learned_move(self._prompt.node, expected_node.move.uci()):
+                break
+            if self._rng.random() >= self.LEARNED_PROMPT_EXTENSION_PROBABILITY:
+                break
+
+            learned_node, _ = self._choose_move(self._prompt.node, maybe_off_book=False)
+            if learned_node is False:
+                break
+
+            next_node, selection_debug = self._choose_move(learned_node, maybe_off_book=True)
+            if next_node is False:
+                break
+
+            self._prompt.node = next_node
+            self._prompt.debug_msg = selection_debug
+
         return True        
 
     def _choose_move(
@@ -465,14 +537,26 @@ class RepetitionEngine():
                     return False, ""
             # Fall through to normal logic
 
-        if self._edge_probs[fen(parent)]:
-            probs = self._edge_probs[fen(parent)]
+        if self._move_data[fen(parent)]:
+            move_data = self._move_data[fen(parent)]
         else:
             probs = self._get_moves_and_freqs(parent)
-            self._edge_probs[fen(parent)] = probs
-        choice = self._rng_choice(list(probs.keys()), list(probs.values()))
+            move_data = {
+                uci: {
+                    "probability": probability,
+                    "ease": 0.0,
+                }
+                for uci, probability in probs.items()
+            }
+            self._move_data[fen(parent)] = move_data
 
-        return self._session.child_for_move(parent, choice), self._format_rng_weights(probs.keys(), probs.values())
+        probabilities = [entry["probability"] for entry in move_data.values()]
+        choice = self._rng_choice(list(move_data.keys()), probabilities)
+
+        message = ""
+        if DEBUG_MODE:
+            message = self._format_rng_weights(move_data.keys(), probabilities)
+        return self._session.child_for_move(parent, choice), message
 
     def _add_temporary_node(
         self,
@@ -629,13 +713,27 @@ class RepetitionEngine():
             move = child.move
             node = child.parent
             running_factor = max(running_factor, self._move_factor(child, base_factor))
-            parent_dict = self._edge_probs[fen(node)]
+            parent_dict = self._move_data[fen(node)]
+            if not parent_dict:
+                parent_dict.update(
+                    {
+                        uci: {
+                            "probability": probability,
+                            "ease": 0.0,
+                        }
+                        for uci, probability in self._get_moves_and_freqs(node).items()
+                    }
+                )
             if move.uci() not in parent_dict:
                 continue
             # Keep easy lines de-emphasized by default, but pull difficult prompt
             # prefixes back into the queue when the user needed help on a later move.
-            parent_dict[move.uci()] *= running_factor
-            normalize_freqs(parent_dict)
+            parent_dict[move.uci()]["probability"] *= running_factor
+            total = sum(entry["probability"] for entry in parent_dict.values())
+            if total <= 0.0:
+                continue
+            for entry in parent_dict.values():
+                entry["probability"] /= total
 
 
     def _rng_choice(self, items: list[K], weights: Optional[list[float]]=None) -> K:
@@ -676,12 +774,17 @@ class RepetitionEngine():
                 uci = str(item)
             entries.append(f"{uci}={weight:.1f}")
 
-        if len(items) > 5:
-            entries.append("...")
 
+        message = ""
         probs = [weight / total for weight in weights]
         prob_entries = [f"{p:.1%}" for p in probs]
-        return f"rng weights: {', '.join(entries)}; probs: {', '.join(prob_entries)}"
+        for e, p in zip(entries, prob_entries):
+            message += f"\n{e}                    {p}"
+
+        if len(items) > 5:
+            message += "\n..."
+
+        return message
 
 @dataclass
 class PromptState:
@@ -1207,7 +1310,7 @@ class AppController:
         if self._mode != "guess":
             return
 
-        self.show_prompt(circles=self._rep_engine.hint())
+        self.show_prompt(circles=self._rep_engine.get_hint_circles())
 
     def handle_guess(self, uci: str) -> None:
         if self._mode != "guess":

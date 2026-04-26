@@ -470,6 +470,7 @@ button:hover {
   grid-column: 2 / 4;
   color: var(--accent);
   min-height: 18px;
+  white-space: pre-line;
 }
 
 .logpanel .rowhead {
