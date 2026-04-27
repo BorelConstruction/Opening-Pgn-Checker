@@ -36,7 +36,7 @@ def side(fen: str) -> chess.Color:
 def whole_move_from_ply(ply: int) -> str:
     if ply % 2 == 0:
         return str(ply // 2) + "..."
-    return str(ply // 2) + "."
+    return str(ply // 2 + 1) + "."
 
 def arrow_from_uci(uci: str, *args, **kwargs) -> chess.svg.Arrow:
     return chess.svg.Arrow(ord(uci[0])-97 + 8*(int(uci[1])-1), ord(uci[2])-97 + 8*(int(uci[3])-1), *args, **kwargs)
@@ -99,7 +99,7 @@ def count_nodes(root_node, tp: Optional[TraversalPolicy] = None):
 class FirstDifference(NamedTuple):
     ply: int
     # move: chess.Move
-    move: str
+    move: str # san
 
 def node_moves(n: Node) -> list[chess.Move]:
     stack: list[chess.Move] = []

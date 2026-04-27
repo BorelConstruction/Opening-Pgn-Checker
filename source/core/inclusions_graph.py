@@ -163,8 +163,8 @@ class InclusionGraph(ABC):
     def visualize(
         self,
         output_path: str = "inclusion_graph.html",
-        edge_filter: Optional[EdgeFilterFunc] = None,
-        edge_width: Optional[EdgeWidthFunc] = None,
+        edge_filter: EdgeFilterFunc | None = None,
+        edge_width: EdgeWidthFunc | None = None,
     ) -> None:
         """
         Write an interactive pyvis graph to output_path.

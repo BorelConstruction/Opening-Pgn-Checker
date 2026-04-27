@@ -7,7 +7,7 @@ from hashlib import sha1
 
 CONFIG_FILE = "settings.json"
 
-DEBUG_MODE = False
+DEBUG_MODE = True
 
 '''
     CoreOptions are the options that we expect to stay constant throughout the program.

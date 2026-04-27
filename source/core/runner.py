@@ -160,7 +160,7 @@ class QueryResult(ABC):
 
 class EngineEval(NamedTuple):
     eval: float
-    move: str
+    move: chess.Move
     adap: Optional[int] = None
 
     def to_dict(self) -> dict:
@@ -289,7 +289,6 @@ class PgnSession:
 
     def _init_queries(self):
         pov = getattr(self.options, "side", WHITE)
-        quick_eval_provider = lambda fen: quick_eval(self.engine, fen, pov=pov)
         self._queries = {
             # NOTE: will be a bug is self.opening_explorer changes
             # (as self.cache will then store the result relative to the old explorer)
@@ -301,7 +300,7 @@ class PgnSession:
             "eval": lambda fen: EvalProvider(self, fen),
 
             # if we don't cache quick evals, results will be different every time
-            "q-eval": quick_eval_provider,
+            "q-eval": lambda fen: quick_eval(self.engine, fen, pov=pov),
         }
 
     def query(self, fen: str, type: str, cache_only=False):
@@ -651,8 +650,13 @@ def stats_for_uci(games: dict, uci: str):
     return next((m for m in games['moves'] if m['uci'] == uci_from_pgn_to_lichess(uci)), None) # {}
 
 
-def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1, time_limit=0.3) -> list[EngineEval]:
-    # TODO: make a separate function for this processing?
+def quick_eval_lines(
+    engine,
+    position: str | chess.Board,
+    pov=WHITE,
+    multipv: int = 1,
+    time_limit=0.3,
+) -> list[EngineEval]:
     if isinstance(position, str):
             board = chess.Board(position)
     elif isinstance(position, chess.Board):
@@ -663,7 +667,11 @@ def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, multipv=1, 
     sys.stderr.write(f"\n Quick eval for {fen(board)}")
     
     infos = analyse_time_limit(engine, board, time_limit=time_limit, multipv=multipv)
-    return process_engine_output(infos, board, pov)[0] # for now only return one EngineEval
+    return process_engine_output(infos, board, pov)
+
+
+def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, time_limit=0.3) -> EngineEval:
+    return quick_eval_lines(engine, position, pov=pov, multipv=1, time_limit=time_limit)[0]
 
 
 class Runner:

@@ -212,6 +212,12 @@ async def ws(ws: WebSocket) -> None:
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
+            elif msg_type == "sr_blacklist_prompt":
+                try:
+                    sr_controller.blacklist_current_move()
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
             elif msg_type == "sr_prev":
                 try:
                     sr_controller.prev_prompt()

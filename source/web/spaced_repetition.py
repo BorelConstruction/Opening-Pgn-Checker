@@ -7,7 +7,7 @@ import os
 import random
 import sys
 import threading
-from typing import Any, Iterable, Optional, TypeVar, Union
+from typing import Any, Iterable, Optional, TypeVar, TypedDict, Union
 
 import chess
 import chess.pgn
@@ -26,6 +26,7 @@ from source.web.scheduler_implem import NaiveScheduler
 from ..core.boardtools import fen, node_moves, node_san, uci_from_lichess_to_pgn
 from ..core.options import SpacedRepetitionOptions, DEBUG_MODE
 from ..core.repertoire import RepertoireSession, default_repertoire_cache_path
+from ..core.runner import quick_eval_lines
 from .pgn_export import export_pgn_subtree
 from .variation_tree import node_at_path, path_from_root, build_variation_tree
 from .scheduler_protocol import *
@@ -33,6 +34,16 @@ from .scheduler_protocol import *
 # TODO: add transpotitioning moves to the move list?
 
 K = TypeVar("K")
+
+
+class MoveEntryData(TypedDict):
+    probability: float
+    ease: float
+
+
+class PositionMoveData(TypedDict):
+    moves: dict[UCI, MoveEntryData]
+    blacklist: list[UCI]
 
 
 class MoveGrade(Enum):
@@ -64,6 +75,13 @@ class PromptMovePerformance:
         self.errors.append(signal)
 
 
+@dataclass(frozen=True)
+class OffBookSelection:
+    move: Optional[chess.Move]
+    message: str = ""
+    blacklist_exhausted: bool = False
+
+
 class RepetitionEngine():
     """
     The class responsible for prompt generation and response interpretation.
@@ -83,6 +101,8 @@ class RepetitionEngine():
     MOVE_EASE_INCORRECT_STEP = 1.0
     LEARNED_EASE_THRESHOLD = 3.0
     LEARNED_PROMPT_EXTENSION_PROBABILITY = 0.90
+    MAX_PROMPT_SELECTION_ATTEMPTS = 256
+    MAX_OFF_BOOK_BLACKLIST_ATTEMPTS = 3
 
     def __init__(self, session: RepertoireSession, root: Node, start_range: int, prompt_state: PromptState,
                  probs_cache_name: str, non_file_freq: float) -> None:
@@ -100,13 +120,13 @@ class RepetitionEngine():
         # max of how far we move from the root
         self.start_range = start_range
 
-        self._move_data = CacheDict(
-            lambda position_fen: {},
-            item_to_json=lambda item: json.dumps([item[0], item[1]]),
-            item_from_json=self._movedata_item_from_json,
+        self._move_probs = CacheDict(
+            lambda position_fen: PositionMoveData(moves={}, blacklist=[]),
+            item_to_json=self._moveprobs_item_to_json,
+            item_from_json=self._moveprobs_item_from_json,
             auto_save=False,
         )
-        self._move_data.load_from_file(probs_cache_name)
+        self._move_probs.load_from_file(probs_cache_name)
 
         self._session.fill_the_TT(self._session.game)
         self._grades: list[MoveSignal] = []
@@ -159,7 +179,7 @@ class RepetitionEngine():
     def finish_prompt(self, ease=0.25) -> None:
         self._is_finished = True
         self._recompute_line_move_probs(self._prompt.node, -ease)
-        self._move_data.serialize()
+        self._move_probs.serialize()
 
     def set_start(self, root: Optional[Node] = None, start_range: Optional[int] = None) -> None:
         if root:
@@ -177,7 +197,7 @@ class RepetitionEngine():
         self._grades = []
         self._move_performance = {}
         self._current_hints = None
-        self._prompt.debug_msg = ""
+        self._prompt.message = ""
         self._prompt.off_file = False
         self._prompt.anchor_node = None
 
@@ -190,7 +210,7 @@ class RepetitionEngine():
 
     def _choose_random_prompt(self) -> PromptState:
         self._clear_temporary_nodes()
-        while True:
+        for _ in range(self.MAX_PROMPT_SELECTION_ATTEMPTS):
             try:
                 success = self._choose_prompt(self._root)
             except Exception:
@@ -203,64 +223,106 @@ class RepetitionEngine():
             # we may add some temporary moves while choosing, so reset to the file contents
             self._clear_temporary_nodes()
 
+        raise RuntimeError("Could not generate a prompt. No eligible prompt moves remained.")
+
     def current_spec_id(self):
         return self._spec_id
 
     def current_prompt_id(self):
         return ' '.join(node_moves(self._prompt.node))
 
-    def _movedata_item_from_json(
+    def _moveprobs_item_to_json(
+        self,
+        item: tuple[str, PositionMoveData],
+    ) -> dict[str, Any]:
+        position_fen, position_data = item
+        return {
+            "fen": position_fen,
+            "moves": position_data["moves"],
+            "blacklist": list(position_data["blacklist"]),
+        }
+
+    def _moveprobs_item_from_json(
         self,
         payload: Any,
-    ) -> tuple[str, dict[UCI, dict[str, float]]]:
+    ) -> tuple[str, PositionMoveData]:
         if isinstance(payload, str):
             payload = json.loads(payload)
+
         if isinstance(payload, dict):
             position_fen = payload["fen"]
-            raw_move_data = payload.get("moves", {})
+            raw_move_probs = payload.get("moves", {})
+            raw_blacklist = payload.get("blacklist", [])
         else:
-            position_fen, raw_move_data = payload
+            position_fen, raw_move_probs = payload
+            raw_blacklist = []
 
-        move_data: dict[UCI, dict[str, float]] = {}
-        for uci, raw_entry in raw_move_data.items():
+        move_probs: dict[UCI, MoveEntryData] = {}
+        blacklist: list[UCI] = []
+        for raw_uci in raw_blacklist:
+            if raw_uci not in blacklist:
+                blacklist.append(raw_uci)
+
+        for uci, raw_entry in raw_move_probs.items():
             if isinstance(raw_entry, dict):
-                move_data[uci] = {
-                    "probability": float(raw_entry["probability"]),
-                    "ease": float(raw_entry.get("ease", 0.0)),
-                }
+                move_probs[uci] = MoveEntryData(
+                    probability=float(raw_entry["probability"]),
+                    ease=float(raw_entry.get("ease", 0.0)),
+                )
+                if raw_entry.get("blacklisted", False) and uci not in blacklist:
+                    blacklist.append(uci)
             else:
-                move_data[uci] = {
-                    "probability": float(raw_entry),
-                    "ease": 0.0,
-                }
+                move_probs[uci] = MoveEntryData(probability=float(raw_entry), ease=0.0)
 
-        return position_fen, move_data
+        return position_fen, PositionMoveData(moves=move_probs, blacklist=blacklist)
 
-    def _move_entry(self, parent: Node, uci: UCI) -> dict[str, float]:
-        move_data = self._move_data[fen(parent)]
-        if not move_data:
-            move_data.update(
+    def _move_probs_for(self, parent: Node) -> PositionMoveData:
+        return self._move_probs[fen(parent)]
+
+    def _moves_for(self, parent: Node) -> dict[UCI, MoveEntryData]:
+        position_data = self._move_probs_for(parent)
+        move_probs = position_data["moves"]
+        if not move_probs:
+            move_probs.update(
                 {
-                    move_uci: {
-                        "probability": probability,
-                        "ease": 0.0,
-                    }
+                    move_uci: MoveEntryData(probability=float(probability), ease=0.0)
                     for move_uci, probability in self._get_moves_and_freqs(parent).items()
                 }
             )
+        return move_probs
 
-        if uci not in move_data:
+    def _blacklist_for(self, parent: Node) -> list[UCI]:
+        return self._move_probs_for(parent)["blacklist"]
+
+    def _move_entry(self, parent: Node, uci: UCI) -> MoveEntryData:
+        move_probs = self._moves_for(parent)
+        if uci not in move_probs:
             raise RuntimeError(f"Missing move data for {uci!r} from position {fen(parent)!r}")
 
-        return move_data[uci]
+        return move_probs[uci]
 
     def _is_learned_move(self, parent: Node, uci: UCI) -> bool:
         return self._move_entry(parent, uci)["ease"] >= self.LEARNED_EASE_THRESHOLD
 
+    def _is_blacklisted_move(self, parent: Node, uci: UCI) -> bool:
+        position_data = self._move_probs.get(fen(parent))
+        if position_data is None:
+            return False
+        return uci in position_data["blacklist"]
+
+    def _blacklist_move(self, parent: Node, uci: UCI) -> None:
+        blacklist = self._blacklist_for(parent)
+        if uci not in blacklist:
+            blacklist.append(uci)
+
+    def blacklist_current_move(self) -> None:
+        self._blacklist_move(self._prompt.node.parent, self._prompt.node.move.uci())
+        self.finish_prompt()
+
     def on_response(self, uci: str) -> PromptState:
         if self._prompt.off_file:
             signal = self._handle_off_file_guess(uci)
-            self._prompt.debug_msg = signal.msg
+            self._prompt.message = signal.msg
             if signal.move_grade == MoveGrade.CORRECT:
                 self._current_hints = None
                 self.finish_prompt()
@@ -268,7 +330,7 @@ class RepetitionEngine():
 
         signal = self._handle_file_guess(uci)
         if signal.move_grade != MoveGrade.CORRECT:
-            self._prompt.debug_msg = signal.msg
+            self._prompt.message = signal.msg
             return self._prompt
 
         chosen_node = self._session.child_for_move(
@@ -280,7 +342,7 @@ class RepetitionEngine():
         self._advance_line(chosen=chosen_node)
 
         if not self._is_finished:
-            self._prompt.debug_msg += signal.msg
+            self._prompt.message += signal.msg
 
         return self._prompt
 
@@ -385,12 +447,12 @@ class RepetitionEngine():
         san = node_san(self._prompt.node)
         eval_gap = expected_eval - move_eval
         msg = f"Off-file {san}. Your move: eval {move_eval:+.2f} after {reply_to_user}."
-        if eval_gap <= 0.2:
-            msg += " Correct: close enough to the engine move."
+        if uci == best_reply.uci() or eval_gap <= 0.2 or move_eval > 0.8*expected_eval:
+            msg += f"Best was {best_reply_san} with evaluation {expected_eval:+.2f}. Good job!"
             grade = MoveGrade.CORRECT
         else:
             msg += (
-                f" Incorrect: best was {best_reply_san} with evaluation {expected_eval:+.2f}. "
+                f" Best was {best_reply_san} with evaluation {expected_eval:+.2f}. "
                 "Try again."
             )
             grade = MoveGrade.INCORRECT
@@ -408,6 +470,35 @@ class RepetitionEngine():
     def _evaluate_move(self, position: Union[chess.Board, Node], move: Union[chess.Move, str]) -> float:
         return self._session.q_eval_move(position, move).eval
 
+    def _skip_current_prompt_position(self) -> tuple[Node | bool, str]:
+        if self._prompt.node is None:
+            raise RuntimeError("Cannot skip a prompt position without an active prompt")
+
+        learned_node, _ = self._choose_move(self._prompt.node, maybe_off_book=False)
+        if learned_node is False:
+            return False, ""
+
+        return self._choose_move(learned_node, maybe_off_book=True)
+
+    def _advance_prompt_candidate(self) -> bool:
+        while True:
+            if self._prompt.off_file:
+                return True
+
+            expected_node = self._current_expected_node()
+            if expected_node is None:
+                return True
+            if not self._is_learned_move(self._prompt.node, expected_node.move.uci()):
+                return True
+            if self._rng.random() >= self.LEARNED_PROMPT_EXTENSION_PROBABILITY:
+                return True
+
+            next_node, selection_debug = self._skip_current_prompt_position()
+            if next_node is False:
+                return True
+            self._prompt.node = next_node
+            self._prompt.message = selection_debug
+
     def _advance_line(self, chosen: Node) -> None:
         """
         Choose a move to continue along the line and
@@ -418,16 +509,22 @@ class RepetitionEngine():
         next_node, selection_debug = self._choose_move(chosen)
 
         if next_node is False:
-            self._prompt.debug_msg = selection_debug
+            self._prompt.message = selection_debug
             self.finish_prompt()
             return
 
         self._prompt.node = next_node
-        self._prompt.debug_msg = selection_debug
+        self._prompt.message = selection_debug
+        if not self._advance_prompt_candidate():
+            self._prompt.message = selection_debug
+            self.finish_prompt()
+            return
 
         message = f"Correct: {node_san(chosen)}. Continue along the line."
-        if selection_debug:
-            self._prompt.debug_msg = f"{message} {selection_debug}"
+        if self._prompt.message:
+            self._prompt.message = f"{message} {self._prompt.message}"
+        else:
+            self._prompt.message = message
 
 
     def _choose_prompt_line_length(self) -> int:
@@ -466,29 +563,9 @@ class RepetitionEngine():
             return False
         
         self._prompt.node = next_node
-        self._prompt.debug_msg = selection_debug
+        self._prompt.message = selection_debug
 
-        while not self._prompt.off_file:
-            expected_node = self._current_expected_node()
-            if expected_node is None:
-                break
-            if not self._is_learned_move(self._prompt.node, expected_node.move.uci()):
-                break
-            if self._rng.random() >= self.LEARNED_PROMPT_EXTENSION_PROBABILITY:
-                break
-
-            learned_node, _ = self._choose_move(self._prompt.node, maybe_off_book=False)
-            if learned_node is False:
-                break
-
-            next_node, selection_debug = self._choose_move(learned_node, maybe_off_book=True)
-            if next_node is False:
-                break
-
-            self._prompt.node = next_node
-            self._prompt.debug_msg = selection_debug
-
-        return True        
+        return self._advance_prompt_candidate()
 
     def _choose_move(
         self,
@@ -507,7 +584,15 @@ class RepetitionEngine():
         off_book = maybe_off_book and self._rng.random() < self.non_file_move_freq
 
         children = self._session.variations(parent)
-        if not children: # TODO: transp
+        move_probs = self._moves_for(parent)
+        blacklisted_moves = set(self._blacklist_for(parent))
+        eligible_moves = {
+            uci: entry
+            for uci, entry in move_probs.items()
+            if uci not in blacklisted_moves
+        }
+
+        if not children or not eligible_moves: # TODO: transp
             # if there are no moves for us in the file but we are still here, that's improper usage
             if parent.turn() == self._session.options.side:
                 return False, ""
@@ -518,44 +603,29 @@ class RepetitionEngine():
         # a tiny optimization
         if parent.turn() == self._session.options.side and not self._session.options.check_alternatives:
             return children[0], "our move"
-            
+
         if off_book:
             # Try to find an off-book move with probability non_file_move_freq
-            off_book_move, off_book_debug = self._find_off_book_move(parent)
-            if off_book_move is not None:
-                child = self._add_temporary_node(parent, off_book_move)
+            off_book_selection = self._select_off_book_move(parent, use_engine=use_engine)
+            if off_book_selection.move is not None:
+                child = self._add_temporary_node(parent, off_book_selection.move)
                 self._prompt.off_file = True
-                return child, off_book_debug
-            elif use_engine:
-                engine_move = self._session.query(fen(parent), "q-eval").move
-                if engine_move:
-                    child = self._add_temporary_node(parent, engine_move)
-                    self._prompt.off_file = True
-                    return child, f"engine-suggested off-book move {engine_move}"
-                else:
-                # should only happen if it's mate
-                    return False, ""
+                return child, off_book_selection.message
+            if off_book_selection.blacklist_exhausted:
+                return False, off_book_selection.message
+            if use_engine:
+                return False, off_book_selection.message
             # Fall through to normal logic
 
-        if self._move_data[fen(parent)]:
-            move_data = self._move_data[fen(parent)]
-        else:
-            probs = self._get_moves_and_freqs(parent)
-            move_data = {
-                uci: {
-                    "probability": probability,
-                    "ease": 0.0,
-                }
-                for uci, probability in probs.items()
-            }
-            self._move_data[fen(parent)] = move_data
+        if not eligible_moves:
+            return False, ""
 
-        probabilities = [entry["probability"] for entry in move_data.values()]
-        choice = self._rng_choice(list(move_data.keys()), probabilities)
+        probabilities = [entry["probability"] for entry in eligible_moves.values()]
+        choice = self._rng_choice(list(eligible_moves.keys()), probabilities)
 
         message = ""
         if DEBUG_MODE:
-            message = self._format_rng_weights(move_data.keys(), probabilities)
+            message = self._format_rng_weights(eligible_moves.keys(), probabilities)
         return self._session.child_for_move(parent, choice), message
 
     def _add_temporary_node(
@@ -571,18 +641,83 @@ class RepetitionEngine():
         while self._temporary_nodes:
             self._session.remove_variation(self._temporary_nodes.pop())
 
-    def _find_off_book_move(self, node: Node) -> tuple[Optional[chess.Move], str]:
+    def _select_off_book_move(
+        self,
+        node: Node,
+        *,
+        use_engine: bool,
+    ) -> OffBookSelection:
+        db_selection = self._choose_db_off_book_move(node)
+        if db_selection.move is not None or db_selection.blacklist_exhausted:
+            return db_selection
+        if not use_engine:
+            return db_selection
+        return self._choose_engine_off_book_move(node)
+
+    def _choose_db_off_book_move(self, node: Node) -> OffBookSelection:
+        candidates = self._off_book_db_candidates(node)
+        if not candidates:
+            return OffBookSelection(None, "no candidates")
+
+        remaining = list(candidates)
+        for _ in range(self.MAX_OFF_BOOK_BLACKLIST_ATTEMPTS):
+            if not remaining:
+                break
+            choice_idx = self._rng_weighted_index([weight for _, weight in remaining])
+            moves = [move for move, _ in remaining]
+            weights = [weight for _, weight in remaining]
+            move = moves[choice_idx]
+            debug_text = self._format_rng_weights(moves, weights)
+            if not self._is_blacklisted_move(node, move.uci()):
+                return OffBookSelection(move, debug_text)
+            remaining = remaining[choice_idx + 1 :]
+
+        return OffBookSelection(
+            None,
+            "No non-blacklisted off-book DB moves are available.",
+            blacklist_exhausted=True,
+        )
+
+    def _choose_engine_off_book_move(self, node: Node) -> OffBookSelection:
+        engine_lines = quick_eval_lines(
+            self._session.engine,
+            fen(node),
+            pov=self._session.options.side,
+            multipv=self.MAX_OFF_BOOK_BLACKLIST_ATTEMPTS,
+        )
+        if not engine_lines:
+            return OffBookSelection(None, "no engine move")
+
+        for idx, line in enumerate(engine_lines, start=1):
+            move = line.move
+            if not isinstance(move, chess.Move):
+                move = chess.Move.from_uci(str(move))
+            if self._is_blacklisted_move(node, move.uci()):
+                continue
+
+            debug_msg = f"engine-suggested off-book move {move}"
+            if idx > 1:
+                debug_msg += f" (choice #{idx})"
+            return OffBookSelection(move, debug_msg)
+
+        return OffBookSelection(
+            None,
+            "No non-blacklisted engine off-book moves are available.",
+            blacklist_exhausted=True,
+        )
+
+    def _off_book_db_candidates(self, node: Node) -> list[tuple[chess.Move, float]]:
         """Find an off-book DB move with frequency >= 5% and score_rate <= 75%."""
         move_weights = self._get_db_moves_and_nums(node)
         if not move_weights:
-            return None, "no children"
+            return []
         
         exclude = {m.uci() for m in self._session.variations(node)}
 
         # Filter candidates: frequency >= 5%, score_rate <= 75%
-        candidates = []
+        candidates: list[tuple[chess.Move, float]] = []
         for uci, weight in move_weights.items():
-            if uci_from_lichess_to_pgn(uci) in exclude:
+            if uci in exclude:
                 continue
 
             if self._session.move_freq(node, uci) < 0.05:
@@ -595,13 +730,7 @@ class RepetitionEngine():
 
             candidates.append((chess.Move.from_uci(uci), weight))
 
-        if not candidates:
-            return None, "no candidates"
-
-        moves, weights = zip(*candidates)
-        move = self._rng_choice(list(moves), list(weights))
-        debug_text = self._format_rng_weights(list(moves), list(weights))
-        return move, debug_text
+        return candidates
     
     def _get_moves_and_freqs(self, node: Node) -> dict[str, float]:
         """
@@ -713,17 +842,7 @@ class RepetitionEngine():
             move = child.move
             node = child.parent
             running_factor = max(running_factor, self._move_factor(child, base_factor))
-            parent_dict = self._move_data[fen(node)]
-            if not parent_dict:
-                parent_dict.update(
-                    {
-                        uci: {
-                            "probability": probability,
-                            "ease": 0.0,
-                        }
-                        for uci, probability in self._get_moves_and_freqs(node).items()
-                    }
-                )
+            parent_dict = self._moves_for(node)
             if move.uci() not in parent_dict:
                 continue
             # Keep easy lines de-emphasized by default, but pull difficult prompt
@@ -753,6 +872,22 @@ class RepetitionEngine():
             if threshold <= cumulative:
                 return item
         return items[-1]
+
+    def _rng_weighted_index(self, weights: list[float]) -> int:
+        if not weights:
+            raise ValueError("No weights to choose from")
+
+        total = sum(weights)
+        if total <= 0.0:
+            raise ValueError("Weights must sum to a positive number")
+
+        threshold = self._rng.random() * total
+        cumulative = 0.0
+        for idx, weight in enumerate(weights):
+            cumulative += weight
+            if threshold <= cumulative:
+                return idx
+        return len(weights) - 1
 
     def _format_rng_weights(self, items: list[Any], weights: list[float]) -> str:
         if not items or not weights or len(items) != len(weights):
@@ -790,7 +925,7 @@ class RepetitionEngine():
 class PromptState:
     node: Node
     off_file: bool
-    debug_msg: str
+    message: str
     anchor_node: Node
 
     def __bool__(self):
@@ -921,7 +1056,7 @@ class AppController:
         self.active = False
         self._mode = "idle"  # idle | guess | review
 
-        self._prompt = PromptState(node=None, off_file=False, debug_msg="", anchor_node=None)
+        self._prompt = PromptState(node=None, off_file=False, message="", anchor_node=None)
         self._log : SessionLog = PromptLog()
 
         self._review_base_root_path: list[int] = []
@@ -954,7 +1089,7 @@ class AppController:
             default_cache_path=lambda: default_repertoire_cache_path(options),
         )
         self._orientation = "white" if options.play_white else "black"
-        self._prompt = PromptState(node=None, off_file=False, debug_msg="", anchor_node=None)
+        self._prompt = PromptState(node=None, off_file=False, message="", anchor_node=None)
         
         self._log.prompts.load_from_file(self._log_cache_name())
         self._rep_engine: RepetitionEngine = RepetitionEngine(
@@ -992,7 +1127,7 @@ class AppController:
         self._hub.set_from_node(
             prompt.node,
             orientation=self._orientation,
-            message=prompt.debug_msg,
+            message=prompt.message,
             allow_moves=True,
             **kwargs
         )
@@ -1057,12 +1192,7 @@ class AppController:
         board = chess.Board(position_fen)
         moves: list[dict[str, Any]] = []
         for move_data in raw_moves:
-            if not isinstance(move_data, dict):
-                raise TypeError("Database stats move entry must be a dict")
-
-            lichess_uci = move_data.get("uci")
-            if not isinstance(lichess_uci, str) or not lichess_uci:
-                raise TypeError("Database stats move entry must contain a UCI string")
+            lichess_uci = move_data["uci"]
 
             white = self._db_result_count(move_data, "white")
             draws = self._db_result_count(move_data, "draws")
@@ -1342,6 +1472,16 @@ class AppController:
 
         self._rep_engine.finish_prompt(ease=ease)
         self._reveal_prompt_in_review()
+
+    def blacklist_current_move(self) -> None:
+        if self._mode != "guess":
+            return
+
+        blacklisted_uci = self._rep_engine.blacklist_current_move()
+        self._enter_review_mode(
+            node=self._prompt.node,
+            message=f"Blacklisted {blacklisted_uci}. Browse the tree or click New.",
+        )
 
     def _reveal_prompt_in_review(self) -> None:
         if self._mode != "guess":
