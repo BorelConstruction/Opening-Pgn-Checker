@@ -69,17 +69,29 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-button {
+button,
+.button-link {
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(17, 24, 39, 0.75);
   color: var(--text);
   padding: 8px 10px;
   border-radius: 10px;
   cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
 }
 
-button:hover {
+button:hover,
+.button-link:hover {
   border-color: rgba(56, 189, 248, 0.65);
+}
+
+button:disabled,
+.button-link.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 
 .status {

@@ -150,6 +150,10 @@ function applyState(state) {
     if (c && c.square) shapes.push({ orig: c.square, brush: c.color || "green" });
   }
   ground.setAutoShapes(shapes);
+
+  if (srUi.refreshBoardState) {
+    srUi.refreshBoardState();
+  }
 }
 
 function toDests(dests) {
@@ -184,6 +188,7 @@ const srUi = createPgnViewerUi({
   send,
   onFlipBoard: () => ground.toggleOrientation(),
   onResetBoard: () => send({ type: "set", fen: "startpos" }),
+  getCurrentFen: () => (lastServerState && typeof lastServerState.fen === "string" ? lastServerState.fen : ""),
 });
 const dbStatsUi = createReviewDbStatsUi();
 

@@ -1268,7 +1268,7 @@ class AppController:
             self._broadcast_review_db_stats(task.request_id)
 
     def _broadcast_review_navigation(self) -> None:
-        
+
         if not self.active or self._mode != "review":
             raise RuntimeError("Review navigation broadcast requires active review mode")
         if self._review_payload is None or self._review_path is None:

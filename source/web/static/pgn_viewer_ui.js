@@ -1,12 +1,13 @@
 // import { log } from "./board.js";
 
-export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
+export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentFen }) {
   // log("Creating PGN Viewer UI");
   const srNewBtn = document.getElementById("srNew");
   const srPrevBtn = document.getElementById("srPrev");
   const srHintBtn = document.getElementById("srHint");
   const srStudyFromHereBtn = document.getElementById("srStudyFromHere");
   const srSearchMoveBtn = document.getElementById("srSearchMove");
+  const srAnalyzeLichessLink = document.getElementById("srAnalyzeLichess");
 
   const treePanel = document.getElementById("treePanel");
   const guessActions = document.getElementById("guessActions");
@@ -159,6 +160,22 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     return true;
   }
 
+  function buildLichessAnalysisUrl(fen) {
+    if (typeof fen !== "string" || !fen.trim()) return "";
+
+    // Keep rank separators readable in the path while still escaping spaces and other unsafe characters.
+    return `https://lichess.org/analysis/standard/${encodeURIComponent(fen.trim()).replaceAll("%2F", "/")}`;
+  }
+
+  function refreshAnalyzeLichessLink() {
+    const analysisUrl = isReviewMode() ? buildLichessAnalysisUrl(getCurrentFen()) : "";
+
+    srAnalyzeLichessLink.href = analysisUrl || "#";
+    srAnalyzeLichessLink.classList.toggle("disabled", !analysisUrl);
+    srAnalyzeLichessLink.setAttribute("aria-disabled", analysisUrl ? "false" : "true");
+    srAnalyzeLichessLink.tabIndex = analysisUrl ? 0 : -1;
+  }
+
   function refreshButtons() {
     const active = !!state.active;
     const isGuess = active && state.mode === "guess";
@@ -172,6 +189,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
     srGuessFinishBtn.disabled = !isGuess;
     srGuessBlacklistBtn.disabled = !isGuess;
     srGuessTooEasyBtn.disabled = !isGuess;
+    refreshAnalyzeLichessLink();
   }
 
   function closeSearchMoveOverlay() {
@@ -517,6 +535,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
       state.review.dbStats = review.dbStats || null;
     }
 
+    refreshButtons();
     renderReviewTree();
     renderSearchMove();
     acknowledgeReviewNavigation(state.review.currentPath);
@@ -558,6 +577,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard }) {
   return {
     applySrState,
     applyReviewNavigation,
+    refreshBoardState: refreshAnalyzeLichessLink,
     isReviewMode,
     handleFlip,
     handleReset,
