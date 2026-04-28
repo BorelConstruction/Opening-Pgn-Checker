@@ -37,7 +37,7 @@ K = TypeVar("K")
 
 
 class MoveEntryData(TypedDict):
-    probability: float
+    prob: float
     ease: float
 
 
@@ -46,14 +46,14 @@ class PositionMoveData(TypedDict):
     blacklist: list[UCI]
 
 
-class MoveGrade(Enum):
+class MoveCorrectness(Enum):
     CORRECT = 1
     INCORRECT = 2
-    NO_MOVES = 3
+    UNDEF = 3
 
 @dataclass
-class MoveSignal():
-    move_grade: MoveGrade
+class MoveGrade():
+    move_grade: MoveCorrectness
     msg: str = ""
     eval_diff: Optional[float] = None
     rel_eval_diff: Optional[float] = None
@@ -62,15 +62,19 @@ class MoveSignal():
 @dataclass
 class PromptMovePerformance:
     hint_requests: int = 0
-    hint_revealed_move: bool = False
-    errors: list[MoveSignal] = field(default_factory=list)
+    gave_up: bool = False
+    errors: list[MoveGrade] = field(default_factory=list)
+
+    def add_giveup(self) -> None:
+        self.gave_up = True
 
     def add_hint(self, determines_move: bool) -> None:
-        self.hint_requests += 1
-        self.hint_revealed_move = self.hint_revealed_move or determines_move
+        if not self.gave_up:
+            self.hint_requests += 1
+        self.gave_up = self.gave_up or determines_move
 
-    def add_error(self, signal: MoveSignal) -> None:
-        if signal.move_grade != MoveGrade.INCORRECT:
+    def add_error(self, signal: MoveGrade) -> None:
+        if signal.move_grade != MoveCorrectness.INCORRECT:
             raise ValueError("Only incorrect signals may be stored as move errors")
         self.errors.append(signal)
 
@@ -92,16 +96,16 @@ class RepetitionEngine():
     performance data so move probabilities can be adjusted from real user behavior.
     """
     HINT_FACTOR_STEP = 0.10
-    HINT_REVEALS_MOVE_FACTOR = 1.15
-    ERROR_FACTOR_STEP = 0.25
-    ERROR_EVAL_LOSS_SCALE = 0.25
-    ERROR_EVAL_LOSS_CAP = 0.75
+    GAVE_UP_FACTOR = 1.15
+    ERROR_FACTOR_STEP = 1.2
+    ERROR_EVAL_LOSS_SCALE = 0.1
+    ERROR_EVAL_LOSS_CAP = 2
     MIN_MOVE_FACTOR = 0.05
     MOVE_EASE_CORRECT_STEP = 1.0
     MOVE_EASE_INCORRECT_STEP = 1.0
     LEARNED_EASE_THRESHOLD = 3.0
     LEARNED_PROMPT_EXTENSION_PROBABILITY = 0.90
-    MAX_PROMPT_SELECTION_ATTEMPTS = 256
+    MAX_PROMPT_SELECTION_ATTEMPTS = 100
     MAX_OFF_BOOK_BLACKLIST_ATTEMPTS = 3
 
     def __init__(self, session: RepertoireSession, root: Node, start_range: int, prompt_state: PromptState,
@@ -129,7 +133,7 @@ class RepetitionEngine():
         self._move_probs.load_from_file(probs_cache_name)
 
         self._session.fill_the_TT(self._session.game)
-        self._grades: list[MoveSignal] = []
+        self._grades: list[MoveGrade] = []
         self._move_performance: dict[int, PromptMovePerformance] = {}
         self._current_hints: Optional[Hints] = None
         self._temporary_nodes: list[Node] = []
@@ -138,7 +142,7 @@ class RepetitionEngine():
         if not self._grades:
             return Feedback(0.0)
 
-        correct = sum(1 for signal in self._grades if signal.move_grade == MoveGrade.CORRECT)
+        correct = sum(1 for signal in self._grades if signal.move_grade == MoveCorrectness.CORRECT)
         return Feedback(correct / len(self._grades))
 
     def expected_uci(self) -> Optional[UCI]:
@@ -176,8 +180,12 @@ class RepetitionEngine():
     def is_finished(self) -> bool:
         return self._is_finished
     
-    def finish_prompt(self, ease=0.25) -> None:
+    def finish_prompt(self, ease=0.25, gave_up=False) -> None:
         self._is_finished = True
+        if gave_up:
+            n = self._prompt.node
+            self._move_entry(n.parent, n.move.uci())["ease"] = 0
+            self._move_performance_for(self._prompt.node).add_giveup()
         self._recompute_line_move_probs(self._prompt.node, -ease)
         self._move_probs.serialize()
 
@@ -266,13 +274,13 @@ class RepetitionEngine():
         for uci, raw_entry in raw_move_probs.items():
             if isinstance(raw_entry, dict):
                 move_probs[uci] = MoveEntryData(
-                    probability=float(raw_entry["probability"]),
+                    prob=float(raw_entry["prob"]),
                     ease=float(raw_entry.get("ease", 0.0)),
                 )
                 if raw_entry.get("blacklisted", False) and uci not in blacklist:
                     blacklist.append(uci)
             else:
-                move_probs[uci] = MoveEntryData(probability=float(raw_entry), ease=0.0)
+                move_probs[uci] = MoveEntryData(prob=float(raw_entry), ease=0.0)
 
         return position_fen, PositionMoveData(moves=move_probs, blacklist=blacklist)
 
@@ -285,8 +293,8 @@ class RepetitionEngine():
         if not move_probs:
             move_probs.update(
                 {
-                    move_uci: MoveEntryData(probability=float(probability), ease=0.0)
-                    for move_uci, probability in self._get_moves_and_freqs(parent).items()
+                    move_uci: MoveEntryData(prob=float(freq), ease=0.0)
+                    for move_uci, freq in self._get_moves_and_freqs(parent).items()
                 }
             )
         return move_probs
@@ -323,13 +331,13 @@ class RepetitionEngine():
         if self._prompt.off_file:
             signal = self._handle_off_file_guess(uci)
             self._prompt.message = signal.msg
-            if signal.move_grade == MoveGrade.CORRECT:
+            if signal.move_grade == MoveCorrectness.CORRECT:
                 self._current_hints = None
                 self.finish_prompt()
             return self._prompt
 
         signal = self._handle_file_guess(uci)
-        if signal.move_grade != MoveGrade.CORRECT:
+        if signal.move_grade != MoveCorrectness.CORRECT:
             self._prompt.message = signal.msg
             return self._prompt
 
@@ -376,7 +384,7 @@ class RepetitionEngine():
             return
         self._move_performance_for(target).add_hint(determines_move)
 
-    def _record_error(self, signal: MoveSignal) -> None:
+    def _record_error(self, signal: MoveGrade) -> None:
         target = self._current_feedback_node()
         if target is None:
             return
@@ -392,10 +400,10 @@ class RepetitionEngine():
             and self._current_hints.target_square == expected_uci[2:4]
         )
 
-    def _handle_file_guess(self, uci: UCI) -> MoveSignal:
+    def _handle_file_guess(self, uci: UCI) -> MoveGrade:
         expected_moves = self._session.variations(self._prompt.node)
         if not expected_moves:
-            signal = MoveSignal(MoveGrade.NO_MOVES)
+            signal = MoveGrade(MoveCorrectness.UNDEF)
             self._grades.append(signal)
             return signal
 
@@ -405,26 +413,27 @@ class RepetitionEngine():
         )
         if chosen_node is not None:
             self._move_entry(self._prompt.node, chosen_node.move.uci())["ease"] += self.MOVE_EASE_CORRECT_STEP
-            signal = MoveSignal(MoveGrade.CORRECT)
+            signal = MoveGrade(MoveCorrectness.CORRECT)
             self._grades.append(signal)
             return signal
 
         expected_sans = ", ".join(node_san(n) for n in expected_moves)
-        user_eval = self._evaluate_move(self._prompt.node, uci)
+        user_ev = self._session.q_eval_move(self._prompt.node, uci)
+        eval, move = user_ev.eval, user_ev.move
         evals = [self._evaluate_move(self._prompt.node, n.move.uci()) for n in expected_moves]
         best_expected_eval = max(evals) if evals else None
 
         msg = f"Wrong. Expected: {expected_sans}."
         if best_expected_eval is not None:
-            msg += f" Your move eval {user_eval:+.2f}. File move eval {best_expected_eval:+.2f}."
+            msg += f" Your move eval {eval:+.2f} after {move.uci()}. File move eval {best_expected_eval:+.2f}."
 
-        eval_diff = None if best_expected_eval is None else user_eval - best_expected_eval
+        eval_diff = None if best_expected_eval is None else eval - best_expected_eval
         rel_eval_diff = None
         if best_expected_eval not in (None, 0):
             rel_eval_diff = eval_diff / best_expected_eval
 
-        signal = MoveSignal(
-            MoveGrade.INCORRECT,
+        signal = MoveGrade(
+            MoveCorrectness.INCORRECT,
             msg=msg,
             eval_diff=eval_diff,
             rel_eval_diff=rel_eval_diff,
@@ -436,7 +445,7 @@ class RepetitionEngine():
         self._record_error(signal)
         return signal
 
-    def _handle_off_file_guess(self, uci: UCI) -> MoveSignal:
+    def _handle_off_file_guess(self, uci: UCI) -> MoveGrade:
         ev = self._session.query(fen(self._prompt.node), "q-eval")
         expected_eval, best_reply = ev.eval, ev.move
 
@@ -449,21 +458,21 @@ class RepetitionEngine():
         msg = f"Off-file {san}. Your move: eval {move_eval:+.2f} after {reply_to_user}."
         if uci == best_reply.uci() or eval_gap <= 0.2 or move_eval > 0.8*expected_eval:
             msg += f"Best was {best_reply_san} with evaluation {expected_eval:+.2f}. Good job!"
-            grade = MoveGrade.CORRECT
+            grade = MoveCorrectness.CORRECT
         else:
             msg += (
                 f" Best was {best_reply_san} with evaluation {expected_eval:+.2f}. "
                 "Try again."
             )
-            grade = MoveGrade.INCORRECT
+            grade = MoveCorrectness.INCORRECT
 
-        signal = MoveSignal(
+        signal = MoveGrade(
             grade,
             msg=msg,
             eval_diff=move_eval - expected_eval,
         )
         self._grades.append(signal)
-        if grade == MoveGrade.INCORRECT:
+        if grade == MoveCorrectness.INCORRECT:
             self._record_error(signal)
         return signal
 
@@ -620,12 +629,12 @@ class RepetitionEngine():
         if not eligible_moves:
             return False, ""
 
-        probabilities = [entry["probability"] for entry in eligible_moves.values()]
-        choice = self._rng_choice(list(eligible_moves.keys()), probabilities)
+        probs_dict = {k: v["prob"] for k, v in eligible_moves.items()}
+        choice = self._rng_choice(probs_dict)
 
         message = ""
         if DEBUG_MODE:
-            message = self._format_rng_weights(eligible_moves.keys(), probabilities)
+            message = self._format_rng_weights(probs_dict)
         return self._session.child_for_move(parent, choice), message
 
     def _add_temporary_node(
@@ -657,48 +666,31 @@ class RepetitionEngine():
     def _choose_db_off_book_move(self, node: Node) -> OffBookSelection:
         candidates = self._off_book_db_candidates(node)
         if not candidates:
-            return OffBookSelection(None, "no candidates")
-
-        remaining = list(candidates)
-        for _ in range(self.MAX_OFF_BOOK_BLACKLIST_ATTEMPTS):
-            if not remaining:
-                break
-            choice_idx = self._rng_weighted_index([weight for _, weight in remaining])
-            moves = [move for move, _ in remaining]
-            weights = [weight for _, weight in remaining]
-            move = moves[choice_idx]
-            debug_text = self._format_rng_weights(moves, weights)
-            if not self._is_blacklisted_move(node, move.uci()):
-                return OffBookSelection(move, debug_text)
-            remaining = remaining[choice_idx + 1 :]
-
-        return OffBookSelection(
-            None,
-            "No non-blacklisted off-book DB moves are available.",
-            blacklist_exhausted=True,
-        )
+            return OffBookSelection(None, "no non-blacklisted candidates")
+        
+        cand_dict = dict(candidates)
+        move = self._rng_choice(cand_dict)
+        debug_text = self._format_rng_weights(cand_dict)
+        return OffBookSelection(move, debug_text)
 
     def _choose_engine_off_book_move(self, node: Node) -> OffBookSelection:
-        engine_lines = quick_eval_lines(
-            self._session.engine,
-            fen(node),
-            pov=self._session.options.side,
-            multipv=self.MAX_OFF_BOOK_BLACKLIST_ATTEMPTS,
-        )
-        if not engine_lines:
-            return OffBookSelection(None, "no engine move")
+        for i in range(self.MAX_OFF_BOOK_BLACKLIST_ATTEMPTS):
+            engine_lines = quick_eval_lines(
+                self._session.engine,
+                fen(node),
+                pov=self._session.options.side,
+                multipv=i+1
+            )
+            if not engine_lines:
+                return OffBookSelection(None, "no engine move")
 
-        for idx, line in enumerate(engine_lines, start=1):
-            move = line.move
-            if not isinstance(move, chess.Move):
-                move = chess.Move.from_uci(str(move))
-            if self._is_blacklisted_move(node, move.uci()):
-                continue
+            for line in engine_lines:
+                move = line.move
+                if self._is_blacklisted_move(node, move.uci()):
+                    continue
 
-            debug_msg = f"engine-suggested off-book move {move}"
-            if idx > 1:
-                debug_msg += f" (choice #{idx})"
-            return OffBookSelection(move, debug_msg)
+                debug_msg = f"engine-suggested off-book move {move}"
+                return OffBookSelection(move, debug_msg)
 
         return OffBookSelection(
             None,
@@ -707,12 +699,13 @@ class RepetitionEngine():
         )
 
     def _off_book_db_candidates(self, node: Node) -> list[tuple[chess.Move, float]]:
-        """Find an off-book DB move with frequency >= 5% and score_rate <= 75%."""
+        """Find off-book non-BL DB moves with frequency >= 5% and score_rate <= 75%."""
         move_weights = self._get_db_moves_and_nums(node)
         if not move_weights:
             return []
         
-        exclude = {m.uci() for m in self._session.variations(node)}
+        exclude = {m.uci() for m in self._session.variations(node)} # TODO: abstractify this
+        exclude.update(self._blacklist_for(node))
 
         # Filter candidates: frequency >= 5%, score_rate <= 75%
         candidates: list[tuple[chess.Move, float]] = []
@@ -799,31 +792,18 @@ class RepetitionEngine():
         factor = base_factor
         if performance.hint_requests:
             factor += self.HINT_FACTOR_STEP * performance.hint_requests
-        if performance.hint_revealed_move:
-            factor = max(factor, self.HINT_REVEALS_MOVE_FACTOR)
-        if performance.errors:
-            factor += self.ERROR_FACTOR_STEP * len(performance.errors)
-            eval_loss = max(self._error_eval_loss(signal) for signal in performance.errors)
-            factor += min(self.ERROR_EVAL_LOSS_CAP, eval_loss * self.ERROR_EVAL_LOSS_SCALE)
+        if performance.gave_up:
+            factor = max(factor, self.GAVE_UP_FACTOR)
+        for error in performance.errors:
+            eval_loss = self._error_eval_loss(error)
+            factor *= max(1 + eval_loss * self.ERROR_EVAL_LOSS_SCALE, self.ERROR_EVAL_LOSS_CAP)
 
         return max(self.MIN_MOVE_FACTOR, factor)
 
-    def _error_eval_loss(self, signal: MoveSignal) -> float:
+    def _error_eval_loss(self, signal: MoveGrade) -> float:
         if signal.eval_diff is None:
             return 0.0
         return max(0.0, -signal.eval_diff)
-
-    def _pending_prompt_factor(self, base_factor: float) -> float:
-        if self._prompt.node is None:
-            return base_factor
-        if self._prompt.node.turn() != self._session.options.side:
-            return base_factor
-
-        target = self._current_feedback_node()
-        if target is None:
-            return base_factor
-
-        return self._move_factor(target, base_factor)
     
     
     def _recompute_line_move_probs(self, node: Node, diff: float) -> None:
@@ -835,61 +815,47 @@ class RepetitionEngine():
             return
         
         base_factor = max(self.MIN_MOVE_FACTOR, 1.0 + diff)
-        running_factor = self._pending_prompt_factor(base_factor)
 
         while fen(self._session.game) != fen(node):
             child = node
             move = child.move
             node = child.parent
-            running_factor = max(running_factor, self._move_factor(child, base_factor))
             parent_dict = self._moves_for(node)
             if move.uci() not in parent_dict:
                 continue
+            factor = self._move_factor(child, base_factor)
             # Keep easy lines de-emphasized by default, but pull difficult prompt
             # prefixes back into the queue when the user needed help on a later move.
-            parent_dict[move.uci()]["probability"] *= running_factor
-            total = sum(entry["probability"] for entry in parent_dict.values())
+            sys.stderr.write(f"Updating prob for {move.uci()}: {parent_dict[move.uci()]['prob']} -> {parent_dict[move.uci()]['prob'] * factor}\n")
+            parent_dict[move.uci()]["prob"] *= factor
+
+            total = sum(entry["prob"] for entry in parent_dict.values())
             if total <= 0.0:
                 continue
             for entry in parent_dict.values():
-                entry["probability"] /= total
+                entry["prob"] /= total
 
 
-    def _rng_choice(self, items: list[K], weights: Optional[list[float]]=None) -> K:
-        if not items:
+    def _rng_choice(self, probs_dict: dict[K, float] | list[K]) -> K:
+        if not probs_dict:
             raise ValueError("No items to choose from")
-        if len(items) != len(weights):
-            raise ValueError("Items and weights must have the same length")
 
-        if weights is None:
-            weights = [1.0] * len(items)
-        total = sum(weights)
+        if isinstance(probs_dict, list):
+            probs_dict = {k: 1 for k in probs_dict}
 
-        threshold = self._rng.random() * total
+        threshold = self._rng.random() * sum(probs_dict.values())
         cumulative = 0.0
-        for item, weight in zip(items, weights):
+        items_list = list(probs_dict.items())
+        for choice, weight in items_list:
             cumulative += weight
             if threshold <= cumulative:
-                return item
-        return items[-1]
+                return choice
+        return items_list[-1][0]
 
-    def _rng_weighted_index(self, weights: list[float]) -> int:
-        if not weights:
-            raise ValueError("No weights to choose from")
 
-        total = sum(weights)
-        if total <= 0.0:
-            raise ValueError("Weights must sum to a positive number")
-
-        threshold = self._rng.random() * total
-        cumulative = 0.0
-        for idx, weight in enumerate(weights):
-            cumulative += weight
-            if threshold <= cumulative:
-                return idx
-        return len(weights) - 1
-
-    def _format_rng_weights(self, items: list[Any], weights: list[float]) -> str:
+    def _format_rng_weights(self, probs_dict: dict[Any, float]) -> str:
+        items = list(probs_dict.keys())
+        weights = list(probs_dict.values())
         if not items or not weights or len(items) != len(weights):
             return ""
         total = sum(weights)
@@ -1461,16 +1427,13 @@ class AppController:
         return node
     
     def give_up(self) -> None:
+        self.finish_prompt(gave_up=True)
+
+    def finish_prompt(self, ease: float = 0.25, gave_up: bool = False) -> None:
         if self._mode != "guess":
             return
 
-        self._reveal_prompt_in_review()
-
-    def finish_prompt(self, ease: float = 0.25) -> None:
-        if self._mode != "guess":
-            return
-
-        self._rep_engine.finish_prompt(ease=ease)
+        self._rep_engine.finish_prompt(ease=ease, gave_up=gave_up)
         self._reveal_prompt_in_review()
 
     def blacklist_current_move(self) -> None:
