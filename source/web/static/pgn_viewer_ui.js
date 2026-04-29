@@ -3,7 +3,7 @@
 export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentFen }) {
   // log("Creating PGN Viewer UI");
   const srNewBtn = document.getElementById("srNew");
-  const srPrevBtn = document.getElementById("srPrev");
+  const srHistoryBtn = document.getElementById("srHistory");
   const srHintBtn = document.getElementById("srHint");
   const srStudyFromHereBtn = document.getElementById("srStudyFromHere");
   const srSearchMoveBtn = document.getElementById("srSearchMove");
@@ -23,12 +23,20 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const searchMoveResults = document.getElementById("searchMoveResults");
   const searchMoveCloseBtn = document.getElementById("searchMoveClose");
 
+  const historyOverlay = document.getElementById("historyOverlay");
+  const historyPanel = document.getElementById("historyPanel");
+  const historyTitle = document.getElementById("historyTitle");
+  const historyResults = document.getElementById("historyResults");
+  const historyCloseBtn = document.getElementById("historyClose");
+
   const state = {
     active: false,
     mode: "idle", // idle | guess | review
     review: null,
     searchMove: null,
     searchMoveDismissed: false,
+    history: null,
+    historyOpen: false,
   };
 
   const reviewNav = {
@@ -176,12 +184,99 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srAnalyzeLichessLink.tabIndex = analysisUrl ? 0 : -1;
   }
 
+  function closeHistoryOverlay() {
+    state.historyOpen = false;
+    historyOverlay.hidden = true;
+  }
+
+  function formatHistoryMoveLabel(move) {
+    const moveNumber = typeof move.moveNumber === "number" ? move.moveNumber : 0;
+    const san = typeof move.san === "string" ? move.san : "";
+    return move.color === "black" ? `${moveNumber}... ${san}` : `${moveNumber}. ${san}`;
+  }
+
+  function clamp01(value) {
+    if (!Number.isFinite(value)) return 0;
+    return Math.max(0, Math.min(1, value));
+  }
+
+  function renderHistory() {
+    if (!state.historyOpen) {
+      historyOverlay.hidden = true;
+      return;
+    }
+
+    const entries = state.history && Array.isArray(state.history.entries) ? state.history.entries : [];
+    const count = state.history && typeof state.history.count === "number" ? state.history.count : entries.length;
+    historyTitle.textContent = `History (${count})`;
+    historyResults.innerHTML = "";
+
+    if (!entries.length) {
+      const empty = document.createElement("div");
+      empty.className = "history-empty";
+      empty.textContent = "No prompt history yet";
+      historyResults.appendChild(empty);
+      historyOverlay.hidden = false;
+      return;
+    }
+
+    for (const entry of entries) {
+      const item = document.createElement("div");
+      item.className = "history-item";
+
+      if (typeof entry.promptTime === "number") {
+        item.title = new Date(entry.promptTime * 1000).toLocaleString();
+      }
+
+      const moves = document.createElement("div");
+      moves.className = "history-moves";
+      item.appendChild(moves);
+
+      const promptMoves = Array.isArray(entry.moves) ? entry.moves : [];
+      for (const move of promptMoves) {
+        const moveBtn = document.createElement("button");
+        moveBtn.type = "button";
+        moveBtn.className = "history-move";
+        moveBtn.textContent = formatHistoryMoveLabel(move);
+        moveBtn.addEventListener("click", (event) => {
+          event.stopPropagation();
+          if (Array.isArray(move.path) && isReviewMode()) {
+            queueReviewNavigation(move.path);
+            return;
+          }
+          send({
+            type: "sr_history_goto",
+            path: Array.isArray(move.path) ? move.path : null,
+            fen: typeof move.fen === "string" ? move.fen : null,
+            san: typeof move.san === "string" ? move.san : "",
+          });
+        });
+        moves.appendChild(moveBtn);
+      }
+
+      const performance = document.createElement("div");
+      performance.className = "history-performance";
+      if (typeof entry.performance === "number") {
+        const hue = 120 * (1 - clamp01(entry.performance));
+        performance.textContent = `avg loss ${entry.performance.toFixed(2)}`;
+        performance.style.color = `hsl(${hue} 75% 60%)`;
+      } else {
+        performance.textContent = "avg loss n/a";
+      }
+      item.appendChild(performance);
+
+      historyResults.appendChild(item);
+    }
+
+    historyOverlay.hidden = false;
+  }
+
   function refreshButtons() {
     const active = !!state.active;
     const isGuess = active && state.mode === "guess";
     const isReview = active && state.mode === "review";
     srNewBtn.disabled = !active;
-    srPrevBtn.disabled = !active;
+    srHistoryBtn.disabled = !active;
     srHintBtn.disabled = !isGuess;
     srStudyFromHereBtn.disabled = !isReview;
     srSearchMoveBtn.disabled = !isReview;
@@ -326,9 +421,15 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   }
 
   function handleKeyNavigation(event) {
-    if (event.key === "Escape" && !searchMoveOverlay.hidden) {
-      closeSearchMoveOverlay();
-      return;
+    if (event.key === "Escape") {
+      if (!searchMoveOverlay.hidden) {
+        closeSearchMoveOverlay();
+        return;
+      }
+      if (!historyOverlay.hidden) {
+        closeHistoryOverlay();
+        return;
+      }
     }
 
     if (!isReviewMode() || !state.review || !state.review.tree) return;
@@ -513,11 +614,19 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     state.mode = sr.mode || "idle";
     state.review = sr.review || null;
     state.searchMove = sr.searchMove || null;
+    // Review/history navigation reuses the existing history list instead of rebroadcasting it on every click.
+    if (Object.prototype.hasOwnProperty.call(sr, "history")) {
+      state.history = sr.history || null;
+    }
+    if (!state.active) {
+      state.historyOpen = false;
+    }
     resetReviewNavigation();
 
     refreshButtons();
     renderReviewTree();
     renderSearchMove();
+    renderHistory();
   }
 
   function applyReviewNavigation(review) {
@@ -557,9 +666,15 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   searchMoveOverlay.addEventListener("click", closeSearchMoveOverlay);
   searchMovePanel.addEventListener("click", (event) => event.stopPropagation());
   searchMoveCloseBtn.addEventListener("click", closeSearchMoveOverlay);
+  historyOverlay.addEventListener("click", closeHistoryOverlay);
+  historyPanel.addEventListener("click", (event) => event.stopPropagation());
+  historyCloseBtn.addEventListener("click", closeHistoryOverlay);
 
   srNewBtn.addEventListener("click", () => send({ type: "sr_new" }));
-  srPrevBtn.addEventListener("click", () => send({ type: "sr_prev" }));
+  srHistoryBtn.addEventListener("click", () => {
+    state.historyOpen = true;
+    renderHistory();
+  });
   srHintBtn.addEventListener("click", () => send({ type: "sr_hint" }));
   srStudyFromHereBtn.addEventListener("click", () => send({ type: "sr_study_from_here" }));
   srGuessGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));

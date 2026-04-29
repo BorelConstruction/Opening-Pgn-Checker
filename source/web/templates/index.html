@@ -18,7 +18,7 @@
         <button id="flip">Flip</button>
         <button id="reset">Reset</button>
         <button id="srNew" title="Spaced repetition: new random position">New</button>
-        <button id="srPrev" title="Spaced repetition: go back to the previous position">Previous</button>
+        <button id="srHistory" title="Spaced repetition: browse previous prompts">History</button>
         <button id="srHint" title="Spaced repetition: get a hint">Hint</button>
         <button id="srStudyFromHere" title="Spaced repetition: use the current review position as the study start">Study from here</button>
         <button id="srSearchMove" title="Spaced repetition: search occurrences of the last move">Search move</button>
@@ -87,6 +87,16 @@
           <button id="searchMoveClose" type="button" class="search-close" aria-label="Close search results">Close</button>
         </div>
         <div id="searchMoveResults" class="search-results"></div>
+      </div>
+    </div>
+
+    <div class="search-overlay" id="historyOverlay" hidden>
+      <div class="panel search-panel history-panel" id="historyPanel" role="dialog" aria-modal="true" aria-labelledby="historyTitle">
+        <div class="search-head">
+          <div id="historyTitle" class="search-title">History</div>
+          <button id="historyClose" type="button" class="search-close" aria-label="Close history">Close</button>
+        </div>
+        <div id="historyResults" class="history-results"></div>
       </div>
     </div>
 

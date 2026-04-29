@@ -7,9 +7,8 @@ from typing import Union
 import chess
 from chess.pgn import GameNode as Node
 
-from .boardtools import fen
+from .boardtools import fen, BoardLike, _to_board
 
-BoardLike = Union[Node, chess.Board, str]
 
 CASTLING_RIGHTS = (
     chess.BB_H1,
@@ -36,36 +35,22 @@ def compare_positions(a: BoardLike, b: BoardLike) -> PositionSimilarity:
     board_b = _to_board(b)
 
     piece_distance = _piece_distance(board_a, board_b)
-    castling_distance = _castling_distance(board_a, board_b)
     en_passant_distance = _en_passant_distance(board_a, board_b)
     turn_distance = 0.0 if board_a.turn == board_b.turn else 1.0
 
-    distance = piece_distance + castling_distance + en_passant_distance + turn_distance
+    distance = piece_distance + en_passant_distance + turn_distance
     similarity = 1.0 / (distance + 1.0)
 
     return PositionSimilarity(
         distance=distance,
         similarity=similarity,
         piece_distance=piece_distance,
-        castling_distance=castling_distance,
+        castling_distance=0,
         en_passant_distance=en_passant_distance,
         turn_distance=turn_distance,
         piece_count_a=len(board_a.piece_map()),
         piece_count_b=len(board_b.piece_map()),
     )
-
-
-def _to_board(position: BoardLike) -> chess.Board:
-    if isinstance(position, Node):
-        return position.board()
-    if isinstance(position, chess.Board):
-        return position.copy(stack=False)
-    if isinstance(position, str):
-        normalized_fen = fen(position)
-        if len(normalized_fen.split()) == 4:
-            normalized_fen = f"{normalized_fen} 0 1"
-        return chess.Board(normalized_fen)
-    raise TypeError(f"Unsupported position type: {type(position)!r}")
 
 
 def _piece_distance(a: chess.Board, b: chess.Board) -> float:
@@ -85,6 +70,8 @@ def _piece_distance(a: chess.Board, b: chess.Board) -> float:
     return (raw_square_difference / 2.0) / scale
 
 
+# we don't use this currently. May be totally irrelevant in some positions and does not reflect intuition, 
+# only covers some corner cases
 def _castling_distance(a: chess.Board, b: chess.Board) -> float:
     different_rights = 0
     for rook_square in CASTLING_RIGHTS:

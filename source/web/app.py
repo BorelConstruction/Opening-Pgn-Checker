@@ -218,12 +218,6 @@ async def ws(ws: WebSocket) -> None:
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
-            elif msg_type == "sr_prev":
-                try:
-                    sr_controller.prev_prompt()
-                except Exception as exc:
-                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
-
             elif msg_type == "sr_hint":
                 try:
                     sr_controller.provide_hint()
@@ -239,6 +233,27 @@ async def ws(ws: WebSocket) -> None:
             elif msg_type == "sr_search_move":
                 try:
                     sr_controller.search_nodes_by_move()
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
+            elif msg_type == "sr_history_goto":
+                path = msg.get("path")
+                position_fen = msg.get("fen")
+                san = msg.get("san")
+                if path is not None and (not isinstance(path, list) or not all(isinstance(i, int) for i in path)):
+                    await ws.send_json({"type": "error", "message": "path must be a list of integers"})
+                    continue
+                if position_fen is not None and not isinstance(position_fen, str):
+                    await ws.send_json({"type": "error", "message": "fen must be a string"})
+                    continue
+                if not isinstance(san, str):
+                    await ws.send_json({"type": "error", "message": "san must be a string"})
+                    continue
+                if path is None and position_fen is None:
+                    await ws.send_json({"type": "error", "message": "history target must provide a path or a fen"})
+                    continue
+                try:
+                    sr_controller.goto_history_move(path, position_fen, san)
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 

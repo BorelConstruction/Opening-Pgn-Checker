@@ -9,11 +9,27 @@ from chess import BLACK
 from .traversal import TraversalPolicy, traverse, propagator_post
 from .options import DEBUG_MODE
 
+
+BoardLike = Union[Node, chess.Board, str]
+
+def _to_board(position: BoardLike) -> chess.Board:
+    if isinstance(position, Node):
+        return position.board()
+    if isinstance(position, chess.Board):
+        return position.copy(stack=False)
+    if isinstance(position, str):
+        normalized_fen = fen(position)
+        if len(normalized_fen.split()) == 4:
+            normalized_fen = f"{normalized_fen} 0 1"
+        return chess.Board(normalized_fen)
+    raise TypeError(f"Unsupported position type: {type(position)!r}")
+
+
 def update_comment(node: Node, message: str, debug=False):
     if not debug or (debug and DEBUG_MODE):
         node.comment = (node.comment + " " + message).lstrip()
 
-def fen(board: Union[Node, chess.Board, str]) -> str:
+def fen(board: BoardLike) -> str:
     # ALL FENS SHOULD COME FROM THIS FUNCTION
     # or subtle bugs will arise
     # good enough as long as it's a solo project
@@ -101,8 +117,8 @@ class FirstDifference(NamedTuple):
     # move: chess.Move
     move: str # san
 
-def node_moves(n: Node) -> list[chess.Move]:
-    stack: list[chess.Move] = []
+def node_moves(n: Node) -> list[str]:
+    stack: list[str] = []
     cur = n
     while cur is not None and getattr(cur, "move", None) is not None:
         stack.append(node_san(cur))

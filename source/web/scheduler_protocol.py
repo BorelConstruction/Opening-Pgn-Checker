@@ -124,6 +124,15 @@ class RepetitionController:
         self.current_spec_id = spec_id
         self._prompt = self.engine.start_prompt(spec_id)
 
+    def finalize_current_prompt(self) -> None:
+        prompt_id = self.engine.current_prompt_id()
+        spec_id = self.engine.current_spec_id()
+        feedback = self.engine.summarize()
+
+        self.session_log.record_prompt(prompt_id, spec_id)
+        self.session_log.record_feedback(prompt_id, feedback)
+        self.scheduler.feedback(spec_id, feedback)
+
     def on_user_response(self, response: Any) -> bool:
         """
         Process user response.
@@ -134,12 +143,5 @@ class RepetitionController:
         if not self.engine.is_finished():
             return True
 
-        prompt_id = self.engine.current_prompt_id()
-        spec_id = self.engine.current_spec_id()
-        feedback = self.engine.summarize()
-
-        self.session_log.record_prompt(prompt_id, spec_id)
-        self.session_log.record_feedback(prompt_id, feedback)
-        self.scheduler.feedback(spec_id, feedback)
-
+        self.finalize_current_prompt()
         return False
