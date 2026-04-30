@@ -365,10 +365,16 @@ class RepetitionEngine():
         if self._prompt.node is None:
             return None
 
-        expected_moves = self._session.variations(self._prompt.node)
+        expected_moves = self._prompt_variations(self._prompt.node)
         if not expected_moves:
             return None
         return expected_moves[0]
+
+    def _prompt_variations(self, node: Node) -> list[Node]:
+        # Prompt generation and validation are position-based, so they should
+        # see TT-backed continuations. Review/history path code must keep using
+        # direct PGN children because TT children may belong to a different parent.
+        return self._session.variations(node, use_TT=True)
 
     def _move_performance_for(self, node: Node) -> PromptMovePerformance:
         node_id = id(node)
@@ -408,7 +414,7 @@ class RepetitionEngine():
         )
 
     def _handle_file_guess(self, uci: UCI) -> MoveGrade:
-        expected_moves = self._session.variations(self._prompt.node)
+        expected_moves = self._prompt_variations(self._prompt.node)
         if not expected_moves:
             grade = MoveGrade(MoveCorrectness.UNDEF)
             self._grades.append(grade)
@@ -609,7 +615,7 @@ class RepetitionEngine():
         """
         off_book = off_book or (maybe_off_book and self._rng.random() < self.non_file_move_freq)
 
-        children = self._session.variations(parent)
+        children = self._prompt_variations(parent)
         move_probs = self._moves_for(parent)
         blacklisted_moves = set(self._blacklist_for(parent))
         eligible_moves = {
@@ -722,7 +728,7 @@ class RepetitionEngine():
         if not move_weights:
             return []
         
-        exclude = {m.uci() for m in self._session.variations(node)} # TODO: abstractify this
+        exclude = {m.uci() for m in self._prompt_variations(node)} # TODO: abstractify this
         exclude.update(self._blacklist_for(node))
 
         # Filter candidates: frequency >= 5%, score_rate <= 75%

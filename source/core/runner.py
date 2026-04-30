@@ -309,7 +309,7 @@ class PgnSession:
                 return None
             return self.cache[fen][type]
         if self.cache[fen].has(type):
-            sys.stderr.write(f"Using cache for {fen}\n")
+            # sys.stderr.write(f"Using cache for {fen}\n")
             return self.cache[fen][type]
         result = self._queries[type](fen)
         self.cache[fen][type] = result
@@ -373,13 +373,17 @@ class PgnSession:
             lichessClient = berserk.Client()
         self.opening_explorer = lichessClient.opening_explorer
 
-    def variations(self, node: Node) ->  list[Node]:
-        '''Node.variations consistent with our mainline preferences.'''
+    def variations(self, node: Node, use_TT: bool = False) ->  list[Node]:
+        '''Node.variations consistent with our mainline preferences.
+        If use_TT is true, we will use the Transposition Table to fetch all "childeren".
+        '''
 
         check_alternatives = getattr(self.options, "check_alternatives", True) # TODO: make sure we are consistent around this
         side = getattr(self.options, "side", WHITE)
         mainline_sides = () if check_alternatives else (side,)
-        return mainline_children(mainline_sides)(node)
+        if not use_TT:
+            return mainline_children(mainline_sides)(node)
+        return sum((mainline_children(mainline_sides)(n) for n in self.cache[fen(node)].TTed), [])
 
     def traversal_restrictions(self) -> TraversalPolicy:
         kwargs = {"get_children": self.variations}
