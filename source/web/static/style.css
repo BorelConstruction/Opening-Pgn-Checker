@@ -255,6 +255,14 @@ button:disabled,
   gap: 12px;
 }
 
+.search-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
 .search-title {
   font-weight: 600;
   color: var(--accent);

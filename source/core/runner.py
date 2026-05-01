@@ -526,8 +526,7 @@ class PgnSession:
             self._remove_position_from_TT(subtree_node, position_fen)
 
     def _record_position_in_TT(self, node): # TODO: when do we add?
-        if not self.cache[fen(node)].TTed:
-            self.cache[fen(node)].TTed.append(node) 
+        self.cache[fen(node)].TTed.append(node)
         if len(self.cache[fen(node)].TTed) > 1:
             self.cache[fen(node)].TTed.sort(key=lambda n: count_nodes(n))
 

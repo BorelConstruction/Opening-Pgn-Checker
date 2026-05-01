@@ -20,6 +20,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const searchMoveOverlay = document.getElementById("searchMoveOverlay");
   const searchMovePanel = document.getElementById("searchMovePanel");
   const searchMoveTitle = document.getElementById("searchMoveTitle");
+  const searchMoveBoostBtn = document.getElementById("searchMoveBoost");
   const searchMoveResults = document.getElementById("searchMoveResults");
   const searchMoveCloseBtn = document.getElementById("searchMoveClose");
 
@@ -298,16 +299,19 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       searchMoveOverlay.hidden = true;
       state.searchMoveDismissed = false;
       searchMoveTitle.textContent = "Search move";
+      searchMoveBoostBtn.disabled = true;
       searchMoveResults.innerHTML = "";
       return;
     }
 
     const results = state.searchMove.results || [];
     const query = state.searchMove.query || {};
+    const canBoost = state.searchMove.canBoost !== false;
     const queryMove = typeof query.move === "string" ? query.move : "";
     const count = typeof state.searchMove.count === "number" ? state.searchMove.count : results.length;
 
     searchMoveTitle.textContent = queryMove ? `Search move: ${queryMove} (${count})` : `Search move (${count})`;
+    searchMoveBoostBtn.disabled = !canBoost;
     searchMoveResults.innerHTML = "";
 
     const currentPath = state.review && Array.isArray(state.review.currentPath) ? state.review.currentPath : [];
@@ -665,6 +669,11 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   });
   searchMoveOverlay.addEventListener("click", closeSearchMoveOverlay);
   searchMovePanel.addEventListener("click", (event) => event.stopPropagation());
+  searchMoveBoostBtn.addEventListener("click", () => {
+    if (searchMoveBoostBtn.disabled) return;
+    searchMoveBoostBtn.disabled = true;
+    send({ type: "sr_search_move_show_more_often" });
+  });
   searchMoveCloseBtn.addEventListener("click", closeSearchMoveOverlay);
   historyOverlay.addEventListener("click", closeHistoryOverlay);
   historyPanel.addEventListener("click", (event) => event.stopPropagation());

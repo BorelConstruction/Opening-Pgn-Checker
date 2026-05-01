@@ -236,6 +236,12 @@ async def ws(ws: WebSocket) -> None:
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
+            elif msg_type == "sr_search_move_show_more_often":
+                try:
+                    sr_controller.show_search_move_more_often()
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
             elif msg_type == "sr_history_goto":
                 path = msg.get("path")
                 position_fen = msg.get("fen")

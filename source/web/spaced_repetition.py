@@ -37,6 +37,9 @@ from .scheduler_protocol import *
 
 K = TypeVar("K")
 
+SEARCH_MOVE_BOOST_FACTOR = 2.0
+SEARCH_MOVE_BOOST_MIN_SIMILARITY = 0.8
+
 
 class MoveEntryData(TypedDict):
     prob: float
@@ -294,6 +297,8 @@ class RepetitionEngine():
 
     def _moves_for(self, parent: Node) -> dict[UCI, MoveEntryData]:
         position_data = self._move_probs_for(parent)
+        if fen(parent) == 'rn1qk2r/pbpp2pp/1p2p3/5p2/1bPPn3/2NBPN2/PPQ2PPP/R1B1K2R w KQkq -':
+            self._get_moves_and_freqs(parent)
         move_probs = position_data["moves"]
         if not move_probs:
             move_probs.update(
@@ -772,7 +777,7 @@ class RepetitionEngine():
         return {uci: weights[uci] / total for uci in weights}
     
     
-    def _child_nums(self, node: Node, variations: Iterable[UCI]) -> dict[UCI, int]:
+    def _child_nums(self, node: Node, variations: Iterable[UCI]) -> dict[UCI, float]:
         """
         Return the dict UCI -> weights for each move of the board of 'node' present in 'variations'. A weight 
         is the amount of move occurrences in the DB. (TODO: add masters' moves with higher weight)
@@ -794,7 +799,7 @@ class RepetitionEngine():
     
     def _get_db_moves_and_nums(self, position: Any) -> dict[UCI, float]:
         """
-        Returns a dict mapping UCI strings to move counts (weights).
+        Returns a dict mapping UCI strings to raw DB game counts.
         """
         data = self._session.query(fen(position), "db_lichess")
         if not data or "moves" not in data:
@@ -807,6 +812,44 @@ class RepetitionEngine():
             count = move_data.get("white", 0) + move_data.get("draws", 0) + move_data.get("black", 0)
             weights[uci] = float(count)
         return weights
+
+    def boost_search_move(
+        self,
+        root: Node,
+        results: list[dict[str, Any]],
+        move_uci: UCI,
+        target_position: Any,
+    ) -> int:
+        updated = 0
+        boosted_positions: set[str] = set()
+        for result in results:
+            path = result.get("path")
+            if not isinstance(path, list) or not all(isinstance(i, int) for i in path):
+                raise TypeError("Search move result path must be a list of integers")
+
+            node = node_at_path(root, path, self._session.variations)
+            if compare_positions(target_position, node).similarity < SEARCH_MOVE_BOOST_MIN_SIMILARITY:
+                continue
+
+            parent = node.parent
+            if parent is None:
+                raise RuntimeError("Search move result is missing a parent node")
+
+            parent_fen = fen(parent)
+            if parent_fen in boosted_positions:
+                continue
+            boosted_positions.add(parent_fen)
+
+            move_probs = self._moves_for(parent)
+            if move_uci not in move_probs:
+                raise RuntimeError(f"Missing move data for {move_uci!r} from position {parent_fen!r}")
+
+            move_probs[move_uci]["prob"] *= SEARCH_MOVE_BOOST_FACTOR
+            self._normalize_move_entries(move_probs)
+            updated += 1
+
+        self._move_probs.serialize()
+        return updated
 
     def _move_factor(self, node: Node, base_factor: float) -> float:
         performance = self._move_performance.get(id(node))
@@ -852,12 +895,14 @@ class RepetitionEngine():
             # prefixes back into the queue when the user needed help on a later move.
             sys.stderr.write(f"Updating prob for {move.uci()}: {parent_dict[move.uci()]['prob']:.2f} -> {parent_dict[move.uci()]['prob'] * factor:.2f}\n")
             parent_dict[move.uci()]["prob"] *= factor
+            self._normalize_move_entries(parent_dict)
 
-            total = sum(entry["prob"] for entry in parent_dict.values())
-            if total <= 0.0:
-                continue
-            for entry in parent_dict.values():
-                entry["prob"] /= total
+    def _normalize_move_entries(self, entries: dict[UCI, MoveEntryData]) -> None:
+        total = sum(entry["prob"] for entry in entries.values())
+        if total <= 0.0:
+            return
+        for entry in entries.values():
+            entry["prob"] /= total
 
 
     def _rng_choice(self, probs_dict: dict[K, float] | list[K]) -> K:
@@ -1521,6 +1566,7 @@ class AppController:
         query_move = query_node.move
         if query_move is None:
             return
+        query_move_uci = query_move.uci()
 
         def safe_san(n: Optional[Node] = None) -> str:
             if DEBUG_MODE:
@@ -1575,6 +1621,7 @@ class AppController:
         self._search_move_payload = {
             "query": {
                 "path": list(review_path),
+                "uci": query_move_uci,
                 "move": safe_san(query_node),
                 "prev": safe_san(query_parent),
                 "next": safe_san(query_next),
@@ -1583,7 +1630,28 @@ class AppController:
             },
             "results": results,
             "count": len(results),
+            "canBoost": True,
         }
+        self._broadcast_ui_state()
+
+    def show_search_move_more_often(self) -> None:
+        if not self._search_move_payload.get("canBoost", False):
+            raise RuntimeError("Search move results were already boosted")
+
+        query = self._search_move_payload["query"]
+        move_uci = query["uci"]
+        query_path = query["path"]
+        if not isinstance(move_uci, str) or not move_uci:
+            raise TypeError("Search move query must contain a non-empty UCI string")
+        if not isinstance(query_path, list) or not all(isinstance(i, int) for i in query_path):
+            raise TypeError("Search move query path must be a list of integers")
+        results = self._search_move_payload.get("results")
+        if not isinstance(results, list):
+            raise TypeError("Search move results must be a list")
+
+        target_node = node_at_path(self._session.game, query_path, self._session.variations)
+        self._rep_engine.boost_search_move(self._session.game, results, move_uci, target_node)
+        self._search_move_payload["canBoost"] = False
         self._broadcast_ui_state()
 
     def provide_hint(self) -> None:
