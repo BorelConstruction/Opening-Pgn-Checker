@@ -216,8 +216,10 @@ class EvalProvider(QueryResult):
             move = chess.Move.from_uci(move)
         return EngineEval(payload["eval"], move)
 
-    def top(self, amount: int) -> list[EngineEval]:
+    def top(self, amount: int, cache_only=False) -> list[EngineEval] | None:
         if amount not in self._multipvs:
+            if cache_only:
+                return None
             result = self._session.engine_eval(self._fen, multipv=amount)
             for n in range(1, amount + 1):
                 if n not in self._multipvs:

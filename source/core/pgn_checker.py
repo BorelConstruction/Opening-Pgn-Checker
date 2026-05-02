@@ -410,6 +410,10 @@ class PgnChecker:
             update_comment(child, choice.comment)
 
         best_move_child.nags.update(self.nags_our_move(best_move_child))
+
+        if self.move_is_important(node):
+            self.explain_important_move(best_move_child)
+
         return best_move_child, best_choice
 
     def add_moves_them(self, node: Node) -> list[Node]:
@@ -473,7 +477,31 @@ class PgnChecker:
                     eval_to_nag(pov_eval_to_white_eval(best_choice.eval, self.session.options.side))
                 )
 
-        
+    def explain_important_move(self, node: Node):
+        """
+        Show why the most popular move (it is assumed to exist) is node.parent
+        is not good by providing an engine response.
+        """
+        parent = node.parent
+
+        stats = self.session.query(fen(parent), "db_lichess")
+        popular_move = chess.Move.from_uci(
+            uci_from_lichess_to_pgn(stats["moves"][0]["uci"])
+        )
+
+        popular_child = next(
+            (child for child in parent.variations if child.move == popular_move),
+            None,
+        )
+        if popular_child is None:
+            popular_child = self.session._add_variation(parent, popular_move)
+
+        popular_child.nags.add(chess.pgn.NAG_DUBIOUS_MOVE)
+
+        engine_reply = self.session.q_eval_move(parent, popular_move).move
+        if not any(child.move == engine_reply for child in popular_child.variations):
+            self.session._add_variation(popular_child, engine_reply, to_main=True)
+
     def set_question_marks(self, node: Node, eval_query="eval"):
         pp = node.parent.parent
         if pp is None:
@@ -490,10 +518,11 @@ class PgnChecker:
 
     def move_is_important(self, node: Node):
         p = node.parent
+        if not (top_lines := self.session.query(fen(p), "eval").top(2, cache_only=True)):
+            return None        
         freq = self.session.move_freq(node)
         if freq == -1:
-            return False # can't decide without db
-        top_lines = self.session.query(fen(p), "eval").top(2)
+            return None # can't decide without db
         if len(top_lines) < 2:
             return False
         eval1 = top_lines[0].eval
@@ -681,7 +710,7 @@ def only_move_criterion(eval1: float, eval2: float):
 
 
 def gap_criterion(move_data: dict, move_freq: float, freq_threshold: float, min_games: int = 0, pov: chess.Color = WHITE) -> int:
-    if score_rate(move_data, pov) > 0.75: # _datawe assume files don't need to consider moves that lose in practice
+    if score_rate(move_data, pov) > 0.75: # we assume files don't need to consider moves that lose in practice
         return 0
     if total_games(move_data) < min_games or total_games(move_data) < min_games:
         return 0
