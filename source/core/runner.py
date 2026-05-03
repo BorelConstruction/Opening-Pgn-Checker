@@ -405,7 +405,7 @@ class PgnSession:
 
         tp = self.traversal_restrictions()
         if get_children:
-            tp.get_children = get_children
+            tp = tp._replace(get_children=get_children)
 
         return traverse(node, visit, post, reasons_to_stop, tp, self.progress)
     
