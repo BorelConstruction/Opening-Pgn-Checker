@@ -10,9 +10,9 @@ from .traversal import TraversalPolicy, traverse, propagator_post
 from .options import DEBUG_MODE
 
 
-BoardLike = Union[Node, chess.Board, str]
+BoardLike = Node | chess.Board | str
 
-def _to_board(position: BoardLike) -> chess.Board:
+def to_board(position: BoardLike) -> chess.Board:
     if isinstance(position, Node):
         return position.board()
     if isinstance(position, chess.Board):

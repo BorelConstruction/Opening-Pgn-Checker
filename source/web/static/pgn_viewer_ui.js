@@ -1,6 +1,8 @@
 // import { log } from "./board.js";
 
 export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentFen }) {
+  const MIN_STUDY_START_RANGE = 1;
+  const MAX_STUDY_START_RANGE = 30;
   // log("Creating PGN Viewer UI");
   const srNewBtn = document.getElementById("srNew");
   const srHistoryBtn = document.getElementById("srHistory");
@@ -38,6 +40,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     searchMoveDismissed: false,
     history: null,
     historyOpen: false,
+    startRange: null,
   };
 
   const reviewNav = {
@@ -376,6 +379,30 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     searchMoveOverlay.hidden = state.searchMoveDismissed;
   }
 
+  function promptStudyStartRange() {
+    const defaultValue = Number.isInteger(state.startRange) ? String(state.startRange) : "5";
+
+    while (true) {
+      // Reprompt until the user gives a valid integer or cancels so the server only receives usable values.
+      const rawValue = prompt(
+        "How far from this position should prompts start?",
+        defaultValue,
+      );
+      if (rawValue === null) return null;
+
+      const parsedValue = Number(rawValue.trim());
+      if (
+        Number.isInteger(parsedValue) &&
+        parsedValue >= MIN_STUDY_START_RANGE &&
+        parsedValue <= MAX_STUDY_START_RANGE
+      ) {
+        return parsedValue;
+      }
+
+      alert(`Enter an integer from ${MIN_STUDY_START_RANGE} to ${MAX_STUDY_START_RANGE}.`);
+    }
+  }
+
   function findNodeAtPath(tree, path) {
     let node = tree;
     for (const idx of path) {
@@ -618,6 +645,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     state.mode = sr.mode || "idle";
     state.review = sr.review || null;
     state.searchMove = sr.searchMove || null;
+    state.startRange = Number.isInteger(sr.startRange) ? sr.startRange : null;
     // Review/history navigation reuses the existing history list instead of rebroadcasting it on every click.
     if (Object.prototype.hasOwnProperty.call(sr, "history")) {
       state.history = sr.history || null;
@@ -685,7 +713,11 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     renderHistory();
   });
   srHintBtn.addEventListener("click", () => send({ type: "sr_hint" }));
-  srStudyFromHereBtn.addEventListener("click", () => send({ type: "sr_study_from_here" }));
+  srStudyFromHereBtn.addEventListener("click", () => {
+    const startRange = promptStudyStartRange();
+    if (startRange === null) return;
+    send({ type: "sr_study_from_here", start_range: startRange });
+  });
   srGuessGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
   srGuessFinishBtn.addEventListener("click", () => send({ type: "sr_finish_prompt" }));
   srGuessBlacklistBtn.addEventListener("click", () => send({ type: "sr_blacklist_prompt" }));

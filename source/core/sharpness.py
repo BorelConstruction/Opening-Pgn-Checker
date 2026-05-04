@@ -7,26 +7,20 @@ import os
 import re
 from typing import Optional
 
+import chess
+import chess.polyglot
 from chess.pgn import GameNode as Node
 
-from .options import CoreOptions
+from .boardtools import fen, BoardLike, to_board
+from .options import RepertoireOptions
 from .runner import PgnSession
 
 
-DEFAULT_CAPTURE_WINDOW_FULL_MOVES = 3
+DEFAULT_CAPTURE_WINDOW_FULL_MOVES = 2
 
 
 @dataclass
-class SharpnessOptions(CoreOptions):
-    input_pgn: str = field(
-        default="",
-        metadata={
-            "label": "Input PGN",
-            "ui_hint": "file_path",
-            "file_filter": "PGN files (*.pgn)",
-            "initial_dir": "input pgns",
-        },
-    )
+class SharpnessOptions(RepertoireOptions):
     output_pgn: str = field(
         default="",
         metadata={"label": "Output PGN Filename", "ui_hint": "save_file"},
@@ -35,13 +29,6 @@ class SharpnessOptions(CoreOptions):
         default=DEFAULT_CAPTURE_WINDOW_FULL_MOVES,
         metadata={"label": "Capture Window (Full Moves)", "min": 1, "max": 20},
     )
-
-    def validate(self) -> None:
-        super().validate()
-        if not self.input_pgn:
-            raise ValueError("No input PGN selected")
-        if self.full_moves <= 0:
-            raise ValueError("full_moves must be positive")
 
 
 def default_sharpness_cache_path(options: SharpnessOptions) -> str:
@@ -58,14 +45,57 @@ def default_sharpness_output_path(input_pgn: str) -> str:
 
 
 def sharpness_comment_pattern(full_moves: int) -> re.Pattern[str]:
-    return re.compile(rf"Sharpness\(captures/{full_moves}fm\):\s*\d+")
+    return re.compile(rf"Sharpness:\s*\d+")
 
 
 def set_sharpness_comment(node: Node, value: int, *, full_moves: int) -> None:
-    metric = f"Sharpness(captures/{full_moves}fm): {value}"
+    metric = f"Sharpness: {value}"
     existing_comment = node.comment or ""
     cleaned_comment = sharpness_comment_pattern(full_moves).sub("", existing_comment).strip()
     node.comment = f"{cleaned_comment} {metric}".strip()
+
+
+def sharpness(
+    position: BoardLike,
+    *,
+    full_moves: int = DEFAULT_CAPTURE_WINDOW_FULL_MOVES,
+    cache: Optional[dict[tuple[int, int], int]] = None,
+) -> int:
+    memo = {} if cache is None else cache
+    board = to_board(position)
+    return _sharpness_from_board(board, remaining_plies=2 * full_moves, cache=memo)
+
+
+def _sharpness_from_board(
+    board: chess.Board,
+    *,
+    remaining_plies: int,
+    cache: dict[tuple[int, int], int],
+) -> int:
+    if remaining_plies <= 0 or board.is_game_over():
+        return 0
+
+    if remaining_plies == 1:
+        return sum(1 for _ in board.generate_legal_captures())
+
+    cache_key = (chess.polyglot.zobrist_hash(board), remaining_plies)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    total = 0
+    for move in board.legal_moves:
+        total += int(board.is_capture(move))
+        board.push(move)
+        total += _sharpness_from_board(
+            board,
+            remaining_plies=remaining_plies - 1,
+            cache=cache,
+        )
+        board.pop()
+
+    cache[cache_key] = total
+    return total
 
 
 def annotate_capture_sharpness(
@@ -74,38 +104,18 @@ def annotate_capture_sharpness(
     *,
     full_moves: int = DEFAULT_CAPTURE_WINDOW_FULL_MOVES,
 ) -> int:
-    """
-    Count capture moves already present in the PGN tree within the next N full moves.
-    """
-    if full_moves <= 0:
-        raise ValueError("full_moves must be positive")
-
-    depth_plies = 2 * full_moves
     nodes_annotated = 0
+    cache: dict[tuple[int, int], int] = {}
 
-    def post(node: Node, child_results: list[tuple[int, ...]], _visit_result) -> tuple[int, ...]:
+    def visit(node: Node) -> None:
         nonlocal nodes_annotated
-
-        capture_counts = [0] * depth_plies
-        board = node.board()
-
-        for child, child_counts in zip(node.variations, child_results, strict=True):
-            if child.move is None:
-                raise ValueError("Expected every non-root node to have a move")
-
-            if board.is_capture(child.move):
-                capture_counts[0] += 1
-
-            for depth in range(1, depth_plies):
-                capture_counts[depth] += child_counts[depth - 1]
-
-        set_sharpness_comment(node, sum(capture_counts), full_moves=full_moves)
+        value = sharpness(node, full_moves=full_moves, cache=cache)
+        set_sharpness_comment(node, value, full_moves=full_moves)
         nodes_annotated += 1
-        return tuple(capture_counts)
 
     session.report_message(f"Annotating sharpness over the next {full_moves} full moves...")
     session.progress.reset()
-    session.traverse(root, post=post, get_children=lambda node: node.variations)
+    session.traverse(root, visit=visit, get_children=lambda node: node.variations)
     return nodes_annotated
 
 

@@ -87,7 +87,7 @@ class RepertoireOptions(CoreOptions):
         default=6,
         metadata={
             "label": "Start on Move",
-            "min": 1,
+            "min": 0,
             "max": 60,
             "ui_group": "analysis_move_range",
             "ui_group_order": 1,

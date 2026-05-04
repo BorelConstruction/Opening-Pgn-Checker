@@ -7,7 +7,7 @@ from typing import Union
 import chess
 from chess.pgn import GameNode as Node
 
-from .boardtools import fen, BoardLike, _to_board
+from .boardtools import fen, BoardLike, to_board
 
 
 CASTLING_RIGHTS = (
@@ -31,8 +31,8 @@ class PositionSimilarity:
 
 
 def compare_positions(a: BoardLike, b: BoardLike) -> PositionSimilarity:
-    board_a = _to_board(a)
-    board_b = _to_board(b)
+    board_a = to_board(a)
+    board_b = to_board(b)
 
     piece_distance = _piece_distance(board_a, board_b)
     en_passant_distance = _en_passant_distance(board_a, board_b)

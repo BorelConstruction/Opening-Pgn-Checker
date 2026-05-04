@@ -14,7 +14,7 @@ from typing import Any, Iterable, Optional, TypeVar, TypedDict, Union
 import chess
 import chess.pgn
 from chess.pgn import GameNode as Node
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from source.core.caching import CacheDict
 from source.core.position_similarity import compare_positions
@@ -26,7 +26,7 @@ from source.web.scheduler_implem import NaiveScheduler
 # from source.web.app import BoardHub
 
 from ..core.boardtools import fen, node_moves, node_san, uci_from_lichess_to_pgn
-from ..core.options import SpacedRepetitionOptions, DEBUG_MODE
+from ..core.options import SpacedRepetitionOptions, DEBUG_MODE, save_settings
 from ..core.repertoire import RepertoireSession, default_repertoire_cache_path
 from ..core.runner import quick_eval_lines
 from .pgn_export import export_pgn_subtree
@@ -39,6 +39,8 @@ K = TypeVar("K")
 
 SEARCH_MOVE_BOOST_FACTOR = 2.0
 SEARCH_MOVE_BOOST_MIN_SIMILARITY = 0.8
+MIN_STUDY_START_RANGE = 1
+MAX_STUDY_START_RANGE = 30
 
 
 class MoveEntryData(TypedDict):
@@ -195,9 +197,9 @@ class RepetitionEngine():
         self._move_probs.serialize()
 
     def set_start(self, root: Optional[Node] = None, start_range: Optional[int] = None) -> None:
-        if root:
+        if root is not None:
             self._root = root
-        if start_range:
+        if start_range is not None:
             self.start_range = start_range
 
     def start_prompt(self, spec_id: SpecId) -> None:
@@ -297,8 +299,6 @@ class RepetitionEngine():
 
     def _moves_for(self, parent: Node) -> dict[UCI, MoveEntryData]:
         position_data = self._move_probs_for(parent)
-        if fen(parent) == 'rn1qk2r/pbpp2pp/1p2p3/5p2/1bPPn3/2NBPN2/PPQ2PPP/R1B1K2R w KQkq -':
-            self._get_moves_and_freqs(parent)
         move_probs = position_data["moves"]
         if not move_probs:
             move_probs.update(
@@ -1273,6 +1273,8 @@ class AppController:
             "review": self._review_payload if self.active and self._mode == "review" else None,
             "searchMove": self._search_move_payload if self.active and self._mode == "review" else None,
         }
+        if hasattr(self, "_cfg"):
+            state["startRange"] = self._cfg.start_range
         if include_history and self.active:
             state["history"] = self._history_payload()
         return state
@@ -1741,17 +1743,35 @@ class AppController:
         if stats_task is not None:
             self._queue_review_db_stats(stats_task)
 
-    def study_from_here(self) -> None:
+    def study_from_here(self, start_range: int) -> None:
         if self._mode != "review":
             raise RuntimeError("Study root can only be changed in review mode")
+        if isinstance(start_range, bool) or not isinstance(start_range, int):
+            raise TypeError("start_range must be an integer")
+        if start_range < MIN_STUDY_START_RANGE or start_range > MAX_STUDY_START_RANGE:
+            raise ValueError(
+                f"start_range must be between {MIN_STUDY_START_RANGE} and {MAX_STUDY_START_RANGE}"
+            )
 
         node = node_at_path(self._session.game, list(self._review_path), self._session.variations)
         position_fen = fen(node)
+        save_settings(
+            replace(self._cfg, starting_fen=position_fen, start_range=start_range),
+            SpacedRepetitionOptions,
+        )
         self._cfg.starting_fen = position_fen
+        self._cfg.start_range = start_range
         self._session.options.starting_fen = position_fen
+        self._session.options.start_range = start_range
         self._session.starting_node = node
-        self._rep_engine.set_start(root=node)
-        self._enter_review_mode(node=node, message="Study root updated. Click New to practice from here.")
+        self._rep_engine.set_start(root=node, start_range=start_range)
+        self._enter_review_mode(
+            node=node,
+            message=(
+                f"Study root updated. Click New to practice from here within "
+                f"{start_range} {'move' if start_range == 1 else 'moves'}."
+            ),
+        )
 
     def _show_history_board(self, position_fen: str, message: str) -> None:
         self._mode = "idle"
