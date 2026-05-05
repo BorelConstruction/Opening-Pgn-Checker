@@ -1,8 +1,8 @@
 // import { log } from "./board.js";
 
 export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentFen }) {
-  const MIN_STUDY_START_RANGE = 1;
-  const MAX_STUDY_START_RANGE = 30;
+  const MIN_STUDY_START_RANGE = 0;
+  const MAX_STUDY_START_RANGE = 50;
   // log("Creating PGN Viewer UI");
   const srNewBtn = document.getElementById("srNew");
   const srHistoryBtn = document.getElementById("srHistory");
@@ -18,6 +18,8 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srGuessBlacklistBtn = document.getElementById("srGuessBlacklist");
   const srGuessTooEasyBtn = document.getElementById("srGuessTooEasy");
   const treeContainer = document.getElementById("variation-tree");
+  const commentPanel = document.getElementById("commentPanel");
+  const commentText = document.getElementById("commentText");
 
   const searchMoveOverlay = document.getElementById("searchMoveOverlay");
   const searchMovePanel = document.getElementById("searchMovePanel");
@@ -385,7 +387,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     while (true) {
       // Reprompt until the user gives a valid integer or cancels so the server only receives usable values.
       const rawValue = prompt(
-        "How far from this position should prompts start?",
+        "How far should prompts start? Enter maximum number of moves from this position.",
         defaultValue,
       );
       if (rawValue === null) return null;
@@ -640,6 +642,28 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     treeContainer.innerHTML = "";
   }
 
+  function renderReviewComment() {
+    if (!isReviewMode()) {
+      commentPanel.hidden = true;
+      commentText.textContent = "";
+      commentText.classList.remove("empty");
+      return;
+    }
+
+    const ctx = getReviewContext();
+    if (!ctx) {
+      commentPanel.hidden = true;
+      commentText.textContent = "";
+      commentText.classList.remove("empty");
+      return;
+    }
+
+    const comment = ctx.node && typeof ctx.node.comment === "string" ? ctx.node.comment.trim() : "";
+    commentPanel.hidden = false;
+    commentText.textContent = comment || "No PGN comment for this node.";
+    commentText.classList.toggle("empty", !comment);
+  }
+
   function applySrState(sr) {
     state.active = !!sr.active;
     state.mode = sr.mode || "idle";
@@ -657,6 +681,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
 
     refreshButtons();
     renderReviewTree();
+    renderReviewComment();
     renderSearchMove();
     renderHistory();
   }
@@ -678,6 +703,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
 
     refreshButtons();
     renderReviewTree();
+    renderReviewComment();
     renderSearchMove();
     acknowledgeReviewNavigation(state.review.currentPath);
   }

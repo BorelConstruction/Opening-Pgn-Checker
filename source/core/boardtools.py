@@ -12,6 +12,16 @@ from .options import DEBUG_MODE
 
 BoardLike = Node | chess.Board | str
 
+_LEGACY_FIGURINE_TRANSLATION = str.maketrans(
+    {
+        "\ue024": "♔",
+        "\ue025": "♕",
+        "\ue026": "♖",
+        "\ue027": "♗",
+        "\ue028": "♘",
+    }
+)
+
 def to_board(position: BoardLike) -> chess.Board:
     if isinstance(position, Node):
         return position.board()
@@ -23,6 +33,10 @@ def to_board(position: BoardLike) -> chess.Board:
             normalized_fen = f"{normalized_fen} 0 1"
         return chess.Board(normalized_fen)
     raise TypeError(f"Unsupported position type: {type(position)!r}")
+
+
+def normalize_figurine(text: str) -> str:
+    return text.translate(_LEGACY_FIGURINE_TRANSLATION)
 
 
 def update_comment(node: Node, message: str, debug=False):

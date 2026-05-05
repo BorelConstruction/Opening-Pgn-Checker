@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .board.contracts import Arrow, Circle
 from .board.session import BoardSession
-from .spaced_repetition import AppController, MAX_STUDY_START_RANGE, MIN_STUDY_START_RANGE
+from .spaced_repetition import AppController
 
 
 def _format_exception_detail() -> str:
@@ -228,17 +228,6 @@ async def ws(ws: WebSocket) -> None:
                 start_range = msg.get("start_range")
                 if isinstance(start_range, bool) or not isinstance(start_range, int):
                     await ws.send_json({"type": "error", "message": "start_range must be an integer"})
-                    continue
-                if start_range < MIN_STUDY_START_RANGE or start_range > MAX_STUDY_START_RANGE:
-                    await ws.send_json(
-                        {
-                            "type": "error",
-                            "message": (
-                                f"start_range must be between "
-                                f"{MIN_STUDY_START_RANGE} and {MAX_STUDY_START_RANGE}"
-                            ),
-                        }
-                    )
                     continue
                 try:
                     sr_controller.study_from_here(start_range)

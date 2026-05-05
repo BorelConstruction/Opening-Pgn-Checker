@@ -5,6 +5,7 @@ from typing import Any, Callable
 from chess.pgn import GameNode as Node
 
 from ..core.boardtools import node_san, fen
+from .board.pgn_annotations import comment_text
 
 
 def build_variation_tree(get_children: Callable[[Node], list[Node]], root: Node, *, end_ply: int) -> dict[str, Any]:
@@ -30,6 +31,7 @@ def build_variation_tree(get_children: Callable[[Node], list[Node]], root: Node,
         return {
             "path": path,
             "ply": node.ply(),
+            "comment": _node_comment(node),
             "children": children,
         }
 
@@ -54,10 +56,18 @@ def build_variation_tree(get_children: Callable[[Node], list[Node]], root: Node,
             "color": color,
             "san": node_san(node),
             "uci": node.move.uci() if node.move is not None else "",
+            "comment": _node_comment(node),
             "children": children,
         }
 
     return build_position(root, [])
+
+
+def _node_comment(node: Node) -> str:
+    return comment_text(
+        getattr(node, "starting_comment", "") or "",
+        getattr(node, "comment", "") or "",
+    )
 
 
 def node_at_path(

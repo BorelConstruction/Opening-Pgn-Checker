@@ -39,8 +39,6 @@ K = TypeVar("K")
 
 SEARCH_MOVE_BOOST_FACTOR = 2.0
 SEARCH_MOVE_BOOST_MIN_SIMILARITY = 0.8
-MIN_STUDY_START_RANGE = 1
-MAX_STUDY_START_RANGE = 30
 
 
 class MoveEntryData(TypedDict):
@@ -128,7 +126,7 @@ class RepetitionEngine():
 
         # starting point for prompt generation
         self._root = root
-        # max of how far we move from the root
+        # max of how far we move from the root, in MOVES
         self.start_range = start_range
 
         self._move_probs = CacheDict(
@@ -349,8 +347,11 @@ class RepetitionEngine():
             return self._prompt
 
         grade = self._handle_file_guess(uci)
-        if grade.correctness != MoveCorrectness.CORRECT:
+        if grade.correctness == MoveCorrectness.INCORRECT:
             self._prompt.message = grade.msg
+            return self._prompt
+        if grade.correctness == MoveCorrectness.UNDEF:
+            self.finish_prompt()
             return self._prompt
 
         chosen_node = self._session.child_for_move(
@@ -475,7 +476,7 @@ class RepetitionEngine():
         eval_gap = expected_eval - move_eval
         msg = f"Off-file {san}. Your move: eval {move_eval:+.2f} after {reply_to_user}."
         if uci == best_reply.uci() or eval_gap <= 0.2 or move_eval > 0.8*expected_eval:
-            msg += f"Best was {best_reply_san} with evaluation {expected_eval:+.2f}. Good job!"
+            msg += f" Best was {best_reply_san} with evaluation {expected_eval:+.2f}. Good job!"
             grade = MoveCorrectness.CORRECT
         else:
             msg += (
@@ -483,6 +484,7 @@ class RepetitionEngine():
                 "Try again."
             )
             grade = MoveCorrectness.INCORRECT
+        msg = msg.strip()
 
         grade = MoveGrade(
             grade,
@@ -561,7 +563,7 @@ class RepetitionEngine():
 
 
     def _choose_prompt_line_length(self) -> int:
-        return self._rng.randint(1, self.start_range)+1
+        return self._rng.randint(0, 2*self.start_range)+1 # converted to plies
 
     def _choose_prompt(self, node: Node) -> bool:
         """Simulate walking through a randomly chosen line. 
@@ -640,6 +642,7 @@ class RepetitionEngine():
         # a tiny optimization
         if parent.turn() == self._session.options.side and not self._session.options.check_alternatives:
             return children[0], "our move"
+        # TODO: if check_alternatives
 
         if off_book:
             # Try to find an off-book move with probability non_file_move_freq
@@ -1671,7 +1674,7 @@ class AppController:
         
         continue_prompt = self._rep_controller.on_user_response(uci)
         if not continue_prompt:
-            self._enter_review_mode(node=self._prompt.node)
+            self._enter_review_mode(node=self._prompt.node, message=self._prompt.message)
         else:
             self.show_prompt()
 
@@ -1746,12 +1749,6 @@ class AppController:
     def study_from_here(self, start_range: int) -> None:
         if self._mode != "review":
             raise RuntimeError("Study root can only be changed in review mode")
-        if isinstance(start_range, bool) or not isinstance(start_range, int):
-            raise TypeError("start_range must be an integer")
-        if start_range < MIN_STUDY_START_RANGE or start_range > MAX_STUDY_START_RANGE:
-            raise ValueError(
-                f"start_range must be between {MIN_STUDY_START_RANGE} and {MAX_STUDY_START_RANGE}"
-            )
 
         node = node_at_path(self._session.game, list(self._review_path), self._session.variations)
         position_fen = fen(node)
