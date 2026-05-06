@@ -1,10 +1,12 @@
 
 
-from collections import namedtuple
+from collections import defaultdict, namedtuple
 from collections.abc import Callable
 
 import chess
 from chess.pgn import GameNode as Node
+
+from source.core.boardtools import fen
 
 # from source.core.runner import Progress
 
@@ -32,10 +34,20 @@ def traverse(node: Node,
                 post: Callable = None,
                 reasons_to_stop: Callable = None,
                 tp: TraversalPolicy = None,
-                progress: 'Progress' = None):
+                progress: 'Progress' = None,
+                _seen=None):
     if tp is None:
         tp = TraversalPolicy()
     start_ply, end_ply, get_children = tp
+
+    if _seen is None:
+        _seen = set()
+
+    # avoid infinite loops in case of cycles in the graph (e.g. due to transposition teleporting)
+    key = id(node)
+    if key in _seen:
+        return
+    _seen.add(key)
 
     child_results = []
 
@@ -57,7 +69,7 @@ def traverse(node: Node,
 
     for n in variations:
         child_results.append(traverse(n, visit, post,
-            reasons_to_stop, tp, progress))
+            reasons_to_stop, tp, progress, _seen))
 
     if post:
         if start_ply <= node.ply() <= end_ply:
