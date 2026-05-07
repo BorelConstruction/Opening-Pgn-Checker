@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from copy import deepcopy
 from enum import Enum
 import json
@@ -143,6 +144,11 @@ class RepetitionEngine():
         self._current_hints: Optional[Hints] = None
         self._temporary_nodes: list[Node] = []
 
+        self._prompt_dict_global = self.make_prompt_dict_global()
+        self._prompt_dict_relative = self.make_prompt_dict_relative()
+        
+        t = sorted(self._prompt_dict_relative.keys(), key=lambda k: self._prompt_dict_relative[k], reverse=True)
+
     def summarize(self) -> Feedback:
         if not self._grades:
             return Feedback(0.0)
@@ -164,6 +170,46 @@ class RepetitionEngine():
         if isinstance(best_move, chess.Move):
             return best_move.uci()
         return best_move
+    
+    def make_prompt_dict_global(self, node: Node | None = None) -> dict[tuple[str], float]:
+        if self._session.options.check_alternatives:
+            raise ValueError("Global prompt choice if currently only available for mainline choices.")
+        
+        prompt_dict_global = defaultdict(float)
+        prompt_dict_global[()] = 1.0
+        path_from_root = []
+        def visit(n: Node):
+            nonlocal path_from_root
+            try:
+                path_from_root.append(n.move.uci())
+            except Exception:
+                pass
+            if n.turn() == self._session.options.side:
+                return
+            chilren_ucis_weigths = self._opponent_moves_for(n)
+            for child in self._session.variations(n):
+                if child.move.uci() not in chilren_ucis_weigths:
+                    continue
+                path_from_root.append(child.move.uci())
+                prompt_dict_global[tuple(path_from_root)] = \
+                    prompt_dict_global[tuple(path_from_root[:-2])]*chilren_ucis_weigths[child.move.uci()]['prob']
+                path_from_root.pop()
+                
+        
+        self._session.traverse(node, visit=visit, post=lambda n, p, v: path_from_root.pop())
+        return prompt_dict_global
+
+    def make_prompt_dict_relative(self):
+        root_path = node_moves(self._root, san=False)
+        key = tuple(root_path) if self._root.turn() == self._session.options.side else tuple(root_path[:-1])
+        root_prob = self._prompt_dict_global[key]
+
+        if root_prob < 10**-6:
+            return self.make_prompt_dict_global(self._root)
+    
+        l = len(root_path)
+        return {k[l:]: v/root_prob for k, v in self._prompt_dict_global.items() 
+                                      if k[:l] == tuple(root_path)}
 
     def get_hint_circles(self) -> list[Circle]:
         if self._prompt.node is None:
@@ -295,7 +341,7 @@ class RepetitionEngine():
     def _move_probs_for(self, parent: Node) -> PositionMoveData:
         return self._move_probs[fen(parent)]
 
-    def _moves_for(self, parent: Node) -> dict[UCI, MoveEntryData]:
+    def _opponent_moves_for(self, parent: Node) -> dict[UCI, MoveEntryData]:
         position_data = self._move_probs_for(parent)
         move_probs = position_data["moves"]
         if not move_probs:
@@ -311,7 +357,7 @@ class RepetitionEngine():
         return self._move_probs_for(parent)["blacklist"]
 
     def _move_entry(self, parent: Node, uci: UCI) -> MoveEntryData:
-        move_probs = self._moves_for(parent)
+        move_probs = self._opponent_moves_for(parent)
         if uci not in move_probs:
             raise RuntimeError(f"Missing move data for {uci!r} from position {fen(parent)!r}")
 
@@ -623,7 +669,7 @@ class RepetitionEngine():
         off_book = off_book or (maybe_off_book and self._rng.random() < self.non_file_move_freq)
 
         children = self._prompt_variations(parent)
-        move_probs = self._moves_for(parent)
+        move_probs = self._opponent_moves_for(parent)
         blacklisted_moves = set(self._blacklist_for(parent))
         eligible_moves = {
             uci: entry
@@ -804,7 +850,11 @@ class RepetitionEngine():
         """
         Returns a dict mapping UCI strings to raw DB game counts.
         """
-        data = self._session.query(fen(position), "db_lichess")
+        data = None
+        try:
+            data = self._session.query(fen(position), "db_lichess")
+        except Exception:
+            pass
         if not data or "moves" not in data:
             sys.stderr.write(f"No DB moves for {position}\n")
             return {}
@@ -843,7 +893,7 @@ class RepetitionEngine():
                 continue
             boosted_positions.add(parent_fen)
 
-            move_probs = self._moves_for(parent)
+            move_probs = self._opponent_moves_for(parent)
             if move_uci not in move_probs:
                 raise RuntimeError(f"Missing move data for {move_uci!r} from position {parent_fen!r}")
 
@@ -890,7 +940,7 @@ class RepetitionEngine():
             child = node
             move = child.move
             node = child.parent
-            parent_dict = self._moves_for(node)
+            parent_dict = self._opponent_moves_for(node)
             if move.uci() not in parent_dict:
                 continue
             factor = self._move_factor(child, base_factor)
@@ -1543,8 +1593,8 @@ class AppController:
             if not node.turn() == self._session.options.side:
                 self._session.query(fen(node), "db_lichess")
 
-        for game in self._games:
-            self._session.traverse(game, visit=visit)
+        
+        self._session.traverse(self._session.game, visit=visit)
 
 
     def search_nodes_by_move(self):
@@ -1759,7 +1809,6 @@ class AppController:
         self._cfg.starting_fen = position_fen
         self._cfg.start_range = start_range
         self._session.options.starting_fen = position_fen
-        self._session.options.start_range = start_range
         self._session.starting_node = node
         self._rep_engine.set_start(root=node, start_range=start_range)
         self._enter_review_mode(

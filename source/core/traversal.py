@@ -2,14 +2,15 @@
 
 from collections import defaultdict, namedtuple
 from collections.abc import Callable
+from typing import Optional, TypeVar
 
 import chess
 from chess.pgn import GameNode as Node
 
-from source.core.boardtools import fen
-
 # from source.core.runner import Progress
 
+VisitResultT = TypeVar("VisitResultT")
+PostResultT = TypeVar("PostResultT")
 
 def default_children(node):
     return node.variations
@@ -29,10 +30,10 @@ def propagator_post(node, child_results, v_res):
 TraversalPolicy = namedtuple("TraversalPolicy", ["start_ply", "end_ply", "get_children"], 
                              defaults=(0, 1000, default_children))
 
-def traverse(node: Node,
-                visit: Callable = None,
-                post: Callable = None,
-                reasons_to_stop: Callable = None,
+def traverse(node: Optional[Node] = None,
+                visit: Optional[Callable[[Node], VisitResultT]] = None,
+                post: Optional[Callable[[Node, list, VisitResultT], PostResultT]] = None,
+                reasons_to_stop: Optional[Callable[[Node, VisitResultT], bool]] = None,    
                 tp: TraversalPolicy = None,
                 progress: 'Progress' = None,
                 _seen=None):

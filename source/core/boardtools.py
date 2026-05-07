@@ -131,11 +131,11 @@ class FirstDifference(NamedTuple):
     # move: chess.Move
     move: str # san
 
-def node_moves(n: Node) -> list[str]:
+def node_moves(n: Node, san: bool = True) -> list[str]:
     stack: list[str] = []
     cur = n
     while cur is not None and getattr(cur, "move", None) is not None:
-        stack.append(node_san(cur))
+        stack.append(node_san(cur) if san else cur.move.uci())
         cur = cur.parent
     stack.reverse()
     return stack

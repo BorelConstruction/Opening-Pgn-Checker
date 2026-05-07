@@ -395,13 +395,15 @@ class PgnSession:
 
         return TraversalPolicy(**kwargs)
 
-    def traverse(self, node: Node,
+    def traverse(self, node: Optional[Node] = None,
                     visit: Optional[Callable[[Node], VisitResultT]] = None,
                     post: Optional[Callable[[Node, list, VisitResultT], PostResultT]] = None,
                     reasons_to_stop: Optional[Callable[[Node, VisitResultT], bool]] = None,
                     get_children: Optional[Callable[[Node], list[Node]]] = None):
         '''Traverse the subtree rooted at node
         in a way consistent with self.options'''
+
+        node = node or self.game
 
         tp = self.traversal_restrictions()
         if get_children:

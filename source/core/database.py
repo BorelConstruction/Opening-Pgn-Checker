@@ -26,7 +26,7 @@ def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attemp
                 games = opening_explorer.get_masters_games(*args, **kwargs)
             return games
 
-        except berserk.exceptions.ResponseError as e:
+        except berserk.exceptions.ResponseError as e: # TODO: ApiError
             status = getattr(getattr(e, "response", None), "status_code", None)
             if status == 429:
                 # exponential backoff
