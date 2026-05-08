@@ -110,8 +110,14 @@ button:disabled,
 
 .tree-panel {
   max-height: 400px;
-  overflow-y: auto;
+  overflow: hidden;
   display: none;
+}
+
+.tree-panel.review-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .guess-actions {
@@ -433,9 +439,52 @@ button:disabled,
 }
 
 .variation-tree {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
   font-family: monospace;
   font-size: 14px;
   line-height: 1.4;
+}
+
+.review-next-moves-panel[hidden] {
+  display: none;
+}
+
+.review-next-moves-panel {
+  display: grid;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.review-next-moves-title {
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.review-next-moves-list {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 1px;
+}
+
+.review-next-move {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-family: monospace;
+}
+
+.review-next-moves-empty {
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .tree-node {
@@ -564,7 +613,7 @@ button:disabled,
 
 .commentpanel .rowhead {
   grid-template-columns: 1fr;
-  margin-bottom: 8px;
+  margin-bottom: 3px;
 }
 
 .comment-text {

@@ -18,6 +18,8 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srGuessBlacklistBtn = document.getElementById("srGuessBlacklist");
   const srGuessTooEasyBtn = document.getElementById("srGuessTooEasy");
   const treeContainer = document.getElementById("variation-tree");
+  const reviewNextMovesPanel = document.getElementById("reviewNextMovesPanel");
+  const reviewNextMovesList = document.getElementById("reviewNextMovesList");
   const commentPanel = document.getElementById("commentPanel");
   const commentText = document.getElementById("commentText");
 
@@ -453,6 +455,23 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     return currentPath || [];
   }
 
+  function formatTreeMoveLabel(node) {
+    if (!node || typeof node.san !== "string" || !node.san) {
+      throw new Error("Cannot format a tree move without SAN");
+    }
+
+    if (!Number.isInteger(node.moveNumber)) {
+      throw new Error("Cannot format a tree move without a move number");
+    }
+
+    if (node.color !== "white" && node.color !== "black") {
+      throw new Error("Cannot format a tree move without a valid color");
+    }
+
+    const prefix = node.color === "black" ? `${node.moveNumber}...` : `${node.moveNumber}.`;
+    return `${prefix} ${node.san}`;
+  }
+
   function handleKeyNavigation(event) {
     if (event.key === "Escape") {
       if (!searchMoveOverlay.hidden) {
@@ -527,22 +546,22 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     const currentRow = treeContainer.querySelector(".tree-node.current > .tree-row");
     if (!(currentRow instanceof HTMLElement)) return;
 
-    const panelRect = treePanel.getBoundingClientRect();
+    const panelRect = treeContainer.getBoundingClientRect();
     const rowRect = currentRow.getBoundingClientRect();
     const margin = Math.max(
       TREE_VIEWPORT_MIN_MARGIN_PX,
-      Math.floor(treePanel.clientHeight * TREE_VIEWPORT_MARGIN_RATIO),
+      Math.floor(treeContainer.clientHeight * TREE_VIEWPORT_MARGIN_RATIO),
     );
     const visibleTop = panelRect.top + margin;
     const visibleBottom = panelRect.bottom - margin;
 
     if (rowRect.top < visibleTop) {
-      treePanel.scrollTop -= visibleTop - rowRect.top;
+      treeContainer.scrollTop -= visibleTop - rowRect.top;
       return;
     }
 
     if (rowRect.bottom > visibleBottom) {
-      treePanel.scrollTop += rowRect.bottom - visibleBottom;
+      treeContainer.scrollTop += rowRect.bottom - visibleBottom;
     }
   }
 
@@ -555,6 +574,49 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       treeViewportSyncPending = false;
       ensureCurrentTreeRowVisible();
     });
+  }
+
+  function clearReviewNextMoves() {
+    reviewNextMovesPanel.hidden = true;
+    reviewNextMovesList.innerHTML = "";
+  }
+
+  function renderReviewNextMoves() {
+    if (!isReviewMode() || !state.review || !state.review.tree) {
+      clearReviewNextMoves();
+      return;
+    }
+
+    const ctx = getReviewContext();
+    if (!ctx) {
+      clearReviewNextMoves();
+      return;
+    }
+
+    const children = Array.isArray(ctx.node.children) ? ctx.node.children : [];
+    reviewNextMovesList.innerHTML = "";
+    reviewNextMovesPanel.hidden = false;
+
+    if (!children.length) {
+      const empty = document.createElement("div");
+      empty.className = "review-next-moves-empty";
+      empty.textContent = "End of line";
+      reviewNextMovesList.appendChild(empty);
+      return;
+    }
+
+    for (let i = 0; i < children.length; i += 1) {
+      const child = children[i];
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "review-next-move";
+      button.textContent = formatTreeMoveLabel(child);
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        queueReviewNavigation([...ctx.currentPath, i]);
+      });
+      reviewNextMovesList.appendChild(button);
+    }
   }
 
   function renderTreeNode(node, nodePath = [], basePath = [], globalCurrentPath = []) {
@@ -574,7 +636,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       // This is a move node
       const moveSpan = document.createElement("span");
       moveSpan.className = "tree-move";
-      moveSpan.textContent = `${node.moveNumber}${node.color === 'white' ? '.' : '...'} ${node.san}`;
+      moveSpan.textContent = formatTreeMoveLabel(node);
       row.addEventListener("click", (event) => {
         event.stopPropagation();
         queueReviewNavigation(globalPath);
@@ -617,14 +679,17 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
 
   function renderReviewTree() {
     if (state.active && state.mode === "guess") {
+      treePanel.classList.remove("review-mode");
       treePanel.style.display = "block";
       guessActions.hidden = false;
       treeContainer.innerHTML = "";
+      clearReviewNextMoves();
       return;
     }
 
     if (isReviewMode() && state.review && state.review.tree) {
-      treePanel.style.display = "block";
+      treePanel.classList.add("review-mode");
+      treePanel.style.display = "flex";
       guessActions.hidden = true;
       treeContainer.innerHTML = "";
       const tree = state.review.tree;
@@ -633,13 +698,16 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       const viewRootNode = findNodeAtPath(tree, viewRootPath) || tree;
       const treeRoot = renderTreeNode(viewRootNode, [], viewRootPath, globalCurrentPath);
       treeContainer.appendChild(treeRoot);
+      renderReviewNextMoves();
       queueTreeViewportSync();
       return;
     }
 
+    treePanel.classList.remove("review-mode");
     treePanel.style.display = "none";
     guessActions.hidden = true;
     treeContainer.innerHTML = "";
+    clearReviewNextMoves();
   }
 
   function renderReviewComment() {
