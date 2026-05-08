@@ -26,7 +26,7 @@ from source.web.scheduler_implem import NaiveScheduler
 
 # from source.web.app import BoardHub
 
-from ..core.boardtools import fen, node_moves, node_san, uci_from_lichess_to_pgn
+from ..core.boardtools import child_by_uci, fen, node_moves, node_san, uci_from_lichess_to_pgn
 from ..core.options import SpacedRepetitionOptions, DEBUG_MODE, save_settings
 from ..core.repertoire import RepertoireSession, default_repertoire_cache_path
 from ..core.runner import quick_eval_lines
@@ -55,7 +55,8 @@ class PositionMoveData(TypedDict):
 class MoveCorrectness(Enum):
     CORRECT = 1
     INCORRECT = 2
-    UNDEF = 3
+    ALTERNATIVE = 3
+    UNDEF = 4
 
 @dataclass
 class MoveGrade():
@@ -146,8 +147,6 @@ class RepetitionEngine():
 
         self._prompt_dict_global = self.make_prompt_dict_global()
         self._prompt_dict_relative = self.make_prompt_dict_relative()
-        
-        t = sorted(self._prompt_dict_relative.keys(), key=lambda k: self._prompt_dict_relative[k], reverse=True)
 
     def summarize(self) -> Feedback:
         if not self._grades:
@@ -157,19 +156,24 @@ class RepetitionEngine():
         return Feedback(total_loss / len(self._grades))
 
     def expected_uci(self) -> Optional[UCI]:
-        if self._prompt.node is None:
+        prpt_data = self._prompt
+        if prpt_data.prechosen_path:
+            try:
+                return prpt_data.prechosen_path[prpt_data.node_index+1]
+            except IndexError:
+                pass
+
+        if prpt_data.node is None:
             return None
 
         expected_node = self._current_expected_node()
         if expected_node is not None:
             return expected_node.move.uci()
 
-        best_move = self._session.query(fen(self._prompt.node), "q-eval").move
+        best_move = self._session.query(fen(prpt_data.node), "q-eval").move
         if best_move is None:
             return None
-        if isinstance(best_move, chess.Move):
-            return best_move.uci()
-        return best_move
+        return best_move.uci()
     
     def make_prompt_dict_global(self, node: Node | None = None) -> dict[tuple[str], float]:
         if self._session.options.check_alternatives:
@@ -268,10 +272,13 @@ class RepetitionEngine():
         return self._prompt
 
     def _choose_random_prompt(self) -> PromptState:
+        self._choose_complete_prompt()
+        return 
+    
         self._clear_temporary_nodes()
         for _ in range(self.MAX_PROMPT_SELECTION_ATTEMPTS):
             try:
-                success = self._choose_prompt(self._root)
+                success = self._try_choose_prompt(self._root)
             except Exception:
                 self._clear_temporary_nodes()
                 raise
@@ -393,7 +400,7 @@ class RepetitionEngine():
             return self._prompt
 
         grade = self._handle_file_guess(uci)
-        if grade.correctness == MoveCorrectness.INCORRECT:
+        if grade.correctness in (MoveCorrectness.INCORRECT, MoveCorrectness.ALTERNATIVE):
             self._prompt.message = grade.msg
             return self._prompt
         if grade.correctness == MoveCorrectness.UNDEF:
@@ -424,8 +431,7 @@ class RepetitionEngine():
 
     def _prompt_variations(self, node: Node) -> list[Node]:
         # Prompt generation and validation are position-based, so they should
-        # see TT-backed continuations. Review/history path code must keep using
-        # direct PGN children because TT children may belong to a different parent.
+        # see TT-backed continuations.
         return self._session.variations(node, use_TT=True)
 
     def _move_performance_for(self, node: Node) -> PromptMovePerformance:
@@ -466,26 +472,38 @@ class RepetitionEngine():
         )
 
     def _handle_file_guess(self, uci: UCI) -> MoveGrade:
-        expected_moves = self._prompt_variations(self._prompt.node)
-        if not expected_moves:
+        uci = uci_from_lichess_to_pgn(uci)
+        prpt_data = self._prompt
+    
+        expected_uci = self.expected_uci()
+        if not expected_uci:
             grade = MoveGrade(MoveCorrectness.UNDEF)
             self._grades.append(grade)
             return grade
 
-        chosen_node = next(
-            (n for n in expected_moves if n.move.uci() == uci_from_lichess_to_pgn(uci)),
-            None,
-        )
-        if chosen_node is not None:
-            self._move_entry(self._prompt.node, chosen_node.move.uci())["ease"] += self.MOVE_EASE_CORRECT_STEP
+        if expected_uci == uci:
+            self._move_entry(prpt_data.node, uci)["ease"] += self.MOVE_EASE_CORRECT_STEP
             grade = MoveGrade(MoveCorrectness.CORRECT)
             self._grades.append(grade)
             return grade
+        if not self._session.options.check_alternatives: # TODO: this is currently leaky. We use the knowledge of
+            # how expected_uci is constructed. Need some alternative_moves and a design that ensures their accord
+            self._session.options.check_alternatives = True
+            chosen_alternative_node = next(
+                (c for c in prpt_data.prompt.variations if c.move.uci() == uci),
+                None,
+            )
+            if chosen_alternative_node is not None:
+                grade = MoveGrade(MoveCorrectness.ALTERNATIVE,
+                                  msg = "Not the main move. Change the settings to explore alternatives")
+                self._grades.append(grade)
+                return grade
 
+        expected_moves = [expected_uci] # only this for now
         expected_sans = ", ".join(node_san(n) for n in expected_moves)
-        user_ev = self._session.q_eval_move(self._prompt.node, uci)
+        user_ev = self._session.q_eval_move(prpt_data.node, uci)
         eval, move = user_ev.eval, user_ev.move
-        evals = [self._evaluate_move(self._prompt.node, n.move.uci()) for n in expected_moves]
+        evals = [self._evaluate_move(prpt_data.node, n.move.uci()) for n in expected_moves]
         best_expected_eval = max(evals) if evals else None
 
         msg = f"Wrong. Expected: {expected_sans}."
@@ -610,8 +628,25 @@ class RepetitionEngine():
 
     def _choose_prompt_line_length(self) -> int:
         return self._rng.randint(0, 2*self.start_range)+1 # converted to plies
+    
+    def _choose_complete_prompt(self):
+        l = self._choose_prompt_line_length()
+        l = l - l % 2 + int(self._root.turn() != self._session.options.side)
+        all_prompts = self._prompt_dict_relative
+        possible_prompt_keys = [k for k in all_prompts.keys() if len(k) == l]
+        preferred_prompt_keys = sorted(possible_prompt_keys, key=lambda k: all_prompts[k], reverse=True)[:6]
 
-    def _choose_prompt(self, node: Node) -> bool:
+        self._prompt.prechosen_path = self._rng_choice(preferred_prompt_keys)
+        prompt_node = child_by_uci(self._root, self._prompt.prechosen_path[0])
+        index = 0
+        if prompt_node.turn() != self._session.options.side:
+            prompt_node = child_by_uci(self._root, self._prompt.prechosen_path[1])
+            index = 1
+        self._prompt.node = prompt_node
+        self._prompt.node_index = index
+
+
+    def _try_choose_prompt(self, node: Node) -> bool:
         """Simulate walking through a randomly chosen line. 
         Results in populating self._prompt.
         Returns False if the walk along a line failed."""
@@ -898,7 +933,7 @@ class RepetitionEngine():
                 raise RuntimeError(f"Missing move data for {move_uci!r} from position {parent_fen!r}")
 
             move_probs[move_uci]["prob"] *= SEARCH_MOVE_BOOST_FACTOR
-            self._normalize_move_entries(move_probs)
+            # self._normalize_move_entries(move_probs)
             updated += 1
 
         self._move_probs.serialize()
@@ -948,7 +983,7 @@ class RepetitionEngine():
             # prefixes back into the queue when the user needed help on a later move.
             sys.stderr.write(f"Updating prob for {move.uci()}: {parent_dict[move.uci()]['prob']:.2f} -> {parent_dict[move.uci()]['prob'] * factor:.2f}\n")
             parent_dict[move.uci()]["prob"] *= factor
-            self._normalize_move_entries(parent_dict)
+            # self._normalize_move_entries(parent_dict)
 
     def _normalize_move_entries(self, entries: dict[UCI, MoveEntryData]) -> None:
         total = sum(entry["prob"] for entry in entries.values())
@@ -1015,6 +1050,8 @@ class PromptState:
     off_file: bool
     message: str
     anchor_node: Node
+    prechosen_path: tuple[str] | None = None
+    node_index: int | None = None
 
     def __bool__(self):
         return self.node is not None

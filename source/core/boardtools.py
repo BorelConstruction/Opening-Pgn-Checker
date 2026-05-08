@@ -172,3 +172,6 @@ def moves_to_algebraic(moves: list[str]) -> str:
 
 def ply_from_move_number(move_number: int) -> int:
     return move_number * 2 - 1
+
+def child_by_uci(node: Node, uci: str):
+    return next(c for c in node.variations if c.move.uci() == uci)
