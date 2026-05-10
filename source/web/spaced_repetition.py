@@ -26,7 +26,7 @@ from source.web.scheduler_implem import NaiveScheduler
 
 # from source.web.app import BoardHub
 
-from ..core.boardtools import child_by_uci, fen, node_moves, node_san, uci_from_lichess_to_pgn
+from ..core.boardtools import fen, node_moves, node_san, uci_from_lichess_to_pgn
 from ..core.options import SpacedRepetitionOptions, DEBUG_MODE, save_settings
 from ..core.repertoire import RepertoireSession, default_repertoire_cache_path
 from ..core.runner import quick_eval_lines
@@ -114,6 +114,7 @@ class RepetitionEngine():
     LEARNED_MOVE_SKIP_PROBABILITY = 0.90
     MAX_PROMPT_SELECTION_ATTEMPTS = 100
     MAX_OFF_BOOK_BLACKLIST_ATTEMPTS = 3
+    MAX_GLOBAL_PROMPT_LENGTH = 10
 
     def __init__(self, session: RepertoireSession, root: Node, start_range: int, prompt_state: PromptState,
                  probs_cache_name: str, non_file_freq: float) -> None:
@@ -157,7 +158,7 @@ class RepetitionEngine():
 
     def expected_uci(self) -> Optional[UCI]:
         prpt_data = self._prompt
-        if prpt_data.prechosen_path:
+        if prpt_data.node_index:
             try:
                 return prpt_data.prechosen_path[prpt_data.node_index+1]
             except IndexError:
@@ -186,6 +187,7 @@ class RepetitionEngine():
             nonlocal path_from_root
             try:
                 path_from_root.append(n.move.uci())
+                prompt_dict_global[tuple(path_from_root)] = prompt_dict_global[tuple(path_from_root[:-1])]
             except Exception:
                 pass
             if n.turn() == self._session.options.side:
@@ -205,8 +207,7 @@ class RepetitionEngine():
 
     def make_prompt_dict_relative(self):
         root_path = node_moves(self._root, san=False)
-        key = tuple(root_path) if self._root.turn() == self._session.options.side else tuple(root_path[:-1])
-        root_prob = self._prompt_dict_global[key]
+        root_prob = self._prompt_dict_global[tuple(root_path)]
 
         if root_prob < 10**-6:
             return self.make_prompt_dict_global(self._root)
@@ -246,6 +247,8 @@ class RepetitionEngine():
 
     def set_start(self, root: Optional[Node] = None, start_range: Optional[int] = None) -> None:
         if root is not None:
+            if root != self._root:
+                self._prompt_dict_relative = None
             self._root = root
         if start_range is not None:
             self.start_range = start_range
@@ -272,13 +275,11 @@ class RepetitionEngine():
         return self._prompt
 
     def _choose_random_prompt(self) -> PromptState:
-        self._choose_complete_prompt()
-        return 
     
         self._clear_temporary_nodes()
         for _ in range(self.MAX_PROMPT_SELECTION_ATTEMPTS):
             try:
-                success = self._try_choose_prompt(self._root)
+                success = self._try_choose_prompt(self._root, complete=True)
             except Exception:
                 self._clear_temporary_nodes()
                 raise
@@ -412,8 +413,10 @@ class RepetitionEngine():
             uci_from_lichess_to_pgn(uci),
         )
         self._prompt.node = chosen_node
+        if self._prompt.node_index is not None:
+            self._prompt.node_index += 1
         self._current_hints = None
-        self._advance_line(chosen=chosen_node)
+        self._advance_line()
 
         if not self._is_finished:
             self._prompt.message += grade.msg
@@ -490,7 +493,7 @@ class RepetitionEngine():
             # how expected_uci is constructed. Need some alternative_moves and a design that ensures their accord
             self._session.options.check_alternatives = True
             chosen_alternative_node = next(
-                (c for c in prpt_data.prompt.variations if c.move.uci() == uci),
+                (c for c in prpt_data.node.variations if c.move.uci() == uci),
                 None,
             )
             if chosen_alternative_node is not None:
@@ -500,10 +503,10 @@ class RepetitionEngine():
                 return grade
 
         expected_moves = [expected_uci] # only this for now
-        expected_sans = ", ".join(node_san(n) for n in expected_moves)
+        expected_sans = ", ".join(expected_moves)
         user_ev = self._session.q_eval_move(prpt_data.node, uci)
         eval, move = user_ev.eval, user_ev.move
-        evals = [self._evaluate_move(prpt_data.node, n.move.uci()) for n in expected_moves]
+        evals = [self._evaluate_move(prpt_data.node, m) for m in expected_moves]
         best_expected_eval = max(evals) if evals else None
 
         msg = f"Wrong. Expected: {expected_sans}."
@@ -598,14 +601,26 @@ class RepetitionEngine():
             self._prompt.node = next_node
             self._prompt.message = selection_debug
 
-    def _advance_line(self, chosen: Node) -> None:
+    def _advance_line(self) -> None:
         """
-        Choose a move to continue along the line and
+        Assuming self._prompt.node is set for them to move,
+        choose a move for them to continue along the line (or off-file) and
         update self._prompt accordingly.
+        If the line cannot be continued, updates the state to "prompt finished".
         """
-        assert chosen.turn() != self._session.options.side, "Chosen move should be ours"
-        self._prompt.node = chosen
-        next_node, selection_debug = self._choose_move(chosen)
+        if self._prompt.node_index:
+            try:
+                next_node = self._session.child_for_move(
+                    self._prompt.node,
+                    self._prompt.prechosen_path[self._prompt.node_index+1],
+                )
+                self._prompt.node = next_node
+                self._prompt.node_index += 1
+                return
+            except IndexError:
+                self._prompt.node_index = None
+
+        next_node, selection_debug = self._choose_move(self._prompt.node)
 
         if next_node is False:
             self._prompt.message = selection_debug
@@ -619,40 +634,61 @@ class RepetitionEngine():
             self.finish_prompt()
             return
 
-        message = f"Correct: {node_san(chosen)}. Continue along the line."
+        message = f"Correct: {node_san(self._prompt.node)}. Continue along the line."
         if self._prompt.message:
             self._prompt.message = f"{message} {self._prompt.message}"
         else:
             self._prompt.message = message
 
 
-    def _choose_prompt_line_length(self) -> int:
+    def _choose_start_ply_offset(self) -> int:
+        """Choose how many plies down the line the prompt should start, relative to self._root."""
         return self._rng.randint(0, 2*self.start_range)+1 # converted to plies
     
-    def _choose_complete_prompt(self):
-        l = self._choose_prompt_line_length()
-        l = l - l % 2 + int(self._root.turn() != self._session.options.side)
+    def _choose_prompt_globally(self) -> bool:
+        self._prompt_dict_relative = self._prompt_dict_relative or self.make_prompt_dict_relative()
+
         all_prompts = self._prompt_dict_relative
-        possible_prompt_keys = [k for k in all_prompts.keys() if len(k) == l]
-        preferred_prompt_keys = sorted(possible_prompt_keys, key=lambda k: all_prompts[k], reverse=True)[:6]
+        possible_prompt_keys = set()
+        l = self._rng.randint(1, self.MAX_GLOBAL_PROMPT_LENGTH)
+        for i in range(1, self.start_range*2+1):
+            possible_prompt_keys.update([k[:i+l] for k in all_prompts.keys() if len(k) >= i+l])
+        preferred_prompt_keys = sorted(possible_prompt_keys, key=lambda k: all_prompts[k]/all_prompts[k[:-l]], reverse=True)[:6]
 
         self._prompt.prechosen_path = self._rng_choice(preferred_prompt_keys)
-        prompt_node = child_by_uci(self._root, self._prompt.prechosen_path[0])
-        index = 0
-        if prompt_node.turn() != self._session.options.side:
-            prompt_node = child_by_uci(self._root, self._prompt.prechosen_path[1])
-            index = 1
-        self._prompt.node = prompt_node
+
+        anchor = self._root
+        for i in range(l):
+            anchor = self._session.child_for_move(anchor, self._prompt.prechosen_path[i])
+        index = l - 1
+        
+        if anchor.turn() != self._session.options.side:
+            anchor = self._session.child_for_move(anchor, self._prompt.prechosen_path[l])
+            index += 1
+        self._prompt.node = anchor
+        self._prompt.anchor_node = anchor
         self._prompt.node_index = index
+        msg = f"Complete prompt: {self._prompt.prechosen_path}" if DEBUG_MODE else ""
+        self._prompt.message = msg
+        return True
 
+    def _try_choose_prompt(self, node: Optional[Node] = None, complete: bool = False) -> bool:
+        # TODO: settle the logic for node vs self._root. We could in theory ask 
+        # to study from a given node but only once. Then do we rebuild the local_prompt_dict?
+        # Kind of silly, maybe it is really only "in theory" that this parameter is useful.
+        if complete:
+            return self._choose_prompt_globally()
+        return self._choose_prompt_locally(node)
 
-    def _try_choose_prompt(self, node: Node) -> bool:
+    def _choose_prompt_locally(self, node: Optional[Node] = None) -> bool:
         """Simulate walking through a randomly chosen line. 
         Results in populating self._prompt.
         Returns False if the walk along a line failed."""
+        node = node or self._root
+
         selection_debug = ""
         self._prompt.off_file = False
-        line_length = self._choose_prompt_line_length()
+        line_length = self._choose_start_ply_offset()
 
         self._prompt.anchor_node = node
 
