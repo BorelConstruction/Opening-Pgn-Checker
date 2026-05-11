@@ -208,6 +208,16 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     return Math.max(0, Math.min(1, value));
   }
 
+  function canStudyHistoryEntry(entry) {
+    const promptId = entry && entry.promptId;
+    return (
+      !!promptId &&
+      typeof promptId.startFen === "string" &&
+      Array.isArray(promptId.moves) &&
+      promptId.moves.every((move) => typeof move === "string")
+    );
+  }
+
   function renderHistory() {
     if (!state.historyOpen) {
       historyOverlay.hidden = true;
@@ -262,6 +272,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
         moves.appendChild(moveBtn);
       }
 
+      const meta = document.createElement("div");
+      meta.className = "history-meta";
+
       const performance = document.createElement("div");
       performance.className = "history-performance";
       if (typeof entry.performance === "number") {
@@ -271,7 +284,26 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       } else {
         performance.textContent = "avg loss n/a";
       }
-      item.appendChild(performance);
+      meta.appendChild(performance);
+
+      const studyBtn = document.createElement("button");
+      studyBtn.type = "button";
+      studyBtn.className = "history-study";
+      studyBtn.textContent = "Study Again";
+      studyBtn.disabled = !canStudyHistoryEntry(entry);
+      studyBtn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (studyBtn.disabled) return;
+        closeHistoryOverlay();
+        send({
+          type: "sr_history_study",
+          specId: typeof entry.specId === "string" ? entry.specId : "history",
+          promptId: entry.promptId,
+        });
+      });
+      meta.appendChild(studyBtn);
+
+      item.appendChild(meta);
 
       historyResults.appendChild(item);
     }

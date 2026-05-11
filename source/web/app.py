@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .board.contracts import Arrow, Circle
 from .board.session import BoardSession
-from .spaced_repetition import AppController
+from .spaced_repetition import AppController, PromptLineId
 
 
 def _format_exception_detail() -> str:
@@ -264,6 +264,28 @@ async def ws(ws: WebSocket) -> None:
                     continue
                 try:
                     sr_controller.goto_history_move(path, position_fen, san)
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
+            elif msg_type == "sr_history_study":
+                prompt_id_payload = msg.get("promptId")
+                spec_id = msg.get("specId", "history")
+                if not isinstance(prompt_id_payload, dict):
+                    await ws.send_json({"type": "error", "message": "promptId must be an object"})
+                    continue
+                start_fen = prompt_id_payload.get("startFen")
+                moves = prompt_id_payload.get("moves")
+                if not isinstance(start_fen, str):
+                    await ws.send_json({"type": "error", "message": "promptId.startFen must be a string"})
+                    continue
+                if not isinstance(moves, list) or not all(isinstance(move, str) for move in moves):
+                    await ws.send_json({"type": "error", "message": "promptId.moves must be a list of strings"})
+                    continue
+                if not isinstance(spec_id, str):
+                    await ws.send_json({"type": "error", "message": "specId must be a string"})
+                    continue
+                try:
+                    sr_controller.study_history_prompt(PromptLineId(start_fen, tuple(moves)), spec_id)
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 

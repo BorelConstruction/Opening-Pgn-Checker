@@ -360,11 +360,22 @@ button:disabled,
   text-decoration: underline;
 }
 
+.history-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+
 .history-performance {
   font-variant-numeric: tabular-nums;
   font-weight: 700;
   white-space: nowrap;
-  align-self: center;
+  align-self: flex-end;
+}
+
+.history-study {
+  white-space: nowrap;
 }
 
 .history-empty {
@@ -743,5 +754,19 @@ button:disabled,
   .search-overlay {
     justify-content: center;
     padding-top: 78px;
+  }
+}
+
+@media (max-width: 640px) {
+  .history-item {
+    grid-template-columns: 1fr;
+  }
+
+  .history-meta {
+    align-items: flex-start;
+  }
+
+  .history-performance {
+    align-self: flex-start;
   }
 }

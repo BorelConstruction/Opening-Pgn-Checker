@@ -158,7 +158,7 @@ class RepetitionEngine():
 
     def expected_uci(self) -> Optional[UCI]:
         prpt_data = self._prompt
-        if prpt_data.node_index:
+        if prpt_data.node_index is not None and prpt_data.prechosen_path is not None:
             try:
                 return prpt_data.prechosen_path[prpt_data.node_index+1]
             except IndexError:
@@ -253,7 +253,7 @@ class RepetitionEngine():
         if start_range is not None:
             self.start_range = start_range
 
-    def start_prompt(self, spec_id: SpecId) -> None:
+    def _reset_prompt_state(self, spec_id: SpecId) -> None:
         self._clear_temporary_nodes()
         self._spec_id = spec_id
         self._is_finished = False
@@ -263,15 +263,66 @@ class RepetitionEngine():
         self._grades = []
         self._move_performance = {}
         self._current_hints = None
+        self._prompt.node = None
         self._prompt.message = ""
         self._prompt.off_file = False
         self._prompt.anchor_node = None
+        self._prompt.prechosen_path = None
+        self._prompt.node_index = None
+
+    def _prompt_child_for_move(self, parent: Node, move: chess.Move | UCI) -> Node:
+        try:
+            return self._session.child_for_move(parent, move)
+        except RuntimeError:
+            return self._add_temporary_node(parent, move)
+
+    def _restore_history_prompt(self, prompt_id: PromptLineId) -> None:
+        root_moves = node_moves(self._root)
+        full_moves = list(prompt_id.moves)
+        if full_moves[:len(root_moves)] != root_moves:
+            raise ValueError("History prompt is outside the current study root")
+
+        relative_moves = full_moves[len(root_moves):]
+        if not relative_moves:
+            raise ValueError("History prompt does not contain any moves after the current study root")
+
+        node = self._root
+        prechosen_path: list[UCI] = []
+        anchor_node = node if fen(node) == prompt_id.start_fen else None
+        anchor_index = -1 if anchor_node is not None else None
+
+        for san in relative_moves:
+            move = node.board().parse_san(san)
+            prechosen_path.append(move.uci())
+            node = self._prompt_child_for_move(node, move)
+            if anchor_node is None and fen(node) == prompt_id.start_fen:
+                anchor_node = node
+                anchor_index = len(prechosen_path) - 1
+
+        if anchor_node is None or anchor_index is None:
+            raise ValueError("Could not resolve the history prompt start position")
+        if anchor_index >= len(prechosen_path):
+            raise ValueError("History prompt start position has no continuation")
+
+        self._prompt.prechosen_path = tuple(prechosen_path)
+        self._prompt.anchor_node = anchor_node
+        self._prompt.node = anchor_node
+        self._prompt.node_index = anchor_index
+        self._prompt.message = "Restudying prompt from history."
+
+    def start_prompt(self, spec_id: SpecId) -> None:
+        self._reset_prompt_state(spec_id)
 
         if spec_id == "new":
             self._choose_random_prompt()
         else:
             raise ValueError(f"Unsupported spec_id: {spec_id!r}")
 
+        return self._prompt
+
+    def start_history_prompt(self, prompt_id: PromptLineId, spec_id: SpecId = "history") -> PromptState:
+        self._reset_prompt_state(spec_id)
+        self._restore_history_prompt(prompt_id)
         return self._prompt
 
     def _choose_random_prompt(self) -> PromptState:
@@ -608,7 +659,7 @@ class RepetitionEngine():
         update self._prompt accordingly.
         If the line cannot be continued, updates the state to "prompt finished".
         """
-        if self._prompt.node_index:
+        if self._prompt.node_index is not None:
             try:
                 next_node = self._session.child_for_move(
                     self._prompt.node,
@@ -1087,7 +1138,7 @@ class PromptState:
     message: str
     anchor_node: Node
     prechosen_path: tuple[str] | None = None
-    node_index: int | None = None
+    node_index: int | None = None # None means we are not following the prechosen path
 
     def __bool__(self):
         return self.node is not None
@@ -1377,6 +1428,7 @@ class AppController:
     def _history_entry_payload(self, entry: PromptLogEntry) -> dict[str, Any]:
         return {
             "specId": entry.spec_id,
+            "promptId": entry.prompt_id.to_json(),
             "promptTime": entry.prompt_time,
             "performance": entry.performance,
             "moves": self._history_moves_payload(entry.prompt_id),
@@ -1891,6 +1943,13 @@ class AppController:
                 f"{start_range} {'move' if start_range == 1 else 'moves'}."
             ),
         )
+
+    def study_history_prompt(self, prompt_id: PromptLineId, spec_id: SpecId) -> None:
+        self.active = True
+        self._mode = "guess"
+        self._rep_engine.start_history_prompt(prompt_id, spec_id=spec_id)
+        self._broadcast_ui_state()
+        self.show_prompt()
 
     def _show_history_board(self, position_fen: str, message: str) -> None:
         self._mode = "idle"
