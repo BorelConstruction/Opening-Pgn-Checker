@@ -87,6 +87,12 @@ button:hover,
   border-color: rgba(56, 189, 248, 0.65);
 }
 
+.button-compact {
+  padding: 6px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 button:disabled,
 .button-link.disabled {
   opacity: 0.55;

@@ -9,6 +9,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srHintBtn = document.getElementById("srHint");
   const srStudyFromHereBtn = document.getElementById("srStudyFromHere");
   const srSearchMoveBtn = document.getElementById("srSearchMove");
+  const srUpdateWeightsBtn = document.getElementById("srUpdateWeights");
   const srAnalyzeLichessLink = document.getElementById("srAnalyzeLichess");
 
   const treePanel = document.getElementById("treePanel");
@@ -319,6 +320,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srHintBtn.disabled = !isGuess;
     srStudyFromHereBtn.disabled = !isReview;
     srSearchMoveBtn.disabled = !isReview;
+    srUpdateWeightsBtn.disabled = !active;
     srGuessGiveUpBtn.disabled = !isGuess;
     srGuessFinishBtn.disabled = !isGuess;
     srGuessBlacklistBtn.disabled = !isGuess;
@@ -843,6 +845,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     if (startRange === null) return;
     send({ type: "sr_study_from_here", start_range: startRange });
   });
+  srUpdateWeightsBtn.addEventListener("click", () => send({ type: "sr_update_weights" }));
   srGuessGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
   srGuessFinishBtn.addEventListener("click", () => send({ type: "sr_finish_prompt" }));
   srGuessBlacklistBtn.addEventListener("click", () => send({ type: "sr_blacklist_prompt" }));
