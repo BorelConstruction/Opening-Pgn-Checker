@@ -297,7 +297,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
         closeHistoryOverlay();
         send({
           type: "sr_history_study",
-          specId: typeof entry.specId === "string" ? entry.specId : "history",
           promptId: entry.promptId,
         });
       });

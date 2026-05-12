@@ -192,7 +192,7 @@ class RepetitionEngine():
                 pass
             if n.turn() == self._session.options.side:
                 return
-            chilren_ucis_weigths = self._opponent_moves_for(n)
+            chilren_ucis_weigths = self._moves_for_(n)
             for child in self._session.variations(n):
                 if child.move.uci() not in chilren_ucis_weigths:
                     continue
@@ -239,8 +239,8 @@ class RepetitionEngine():
     def finish_prompt(self, ease=0.25, gave_up=False) -> None:
         self._is_finished = True
         if gave_up:
-            n = self._prompt.node
-            self._move_entry(n.parent, n.move.uci())["ease"] = 0
+            if expected_node := self._current_expected_node():
+                self._update_ease(self._prompt.node, expected_node.move.uci(), False) # TODO: let move_performance do this all in one place
             self._move_performance_for(self._prompt.node).add_giveup()
         self._recompute_line_move_probs(self._prompt.node, -ease)
         self._move_probs.serialize()
@@ -253,9 +253,9 @@ class RepetitionEngine():
         if start_range is not None:
             self.start_range = start_range
 
-    def _reset_prompt_state(self, spec_id: SpecId) -> None:
+    def _reset_prompt_state(self) -> None:
         self._clear_temporary_nodes()
-        self._spec_id = spec_id
+        self._spec_id = None
         self._is_finished = False
         self._review_payload = None
         self._review_path = None
@@ -277,32 +277,20 @@ class RepetitionEngine():
             return self._add_temporary_node(parent, move)
 
     def _restore_history_prompt(self, prompt_id: PromptLineId) -> None:
-        root_moves = node_moves(self._root)
         full_moves = list(prompt_id.moves)
-        if full_moves[:len(root_moves)] != root_moves:
-            raise ValueError("History prompt is outside the current study root")
 
-        relative_moves = full_moves[len(root_moves):]
-        if not relative_moves:
-            raise ValueError("History prompt does not contain any moves after the current study root")
-
-        node = self._root
+        node = self._session.game
         prechosen_path: list[UCI] = []
         anchor_node = node if fen(node) == prompt_id.start_fen else None
         anchor_index = -1 if anchor_node is not None else None
 
-        for san in relative_moves:
+        for san in full_moves:
             move = node.board().parse_san(san)
             prechosen_path.append(move.uci())
             node = self._prompt_child_for_move(node, move)
             if anchor_node is None and fen(node) == prompt_id.start_fen:
                 anchor_node = node
                 anchor_index = len(prechosen_path) - 1
-
-        if anchor_node is None or anchor_index is None:
-            raise ValueError("Could not resolve the history prompt start position")
-        if anchor_index >= len(prechosen_path):
-            raise ValueError("History prompt start position has no continuation")
 
         self._prompt.prechosen_path = tuple(prechosen_path)
         self._prompt.anchor_node = anchor_node
@@ -311,9 +299,10 @@ class RepetitionEngine():
         self._prompt.message = "Restudying prompt from history."
 
     def start_prompt(self, spec_id: SpecId) -> None:
-        self._reset_prompt_state(spec_id)
+        self._reset_prompt_state()
 
         if spec_id == "new":
+            self._spec_id = spec_id
             self._choose_random_prompt()
         else:
             raise ValueError(f"Unsupported spec_id: {spec_id!r}")
@@ -321,7 +310,8 @@ class RepetitionEngine():
         return self._prompt
 
     def start_history_prompt(self, prompt_id: PromptLineId, spec_id: SpecId = "history") -> PromptState:
-        self._reset_prompt_state(spec_id)
+        self._reset_prompt_state()
+        self._spec_id = spec_id
         self._restore_history_prompt(prompt_id)
         return self._prompt
 
@@ -400,7 +390,7 @@ class RepetitionEngine():
     def _move_probs_for(self, parent: Node) -> PositionMoveData:
         return self._move_probs[fen(parent)]
 
-    def _opponent_moves_for(self, parent: Node) -> dict[UCI, MoveEntryData]:
+    def _moves_for_(self, parent: Node) -> dict[UCI, MoveEntryData]:
         position_data = self._move_probs_for(parent)
         move_probs = position_data["moves"]
         if not move_probs:
@@ -416,14 +406,17 @@ class RepetitionEngine():
         return self._move_probs_for(parent)["blacklist"]
 
     def _move_entry(self, parent: Node, uci: UCI) -> MoveEntryData:
-        move_probs = self._opponent_moves_for(parent)
+        move_probs = self._moves_for_(parent)
         if uci not in move_probs:
             raise RuntimeError(f"Missing move data for {uci!r} from position {fen(parent)!r}")
 
         return move_probs[uci]
 
     def _is_learned_move(self, parent: Node, uci: UCI) -> bool:
-        return self._move_entry(parent, uci)["ease"] >= self.LEARNED_EASE_THRESHOLD
+        try:
+            return self._moves_for_(parent)[uci]["ease"] >= self.LEARNED_EASE_THRESHOLD
+        except KeyError:
+            return False
 
     def _is_blacklisted_move(self, parent: Node, uci: UCI) -> bool:
         position_data = self._move_probs.get(fen(parent))
@@ -525,6 +518,12 @@ class RepetitionEngine():
             and self._current_hints.target_square == expected_uci[2:4]
         )
 
+    def _update_ease(self, node: Node, uci: UCI, correct: bool) -> None:
+        if uci not in self._moves_for_(node):
+            self._moves_for_(node)[uci] = MoveEntryData(prob=0.0, ease=0.0)
+        self._moves_for_(node)[uci]["ease"] += \
+            self.MOVE_EASE_CORRECT_STEP if correct else -self.MOVE_EASE_INCORRECT_STEP
+
     def _handle_file_guess(self, uci: UCI) -> MoveGrade:
         uci = uci_from_lichess_to_pgn(uci)
         prpt_data = self._prompt
@@ -536,7 +535,7 @@ class RepetitionEngine():
             return grade
 
         if expected_uci == uci:
-            self._move_entry(prpt_data.node, uci)["ease"] += self.MOVE_EASE_CORRECT_STEP
+            self._update_ease(prpt_data.node, uci, True)
             grade = MoveGrade(MoveCorrectness.CORRECT)
             self._grades.append(grade)
             return grade
@@ -578,7 +577,7 @@ class RepetitionEngine():
         self._grades.append(grade)
         target = self._current_feedback_node()
         if target is not None and target.parent is not None and target.move is not None:
-            self._move_entry(target.parent, target.move.uci())["ease"] -= self.MOVE_EASE_INCORRECT_STEP
+            self._update_ease(target.parent, target.move.uci(), False)
         self._record_error(grade)
         return grade
 
@@ -706,6 +705,9 @@ class RepetitionEngine():
             possible_prompt_keys.update([k[:i+l] for k in all_prompts.keys() if len(k) >= i+l])
         preferred_prompt_keys = sorted(possible_prompt_keys, key=lambda k: all_prompts[k]/all_prompts[k[:-l]], reverse=True)[:6]
 
+        if not preferred_prompt_keys:
+            return False
+
         self._prompt.prechosen_path = self._rng_choice(preferred_prompt_keys)
 
         anchor = self._root
@@ -791,7 +793,7 @@ class RepetitionEngine():
         off_book = off_book or (maybe_off_book and self._rng.random() < self.non_file_move_freq)
 
         children = self._prompt_variations(parent)
-        move_probs = self._opponent_moves_for(parent)
+        move_probs = self._moves_for_(parent)
         blacklisted_moves = set(self._blacklist_for(parent))
         eligible_moves = {
             uci: entry
@@ -1015,7 +1017,7 @@ class RepetitionEngine():
                 continue
             boosted_positions.add(parent_fen)
 
-            move_probs = self._opponent_moves_for(parent)
+            move_probs = self._moves_for_(parent)
             if move_uci not in move_probs:
                 raise RuntimeError(f"Missing move data for {move_uci!r} from position {parent_fen!r}")
 
@@ -1062,7 +1064,7 @@ class RepetitionEngine():
             child = node
             move = child.move
             node = child.parent
-            parent_dict = self._opponent_moves_for(node)
+            parent_dict = self._moves_for_(node)
             if move.uci() not in parent_dict:
                 continue
             factor = self._move_factor(child, base_factor)
