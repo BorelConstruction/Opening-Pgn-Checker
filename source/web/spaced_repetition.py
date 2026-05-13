@@ -26,7 +26,7 @@ from source.web.scheduler_implem import NaiveScheduler
 
 # from source.web.app import BoardHub
 
-from ..core.boardtools import BoardLike, fen, node_moves, node_san, to_board, uci_from_lichess_to_pgn
+from ..core.boardtools import BoardLike, fen, node_moves, node_san, side, to_board, uci_from_lichess_to_pgn
 from ..core.options import SpacedRepetitionOptions, DEBUG_MODE, save_settings
 from ..core.repertoire import RepertoireSession, default_repertoire_cache_path
 from ..core.runner import quick_eval_lines
@@ -100,6 +100,18 @@ class WeightSyncSummary:
     moves_removed: int
 
 
+@dataclass(frozen=True)
+class WeightUpdateTrace:
+    path: tuple[UCI, ...]
+    before: float
+    after: float
+    factor: float
+    reason: str
+
+
+DEBUG_WEIGHT_TREE_FORWARD_PLIES = 6
+
+
 class RepetitionEngine():
     """
     The class responsible for prompt generation and response interpretation.
@@ -152,7 +164,7 @@ class RepetitionEngine():
         self._move_performance: dict[int, PromptMovePerformance] = {}
         self._current_hints: Optional[Hints] = None
         self._temporary_nodes: list[Node] = []
-        self._prechosen_off_book_index: int | None = None
+        self._last_weight_updates: list[WeightUpdateTrace] = []
 
         self._refresh_prompt_dicts()
 
@@ -337,7 +349,14 @@ class RepetitionEngine():
         self._prompt.anchor_node = None
         self._prompt.prechosen_path = None
         self._prompt.node_index = None
-        self._prechosen_off_book_index = None
+        self._last_weight_updates = []
+
+    def _relative_move_path_for_node(self, node: Node) -> Optional[list[UCI]]:
+        root_moves = node_moves(self._root, san=False)
+        node_path = node_moves(node, san=False)
+        if node_path[:len(root_moves)] != root_moves:
+            return None
+        return node_path[len(root_moves):]
 
     def _prompt_child_for_move(self, parent: Node, move: chess.Move | UCI) -> Node:
         try:
@@ -542,20 +561,10 @@ class RepetitionEngine():
             return None
         return expected_moves[0]
 
-    def _prompt_variations(self, node: Node) -> list[Node]:
+    def _prompt_variations(self, position: BoardLike) -> list[Node]:
         # Prompt generation and validation are position-based, so they should
         # see TT-backed continuations.
-        return self._session.variations(node, use_TT=True)
-
-    def _prompt_variation_ucis(self, position: BoardLike) -> set[UCI]:
-        position_cache = self._session.cache.get(fen(position))
-        if position_cache is None:
-            return set()
-
-        move_ucis: set[UCI] = set()
-        for cached_node in position_cache.TTed:
-            move_ucis.update(child.move.uci() for child in self._session.variations(cached_node))
-        return move_ucis
+        return self._session.variations(position, use_TT=True)
 
     def _move_performance_for(self, node: Node) -> PromptMovePerformance:
         node_id = id(node)
@@ -736,14 +745,16 @@ class RepetitionEngine():
         """
         if self._prompt.node_index is not None:
             try:
+                child_index = self._prompt.node_index+1
                 next_node = self._session.child_for_move(
                     self._prompt.node,
-                    self._prompt.prechosen_path[self._prompt.node_index+1],
+                    self._prompt.prechosen_path[child_index],
                 )
-                self._prompt.node = next_node
-                self._prompt.node_index += 1
-                if self._prompt.node_index == self._prechosen_off_book_index:
+                if next_node is None:
                     self._prompt.off_file = True
+                    next_node = self._add_temporary_node(self._prompt.node, self._prompt.prechosen_path[child_index])
+
+                self._prompt.node_index += 1
                 return
             except IndexError:
                 self._prompt.node_index = None
@@ -778,10 +789,13 @@ class RepetitionEngine():
 
         all_prompts = self._prompt_dict_relative
         possible_prompt_keys = set()
-        l = self._rng.randint(1, self.MAX_GLOBAL_PROMPT_LENGTH)
+
+        # length (starting from anchor node)
+        prpt_len = self._rng.randint(1, self.MAX_GLOBAL_PROMPT_LENGTH)
+        # i is offset from root. So root ---i---> anchor ---prpt_len---> prompt end
         for i in range(1, self.start_range*2+1):
-            possible_prompt_keys.update([k[:i+l] for k in all_prompts.keys() if len(k) >= i+l])
-        preferred_prompt_keys = sorted(possible_prompt_keys, key=lambda k: all_prompts[k]/all_prompts[k[:-l]], reverse=True)[:6]
+            possible_prompt_keys.update([k[:i+prpt_len] for k in all_prompts.keys() if len(k) >= i+prpt_len])
+        preferred_prompt_keys = sorted(possible_prompt_keys, key=lambda k: all_prompts[k]/all_prompts[k[:-prpt_len]], reverse=True)[:6]
 
         if not preferred_prompt_keys:
             return False
@@ -789,13 +803,14 @@ class RepetitionEngine():
         chosen_path = self._rng_choice(preferred_prompt_keys)
         self._prompt.prechosen_path = self._maybe_append_global_off_book_move(chosen_path)
 
+        offset = len(self._prompt.prechosen_path) - prpt_len
         anchor = self._root
-        for i in range(l):
-            anchor = self._session.child_for_move(anchor, self._prompt.prechosen_path[i])
-        index = l - 1
+        for j in range(offset):
+            anchor = self._session.child_for_move(anchor, self._prompt.prechosen_path[j])
+        index = offset - 1
         
         if anchor.turn() != self._session.options.side:
-            anchor = self._session.child_for_move(anchor, self._prompt.prechosen_path[l])
+            anchor = self._session.child_for_move(anchor, self._prompt.prechosen_path[offset])
             index += 1
         self._prompt.node = anchor
         self._prompt.anchor_node = anchor
@@ -815,15 +830,10 @@ class RepetitionEngine():
         for move_uci in prechosen_path:
             end_node = self._session.child_for_move(end_node, move_uci)
 
-        if end_node.turn() == self._session.options.side:
-            return prechosen_path
-
         off_book_selection = self._select_off_book_move(end_node.board(), use_engine=False)
         if off_book_selection.move is None:
             return prechosen_path
 
-        self._add_temporary_node(end_node, off_book_selection.move)
-        self._prechosen_off_book_index = len(prechosen_path)
         return (*prechosen_path, off_book_selection.move.uci())
 
     def _try_choose_prompt(self, node: Optional[Node] = None, complete: bool = False) -> bool:
@@ -959,6 +969,9 @@ class RepetitionEngine():
         *,
         use_engine: bool,
     ) -> OffBookSelection:
+        if side(fen(position)) == self._session.options.side:
+            raise ValueError("Should only select off-book moves for opponent's turn")
+        
         db_selection = self._choose_db_off_book_move(position)
         if db_selection.move is not None or db_selection.blacklist_exhausted:
             return db_selection
@@ -1008,7 +1021,7 @@ class RepetitionEngine():
             return []
 
         position_board = to_board(position)
-        exclude = self._prompt_variation_ucis(position)
+        exclude = set(n.move.uci() for n in self._prompt_variations(position))
         exclude.update(self._blacklist_for(position))
 
         # Filter candidates: frequency >= 5%, score_rate <= 75%
@@ -1130,21 +1143,32 @@ class RepetitionEngine():
         self._move_probs.serialize()
         return updated
 
-    def _move_factor(self, node: Node, base_factor: float) -> float:
-        performance = self._move_performance.get(id(node))
-        if performance is None:
-            return max(self.MIN_MOVE_FACTOR, base_factor)
-
+    def _move_factor_details(self, parent: Node, move_uci: UCI, base_factor: float) -> tuple[float, str]:
         factor = base_factor
-        if performance.hint_requests:
-            factor += self.HINT_FACTOR_STEP * performance.hint_requests
-        if performance.gave_up:
-            factor = max(factor, self.GAVE_UP_FACTOR)
-        for error in performance.errors:
-            eval_loss = self._grade_eval_loss(error)
-            factor *= max(1 + eval_loss * self.ERROR_EVAL_LOSS_SCALE, self.ERROR_EVAL_LOSS_CAP)
+        reason_parts = [f"base={base_factor:.2f}"]
+        performance = None
+        try:
+            performance = self._move_performance.get(id(self._session.child_for_move(parent, move_uci)))
+        except RuntimeError:
+            performance = None
+        if performance is not None:
+            if performance.hint_requests:
+                hint_delta = self.HINT_FACTOR_STEP * performance.hint_requests
+                factor += hint_delta
+                reason_parts.append(f"hints=+{hint_delta:.2f}")
+            if performance.gave_up:
+                factor = max(factor, self.GAVE_UP_FACTOR)
+                reason_parts.append(f"gave_up>={self.GAVE_UP_FACTOR:.2f}")
+            for idx, error in enumerate(performance.errors, start=1):
+                eval_loss = self._grade_eval_loss(error)
+                error_factor = max(1 + eval_loss * self.ERROR_EVAL_LOSS_SCALE, self.ERROR_EVAL_LOSS_CAP)
+                factor *= error_factor
+                reason_parts.append(f"err{idx}=x{error_factor:.2f}")
 
-        return max(self.MIN_MOVE_FACTOR, factor)
+        bounded_factor = max(self.MIN_MOVE_FACTOR, factor)
+        if bounded_factor != factor:
+            reason_parts.append(f"min={self.MIN_MOVE_FACTOR:.2f}")
+        return bounded_factor, ", ".join(reason_parts)
 
     def _grade_eval_loss(self, grade: MoveGrade) -> float:
         if grade.correctness == MoveCorrectness.CORRECT or grade.eval_diff is None:
@@ -1157,6 +1181,7 @@ class RepetitionEngine():
         Make moves of a line less (or more) likely to appear,
         thus adapting to user's need to see it again.
         """
+        self._last_weight_updates = []
         if not node: # can happen if "New" is clicked before we started
             return
         
@@ -1167,14 +1192,27 @@ class RepetitionEngine():
             move = child.move
             node = child.parent
             parent_dict = self._moves_for_(node)
-            if move.uci() not in parent_dict:
+            move_uci = move.uci()
+            if move_uci not in parent_dict:
                 continue
-            factor = self._move_factor(child, base_factor)
+            factor, reason = self._move_factor_details(node, move_uci, base_factor)
+            before = parent_dict[move_uci]["weight"]
+            after = before * factor
             # Keep easy lines de-emphasized by default, but pull difficult prompt
             # prefixes back into the queue when the user needed help on a later move.
-            sys.stderr.write(f"Updating weight for {move.uci()}: {parent_dict[move.uci()]['weight']:.2f} -> {parent_dict[move.uci()]['weight'] * factor:.2f}\n")
-            parent_dict[move.uci()]["weight"] *= factor
-            # self._normalize_move_entries(parent_dict)
+            sys.stderr.write(f"Updating weight for {move_uci}: {before:.2f} -> {after:.2f}\n")
+            parent_dict[move_uci]["weight"] = after
+            relative_path = self._relative_move_path_for_node(child)
+            if relative_path is not None:
+                self._last_weight_updates.append(
+                    WeightUpdateTrace(
+                        path=tuple(relative_path),
+                        before=before,
+                        after=after,
+                        factor=factor,
+                        reason=reason,
+                    )
+                )
 
     def _normalize_move_entries(self, entries: dict[UCI, MoveEntryData]) -> None:
         total = sum(entry["weight"] for entry in entries.values())
@@ -1234,6 +1272,244 @@ class RepetitionEngine():
             message += "\n..."
 
         return message
+
+    # Debug-only helpers below derive tree state from nodes and prompt metadata.
+    # They do not participate in prompt selection or weight recomputation logic.
+    def _path_is_prefix(self, prefix: tuple[UCI, ...], path: tuple[UCI, ...]) -> bool:
+        return prefix == path[:len(prefix)]
+
+    def _weight_update_map(self) -> dict[tuple[UCI, ...], WeightUpdateTrace]:
+        return {trace.path: trace for trace in self._last_weight_updates}
+
+    def _debug_prompt_path(self) -> tuple[UCI, ...] | None:
+        if self._spec_id != "new" or self._prompt.prechosen_path is None:
+            return None
+        return tuple(self._prompt.prechosen_path)
+
+    def _sorted_weighted_moves_for(self, parent: Node) -> list[tuple[UCI, float, str, Optional[Node]]]:
+        entries: list[tuple[UCI, float, str, Optional[Node]]] = []
+        for move_uci, entry in self._moves_for_(parent).items():
+            try:
+                san = node_san(parent, move_uci)
+            except Exception:
+                san = move_uci
+            try:
+                child = self._session.child_for_move(parent, move_uci)
+            except RuntimeError:
+                child = None
+            entries.append((move_uci, entry["weight"], san, child))
+        entries.sort(key=lambda item: (-item[1], item[2], item[0]))
+        return entries
+
+    def _build_debug_children(
+        self,
+        parent: Node,
+        path: tuple[UCI, ...],
+        remaining_prefix: tuple[UCI, ...],
+        remaining_forward: int,
+        *,
+        current_path: tuple[UCI, ...],
+        anchor_path: tuple[UCI, ...],
+        prompt_path: tuple[UCI, ...] | None,
+        weight_updates: dict[tuple[UCI, ...], WeightUpdateTrace],
+    ) -> list[dict[str, Any]]:
+        if remaining_prefix:
+            move_uci = remaining_prefix[0]
+            move_weights = self._moves_for_(parent)
+            weight = move_weights.get(move_uci, {}).get("weight")
+            try:
+                child = self._session.child_for_move(parent, move_uci)
+            except RuntimeError:
+                child = None
+            try:
+                san = node_san(parent, move_uci)
+            except Exception:
+                san = move_uci
+            return [
+                self._build_debug_move_node(
+                    parent,
+                    move_uci,
+                    weight,
+                    san,
+                    child,
+                    (*path, move_uci),
+                    remaining_prefix=remaining_prefix[1:],
+                    remaining_forward=remaining_forward,
+                    current_path=current_path,
+                    anchor_path=anchor_path,
+                    prompt_path=prompt_path,
+                    weight_updates=weight_updates,
+                )
+            ]
+
+        if remaining_forward <= 0:
+            return []
+
+        children: list[dict[str, Any]] = []
+        for move_uci, weight, san, child in self._sorted_weighted_moves_for(parent):
+            children.append(
+                self._build_debug_move_node(
+                    parent,
+                    move_uci,
+                    weight,
+                    san,
+                    child,
+                    (*path, move_uci),
+                    remaining_prefix=(),
+                    remaining_forward=remaining_forward - 1,
+                    current_path=current_path,
+                    anchor_path=anchor_path,
+                    prompt_path=prompt_path,
+                    weight_updates=weight_updates,
+                )
+            )
+        return children
+
+    def _build_debug_move_node(
+        self,
+        parent: Node,
+        move_uci: UCI,
+        weight: Optional[float],
+        san: str,
+        child: Optional[Node],
+        path: tuple[UCI, ...],
+        *,
+        remaining_prefix: tuple[UCI, ...],
+        remaining_forward: int,
+        current_path: tuple[UCI, ...],
+        anchor_path: tuple[UCI, ...],
+        prompt_path: tuple[UCI, ...] | None,
+        weight_updates: dict[tuple[UCI, ...], WeightUpdateTrace],
+    ) -> dict[str, Any]:
+        board = parent.board()
+        move_number = board.fullmove_number
+        color = "white" if parent.turn() == chess.WHITE else "black"
+        weight_update = weight_updates.get(path)
+        children: list[dict[str, Any]] = []
+        if child is not None:
+            children = self._build_debug_children(
+                child,
+                path,
+                remaining_prefix,
+                remaining_forward,
+                current_path=current_path,
+                anchor_path=anchor_path,
+                prompt_path=prompt_path,
+                weight_updates=weight_updates,
+            )
+
+        return {
+            "kind": "move",
+            "path": list(path),
+            "ply": parent.ply() + 1,
+            "moveNumber": move_number,
+            "color": color,
+            "san": san,
+            "uci": move_uci,
+            "weight": weight,
+            "showWeightLabel": parent.turn() != self._session.options.side,
+            "children": children,
+            "onCurrentPath": self._path_is_prefix(path, current_path),
+            "isCurrent": path == current_path,
+            "isAnchor": path == anchor_path,
+            "onPromptPath": (
+                prompt_path is not None
+                and len(path) > len(anchor_path)
+                and self._path_is_prefix(path, prompt_path)
+            ),
+            "recompute": None if weight_update is None else {
+                "before": weight_update.before,
+                "after": weight_update.after,
+                "factor": weight_update.factor,
+                "reason": weight_update.reason,
+            },
+        }
+
+    def _build_debug_tree_payload(
+        self,
+        *,
+        root: Node,
+        root_label: str,
+        prefix_path: tuple[UCI, ...],
+        current_path: tuple[UCI, ...],
+        anchor_path: tuple[UCI, ...],
+        prompt_path: tuple[UCI, ...] | None,
+    ) -> dict[str, Any]:
+        weight_updates = self._weight_update_map()
+        return {
+            "title": "Weight visualizer",
+            "tree": {
+                "kind": "position",
+                "label": root_label,
+                "ply": root.ply(),
+                "children": self._build_debug_children(
+                    root,
+                    (),
+                    prefix_path,
+                    DEBUG_WEIGHT_TREE_FORWARD_PLIES,
+                    current_path=current_path,
+                    anchor_path=anchor_path,
+                    prompt_path=prompt_path,
+                    weight_updates=weight_updates,
+                ),
+                "onCurrentPath": True,
+                "isCurrent": len(current_path) == 0,
+                "isAnchor": len(anchor_path) == 0,
+                "onPromptPath": False,
+            },
+        }
+
+    def debug_guess_tree_payload(self) -> dict[str, Any]:
+        anchor_path_list = self._relative_move_path_for_node(self._prompt.anchor_node) if self._prompt.anchor_node is not None else None
+        current_path_list = self._relative_move_path_for_node(self._prompt.node) if self._prompt.node is not None else None
+        prompt_path = self._debug_prompt_path()
+        if anchor_path_list is None or current_path_list is None:
+            root = self._prompt.anchor_node or self._prompt.node or self._root
+            return self._build_debug_tree_payload(
+                root=root,
+                root_label="Active prompt position",
+                prefix_path=(),
+                current_path=(),
+                anchor_path=(),
+                prompt_path=None,
+            )
+
+        return self._build_debug_tree_payload(
+            root=self._root,
+            root_label="Study root",
+            prefix_path=tuple(anchor_path_list),
+            current_path=tuple(current_path_list),
+            anchor_path=tuple(anchor_path_list),
+            prompt_path=prompt_path,
+        )
+
+    def debug_review_tree_payload(self, node: Node) -> dict[str, Any]:
+        relative_path = self._relative_move_path_for_node(node)
+        root = self._root
+        root_label = "Study root"
+        prefix_path: tuple[UCI, ...] = ()
+        current_path: tuple[UCI, ...] = ()
+        anchor_path: tuple[UCI, ...] = ()
+        prompt_path = self._debug_prompt_path()
+        if relative_path is None:
+            root = node
+            root_label = "Active review position"
+            prompt_path = None
+        else:
+            prefix_path = tuple(relative_path)
+            current_path = tuple(relative_path)
+            anchor_path_list = self._relative_move_path_for_node(self._prompt.anchor_node) if self._prompt.anchor_node is not None else None
+            if anchor_path_list is not None:
+                anchor_path = tuple(anchor_path_list)
+
+        return self._build_debug_tree_payload(
+            root=root,
+            root_label=root_label,
+            prefix_path=prefix_path,
+            current_path=current_path,
+            anchor_path=anchor_path,
+            prompt_path=prompt_path,
+        )
 
 @dataclass
 class PromptState:
@@ -1548,12 +1824,32 @@ class AppController:
             "entries": entries,
         }
 
+    def _debug_tree_payload(self) -> Optional[dict[str, Any]]:
+        if not DEBUG_MODE or not self.active:
+            return None
+
+        try:
+            if self._mode == "guess":
+                return self._rep_engine.debug_guess_tree_payload()
+            if self._mode == "review":
+                if self._review_path is None:
+                    raise RuntimeError("Review mode requires an active review path")
+                node = node_at_path(self._session.game, list(self._review_path), self._session.variations)
+                return self._rep_engine.debug_review_tree_payload(node)
+        except Exception as exc:
+            return {
+                "title": "Weight visualizer",
+                "error": str(exc),
+            }
+        return None
+
     def ui_state(self, include_history: bool = True) -> dict[str, Any]:
         state = {
             "active": self.active,
             "mode": self._mode,
             "review": self._review_payload if self.active and self._mode == "review" else None,
             "searchMove": self._search_move_payload if self.active and self._mode == "review" else None,
+            "debugTree": self._debug_tree_payload(),
         }
         if hasattr(self, "_cfg"):
             state["startRange"] = self._cfg.start_range
@@ -1594,7 +1890,6 @@ class AppController:
     def start_next_prompt(self) -> None:
         self.active = True
         self._mode = "guess"
-        self._broadcast_ui_state()
         self._rep_controller.start_next_prompt()
         self.show_prompt()
 
@@ -1610,6 +1905,7 @@ class AppController:
             allow_moves=True,
             **kwargs
         )
+        self._broadcast_ui_state(include_history=False)
 
     def stop(self) -> None:
         self.active = False
@@ -1795,6 +2091,7 @@ class AppController:
                     "viewRootPath": list(self._review_view_root_path),
                     "dbStatsRequestId": self._review_payload.get("dbStatsRequestId"),
                     "dbStats": self._review_payload.get("dbStats"),
+                    "debugTree": self._debug_tree_payload(),
                 },
             }
         )
@@ -1992,6 +2289,7 @@ class AppController:
 
         summary = self._rep_engine.sync_move_weights_with_pgn()
         self._show_status_message(self._format_weight_sync_message(summary))
+        self._broadcast_ui_state(include_history=False)
 
     def provide_hint(self) -> None:
         if self._mode != "guess":
@@ -2107,7 +2405,6 @@ class AppController:
         self.active = True
         self._mode = "guess"
         self._rep_engine.start_history_prompt(prompt_id, spec_id=spec_id)
-        self._broadcast_ui_state()
         self.show_prompt()
 
     def _show_history_board(self, position_fen: str, message: str) -> None:

@@ -375,17 +375,19 @@ class PgnSession:
             lichessClient = berserk.Client()
         self.opening_explorer = lichessClient.opening_explorer
 
-    def variations(self, node: Node, use_TT: bool = False) ->  list[Node]:
+    def variations(self, position: BoardLike, use_TT: bool = False) ->  list[Node]:
         '''Node.variations consistent with our mainline preferences.
         If use_TT is true, we will use the Transposition Table to fetch all "childeren".
         '''
 
+        if not use_TT and not isinstance(position, Node):
+            raise TypeError(f"Got {type(position)}. Use TT or provide a Node.")
         check_alternatives = getattr(self.options, "check_alternatives", True) # TODO: make sure we are consistent around this
         side = getattr(self.options, "side", WHITE)
         mainline_sides = () if check_alternatives else (side,)
         if not use_TT:
-            return mainline_children(mainline_sides)(node)
-        return sum((mainline_children(mainline_sides)(n) for n in self.cache[fen(node)].TTed), [])
+            return mainline_children(mainline_sides)(position)
+        return sum((mainline_children(mainline_sides)(n) for n in self.cache[fen(position)].TTed), [])
 
     def traversal_restrictions(self) -> TraversalPolicy:
         kwargs = {"get_children": self.variations}
@@ -516,7 +518,7 @@ class PgnSession:
                 if child.move.uci() == move:
                     return child
 
-        raise RuntimeError(f"Could not resolve move {move!r} from position {fen(parent)!r}")
+        return None
 
     def remove_variation(self, node: Node) -> None:
         parent = getattr(node, "parent", None)

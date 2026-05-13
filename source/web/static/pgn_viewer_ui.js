@@ -21,6 +21,10 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const treeContainer = document.getElementById("variation-tree");
   const reviewNextMovesPanel = document.getElementById("reviewNextMovesPanel");
   const reviewNextMovesList = document.getElementById("reviewNextMovesList");
+  const debugWeightPanel = document.getElementById("debugWeightPanel");
+  const debugWeightTitle = document.getElementById("debugWeightTitle");
+  const debugWeightSummary = document.getElementById("debugWeightSummary");
+  const debugWeightTree = document.getElementById("debugWeightTree");
   const commentPanel = document.getElementById("commentPanel");
   const commentText = document.getElementById("commentText");
 
@@ -41,6 +45,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     active: false,
     mode: "idle", // idle | guess | review
     review: null,
+    debugTree: null,
     searchMove: null,
     searchMoveDismissed: false,
     history: null,
@@ -743,6 +748,355 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     clearReviewNextMoves();
   }
 
+  function hideDebugWeightTree() {
+    debugWeightPanel.hidden = true;
+    debugWeightTitle.textContent = "Weight visualizer";
+    debugWeightSummary.textContent = "";
+    debugWeightTree.innerHTML = "";
+  }
+
+  function formatDebugWeight(value) {
+    if (!Number.isFinite(value)) return "w=n/a";
+    return `${value.toFixed(3)}`;
+  }
+
+  const DEBUG_SVG_NS = "http://www.w3.org/2000/svg";
+  const DEBUG_NODE_MIN_WIDTH = 26;
+  const DEBUG_NODE_MAX_WIDTH = 94;
+  const DEBUG_NODE_HEIGHT = 22;
+  const DEBUG_NODE_PADDING_X = 8;
+  const DEBUG_EDGE_MIN_GAP = 18;
+  const DEBUG_EDGE_LABEL_MARGIN = 12;
+  const DEBUG_ROW_GAP = 12;
+  const DEBUG_CANVAS_PADDING = 10;
+  const DEBUG_NODE_CHAR_WIDTH = 6.2;
+  const DEBUG_EDGE_LABEL_CHAR_WIDTH = 5.8;
+  const DEBUG_EDGE_LABEL_LINE_HEIGHT = 11;
+  const DEBUG_EDGE_LABEL_PADDING_X = 6;
+  const DEBUG_EDGE_LABEL_PADDING_Y = 4;
+
+  function debugSvgEl(name, attrs = {}) {
+    const el = document.createElementNS(DEBUG_SVG_NS, name);
+    for (const [key, value] of Object.entries(attrs)) {
+      el.setAttribute(key, String(value));
+    }
+    return el;
+  }
+
+  function debugCompactNodeLabel(node) {
+    if (node.kind === "move") {
+      return typeof node.san === "string" && node.san ? node.san : "?";
+    }
+    if (typeof node.label === "string" && node.label) {
+      if (node.label === "Study root") return "Root";
+      if (node.label === "Active review position") return "Review";
+      return node.label.length > 10 ? node.label.slice(0, 10) : node.label;
+    }
+    return "Pos";
+  }
+
+  function debugNodeTitle(node) {
+    const parts = [];
+    if (node.kind === "move") {
+      parts.push(formatTreeMoveLabel(node));
+      if (typeof node.uci === "string" && node.uci) {
+        parts.push(node.uci);
+      }
+    } else {
+      parts.push(debugCompactNodeLabel(node));
+    }
+    if (node.isAnchor) parts.push("anchor");
+    if (node.isCurrent) parts.push("current");
+    if (node.onPromptPath) parts.push("prompt path");
+    if (node.recompute) parts.push("recomputed");
+    return parts.join(" | ");
+  }
+
+  function debugNodeWidth(node) {
+    const label = debugCompactNodeLabel(node);
+    const naturalWidth = label.length * DEBUG_NODE_CHAR_WIDTH + DEBUG_NODE_PADDING_X * 2;
+    return Math.max(DEBUG_NODE_MIN_WIDTH, Math.min(DEBUG_NODE_MAX_WIDTH, naturalWidth));
+  }
+
+  function debugEdgeLabelMetrics(node) {
+    const lines = [];
+    if (node.showWeightLabel) {
+      lines.push(formatDebugWeight(node.weight));
+      if (node.recompute) {
+        lines.push(
+          `${node.recompute.before.toFixed(3)} -> ${node.recompute.after.toFixed(3)} x${node.recompute.factor.toFixed(2)}`,
+        );
+      }
+    }
+
+    if (!lines.length) {
+      return { lines, width: 0, height: 0 };
+    }
+
+    return {
+      lines,
+      width: Math.max(...lines.map((line) => line.length)) * DEBUG_EDGE_LABEL_CHAR_WIDTH + DEBUG_EDGE_LABEL_PADDING_X * 2,
+      height: lines.length * DEBUG_EDGE_LABEL_LINE_HEIGHT + DEBUG_EDGE_LABEL_PADDING_Y * 2,
+    };
+  }
+
+  function debugEdgeHorizontalGap(node) {
+    const metrics = debugEdgeLabelMetrics(node);
+    if (!metrics.lines.length) {
+      return DEBUG_EDGE_MIN_GAP;
+    }
+    return Math.max(DEBUG_EDGE_MIN_GAP, metrics.width + DEBUG_EDGE_LABEL_MARGIN);
+  }
+
+  function measureDebugTreeLayout(node) {
+    const children = Array.isArray(node.children) ? node.children : [];
+    const childLayouts = children.map(measureDebugTreeLayout);
+    const nodeWidth = debugNodeWidth(node);
+    const childrenHeight = childLayouts.length
+      ? childLayouts.reduce((sum, child) => sum + child.height, 0) + DEBUG_ROW_GAP * (childLayouts.length - 1)
+      : 0;
+    return {
+      node,
+      nodeWidth,
+      childLayouts,
+      childrenHeight,
+      width: childLayouts.length
+        ? Math.max(...childLayouts.map((child) => nodeWidth + debugEdgeHorizontalGap(child.node) + child.width))
+        : nodeWidth,
+      height: Math.max(DEBUG_NODE_HEIGHT, childrenHeight || 0),
+    };
+  }
+
+  // Layout is computed top-down so parents stay vertically centered above their subtree.
+  function placeDebugTreeLayout(layout, x, yTop, scene) {
+    const nodeY = yTop + (layout.height - DEBUG_NODE_HEIGHT) / 2;
+    const placedNode = {
+      node: layout.node,
+      x,
+      y: nodeY,
+      width: layout.nodeWidth,
+      height: DEBUG_NODE_HEIGHT,
+      centerY: nodeY + DEBUG_NODE_HEIGHT / 2,
+    };
+    scene.nodes.push(placedNode);
+
+    if (!layout.childLayouts.length) {
+      return placedNode;
+    }
+
+    let childTop = yTop + (layout.height - layout.childrenHeight) / 2;
+    for (const childLayout of layout.childLayouts) {
+      const childGap = debugEdgeHorizontalGap(childLayout.node);
+      const childNode = placeDebugTreeLayout(
+        childLayout,
+        x + layout.nodeWidth + childGap,
+        childTop,
+        scene,
+      );
+      scene.edges.push({ parent: placedNode, child: childNode, node: childLayout.node });
+      childTop += childLayout.height + DEBUG_ROW_GAP;
+    }
+    return placedNode;
+  }
+
+  function debugNodeFill(node) {
+    if (node.isCurrent) return "rgba(56, 189, 248, 0.18)";
+    if (node.onPromptPath) return "rgba(34, 197, 94, 0.14)";
+    if (node.isAnchor) return "rgba(248, 250, 252, 0.08)";
+    return "rgba(2, 6, 23, 0.55)";
+  }
+
+  function debugNodeStroke(node) {
+    if (node.recompute) return "rgba(251, 191, 36, 0.7)";
+    if (node.isCurrent) return "rgba(56, 189, 248, 0.95)";
+    if (node.onPromptPath) return "rgba(34, 197, 94, 0.8)";
+    if (node.isAnchor) return "rgba(229, 231, 235, 0.45)";
+    return "rgba(255, 255, 255, 0.08)";
+  }
+
+  function debugEdgeStroke(node) {
+    if (node.recompute) return "#fbbf24";
+    if (node.isCurrent) return "#38bdf8";
+    if (node.onPromptPath) return "#22c55e";
+    if (node.onCurrentPath) return "#7dd3fc";
+    return "#475569";
+  }
+
+  function debugEdgeStrokeWidth(node) {
+    if (node.recompute) return 2.8;
+    if (node.isCurrent || node.onPromptPath) return 2.4;
+    return 1.5;
+  }
+
+  function debugEdgeLabelLines(node) {
+    return debugEdgeLabelMetrics(node).lines;
+  }
+
+  function renderDebugEdge(sceneLayer, edge) {
+    const parentRightX = edge.parent.x + edge.parent.width;
+    const childLeftX = edge.child.x;
+    const midX = parentRightX + (childLeftX - parentRightX) / 2;
+    const path = debugSvgEl("path", {
+      class: "debug-edge-path",
+      d: `M ${parentRightX} ${edge.parent.centerY} H ${midX} V ${edge.child.centerY} H ${childLeftX}`,
+      stroke: debugEdgeStroke(edge.node),
+      "stroke-width": debugEdgeStrokeWidth(edge.node),
+      fill: "none",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+    });
+    sceneLayer.appendChild(path);
+
+    const labelMetrics = debugEdgeLabelMetrics(edge.node);
+    if (!labelMetrics.lines.length) {
+      return;
+    }
+    const { lines, width: labelWidth, height: labelHeight } = labelMetrics;
+    const labelX = midX - labelWidth / 2;
+    const labelY = (edge.parent.centerY + edge.child.centerY) / 2 - labelHeight / 2;
+
+    const labelGroup = debugSvgEl("g", { class: "debug-edge-label-group" });
+    if (edge.node.recompute && typeof edge.node.recompute.reason === "string" && edge.node.recompute.reason) {
+      const title = debugSvgEl("title");
+      title.textContent = edge.node.recompute.reason;
+      labelGroup.appendChild(title);
+    }
+
+    labelGroup.appendChild(
+      debugSvgEl("rect", {
+        class: "debug-edge-label-box",
+        x: labelX,
+        y: labelY,
+        width: labelWidth,
+        height: labelHeight,
+        rx: 7,
+        ry: 7,
+      }),
+    );
+
+    lines.forEach((line, index) => {
+      const text = debugSvgEl("text", {
+        class: `debug-edge-label ${index === 0 ? "primary" : "secondary"}`,
+        x: labelX + labelWidth / 2,
+        y: labelY + DEBUG_EDGE_LABEL_PADDING_Y + 10 + index * DEBUG_EDGE_LABEL_LINE_HEIGHT,
+        "text-anchor": "middle",
+      });
+      text.textContent = line;
+      labelGroup.appendChild(text);
+    });
+
+    sceneLayer.appendChild(labelGroup);
+  }
+
+  function renderDebugNode(sceneLayer, placedNode) {
+    const group = debugSvgEl("g", { class: "debug-node-group" });
+    const title = debugSvgEl("title");
+    title.textContent = debugNodeTitle(placedNode.node);
+    group.appendChild(title);
+
+    group.appendChild(
+      debugSvgEl("rect", {
+        class: "debug-node-box",
+        x: placedNode.x,
+        y: placedNode.y,
+        width: placedNode.width,
+        height: placedNode.height,
+        rx: 10,
+        ry: 10,
+        fill: debugNodeFill(placedNode.node),
+        stroke: debugNodeStroke(placedNode.node),
+        "stroke-width": placedNode.node.isCurrent ? 1.8 : 1.2,
+      }),
+    );
+
+    const label = debugSvgEl("text", {
+      class: "debug-node-label",
+      x: placedNode.x + placedNode.width / 2,
+      y: placedNode.y + DEBUG_NODE_HEIGHT / 2 + 0.5,
+      "text-anchor": "middle",
+    });
+    label.textContent = debugCompactNodeLabel(placedNode.node);
+    group.appendChild(label);
+
+    sceneLayer.appendChild(group);
+  }
+
+  function debugViewportFocusNode(scene) {
+    return (
+      scene.nodes.find((node) => node.node && node.node.isAnchor) ||
+      scene.nodes.find((node) => node.node && node.node.isCurrent) ||
+      scene.nodes[0] ||
+      null
+    );
+  }
+
+  function focusDebugWeightViewport(scene) {
+    const focusNode = debugViewportFocusNode(scene);
+    if (!focusNode) {
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      const leftMargin = 18;
+      debugWeightTree.scrollLeft = Math.max(0, focusNode.x - leftMargin);
+    });
+  }
+
+  function renderDebugWeightTree() {
+    const debug = state.debugTree;
+    if (!debug) {
+      hideDebugWeightTree();
+      return;
+    }
+
+    debugWeightPanel.hidden = false;
+    debugWeightTitle.textContent = typeof debug.title === "string" && debug.title ? debug.title : "Weight visualizer";
+    debugWeightSummary.textContent = typeof debug.summary === "string" ? debug.summary : "";
+    debugWeightTree.innerHTML = "";
+
+    if (typeof debug.error === "string" && debug.error) {
+      const error = document.createElement("div");
+      error.className = "debug-weight-error";
+      error.textContent = debug.error;
+      debugWeightTree.appendChild(error);
+      return;
+    }
+
+    if (!debug.tree) {
+      const empty = document.createElement("div");
+      empty.className = "debug-weight-empty";
+      empty.textContent = "No debug tree available.";
+      debugWeightTree.appendChild(empty);
+      return;
+    }
+
+    const layout = measureDebugTreeLayout(debug.tree);
+    const scene = { nodes: [], edges: [] };
+    placeDebugTreeLayout(layout, DEBUG_CANVAS_PADDING, DEBUG_CANVAS_PADDING, scene);
+
+    const svgWidth = layout.width + DEBUG_CANVAS_PADDING * 2;
+    const svgHeight = layout.height + DEBUG_CANVAS_PADDING * 2;
+    const svg = debugSvgEl("svg", {
+      class: "debug-weight-svg",
+      viewBox: `0 0 ${svgWidth} ${svgHeight}`,
+      width: svgWidth,
+      height: svgHeight,
+      role: "img",
+      "aria-label": debugWeightTitle.textContent,
+    });
+
+    const edgeLayer = debugSvgEl("g", { class: "debug-edge-layer" });
+    scene.edges.forEach((edge) => renderDebugEdge(edgeLayer, edge));
+    svg.appendChild(edgeLayer);
+
+    const nodeLayer = debugSvgEl("g", { class: "debug-node-layer" });
+    scene.nodes.forEach((node) => renderDebugNode(nodeLayer, node));
+    svg.appendChild(nodeLayer);
+
+    debugWeightTree.appendChild(svg);
+    focusDebugWeightViewport(scene);
+  }
+
   function renderReviewComment() {
     if (!isReviewMode()) {
       commentPanel.hidden = true;
@@ -769,6 +1123,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     state.active = !!sr.active;
     state.mode = sr.mode || "idle";
     state.review = sr.review || null;
+    state.debugTree = sr.debugTree || null;
     state.searchMove = sr.searchMove || null;
     state.startRange = Number.isInteger(sr.startRange) ? sr.startRange : null;
     // Review/history navigation reuses the existing history list instead of rebroadcasting it on every click.
@@ -782,6 +1137,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
 
     refreshButtons();
     renderReviewTree();
+    renderDebugWeightTree();
     renderReviewComment();
     renderSearchMove();
     renderHistory();
@@ -801,9 +1157,13 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     if (Object.prototype.hasOwnProperty.call(review, "dbStats")) {
       state.review.dbStats = review.dbStats || null;
     }
+    if (Object.prototype.hasOwnProperty.call(review, "debugTree")) {
+      state.debugTree = review.debugTree || null;
+    }
 
     refreshButtons();
     renderReviewTree();
+    renderDebugWeightTree();
     renderReviewComment();
     renderSearchMove();
     acknowledgeReviewNavigation(state.review.currentPath);

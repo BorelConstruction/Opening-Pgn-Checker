@@ -52,10 +52,16 @@ def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attemp
                 ) from e
             else:
                 raise
+        except berserk.exceptions.ApiError as e:
+            sys.stderr.write(f"\n {e}")
+            if attempt < max_attempts - 1:
+                sys.stderr.write(f"\nRetrying...")
+                time.sleep(10)
+            continue
         except Exception as e:
-            raise  # not a 429 → bubble up
+            raise  # something else bubble up
 
-    raise RuntimeError("Too many 429s – giving up")
+    raise RuntimeError("Too many failed attempts – giving up")
 
 def total_games(game_data: dict):
     return game_data['white'] + game_data['draws'] + game_data['black']

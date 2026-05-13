@@ -504,6 +504,91 @@ button:disabled,
   white-space: nowrap;
 }
 
+.debug-weight-panel[hidden] {
+  display: none;
+}
+
+.debug-weight-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.debug-weight-head {
+  display: grid;
+  gap: 1px;
+}
+
+.debug-weight-title {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.debug-weight-tree {
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.debug-weight-empty,
+.debug-weight-error {
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(2, 6, 23, 0.35);
+}
+
+.debug-weight-empty {
+  color: var(--muted);
+}
+
+.debug-weight-error {
+  color: #fecaca;
+}
+
+.debug-weight-svg {
+  display: block;
+}
+
+.debug-edge-path {
+  opacity: 0.95;
+}
+
+.debug-edge-label-box {
+  fill: rgba(15, 23, 42, 0.94);
+  stroke: rgba(255, 255, 255, 0.12);
+  stroke-width: 1;
+}
+
+.debug-edge-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  dominant-baseline: middle;
+  fill: #e5e7eb;
+}
+
+.debug-edge-label.primary {
+  fill: #93c5fd;
+  font-weight: 700;
+}
+
+.debug-edge-label.secondary {
+  fill: #fde68a;
+}
+
+.debug-node-box {
+  filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.22));
+}
+
+.debug-node-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  pointer-events: none;
+  dominant-baseline: middle;
+}
+
+.debug-node-label {
+  fill: #f8fafc;
+  font-size: 10.5px;
+}
+
 .tree-node {
   margin: 2px 0;
 }
