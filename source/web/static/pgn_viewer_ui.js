@@ -22,8 +22,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const reviewNextMovesPanel = document.getElementById("reviewNextMovesPanel");
   const reviewNextMovesList = document.getElementById("reviewNextMovesList");
   const debugWeightPanel = document.getElementById("debugWeightPanel");
-  const debugWeightTitle = document.getElementById("debugWeightTitle");
-  const debugWeightSummary = document.getElementById("debugWeightSummary");
   const debugWeightTree = document.getElementById("debugWeightTree");
   const commentPanel = document.getElementById("commentPanel");
   const commentText = document.getElementById("commentText");
@@ -750,8 +748,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
 
   function hideDebugWeightTree() {
     debugWeightPanel.hidden = true;
-    debugWeightTitle.textContent = "Weight visualizer";
-    debugWeightSummary.textContent = "";
     debugWeightTree.innerHTML = "";
   }
 
@@ -1050,8 +1046,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     }
 
     debugWeightPanel.hidden = false;
-    debugWeightTitle.textContent = typeof debug.title === "string" && debug.title ? debug.title : "Weight visualizer";
-    debugWeightSummary.textContent = typeof debug.summary === "string" ? debug.summary : "";
+    const debugTitle = typeof debug.title === "string" && debug.title ? debug.title : "Weight visualizer";
     debugWeightTree.innerHTML = "";
 
     if (typeof debug.error === "string" && debug.error) {
@@ -1082,7 +1077,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       width: svgWidth,
       height: svgHeight,
       role: "img",
-      "aria-label": debugWeightTitle.textContent,
+      "aria-label": debugTitle,
     });
 
     const edgeLayer = debugSvgEl("g", { class: "debug-edge-layer" });

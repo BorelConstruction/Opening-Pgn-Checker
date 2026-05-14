@@ -482,9 +482,9 @@ class RepetitionEngine():
     def _move_probs_for(self, position: BoardLike) -> PositionMoveData:
         return self._move_probs[fen(position)]
 
-    def _moves_for_(self, parent: Node) -> dict[UCI, MoveEntryData]:
+    def _moves_for_(self, parent: Node, blacklist_included: bool = False) -> dict[UCI, MoveEntryData]:
         position_data = self._move_probs_for(parent)
-        move_weights = position_data["moves"]
+        move_weights = {m:p for m, p in position_data["moves"].items() if blacklist_included or m not in position_data["blacklist"]}
         if not move_weights:
             move_weights.update(
                 {
@@ -755,6 +755,8 @@ class RepetitionEngine():
                     self._prompt.off_file = True
                     next_node = self._add_temporary_node(self._prompt.node, self._prompt.prechosen_path[child_index])
 
+
+                self._prompt.node = next_node
                 self._prompt.node_index += 1
                 return
             except IndexError:
@@ -791,10 +793,14 @@ class RepetitionEngine():
         all_prompts = self._prompt_dict_relative
         possible_prompt_keys = set()
 
-        # length (starting from anchor node)
+        # length (starting from anchor node).
         prpt_len = self._rng.randint(1, self.MAX_GLOBAL_PROMPT_LENGTH)
+        # Even so that we end on opponent's move after maybe off-book
+        prpt_len -= prpt_len % 2
+        # make sure we are anchored at our move
+        possible_start_index = int(self._root.turn() == self._session.options.side)
         # i is offset from root. So root ---i---> anchor ---prpt_len---> prompt end
-        for i in range(1, self.start_range*2+1):
+        for i in range(possible_start_index, self.start_range*2+1, 2):
             possible_prompt_keys.update([k[:i+prpt_len] for k in all_prompts.keys() if len(k) >= i+prpt_len])
         preferred_prompt_keys = sorted(possible_prompt_keys, key=lambda k: all_prompts[k]/all_prompts[k[:-prpt_len]], reverse=True)[:6]
 
@@ -802,17 +808,21 @@ class RepetitionEngine():
             return False
 
         chosen_path = self._rng_choice(preferred_prompt_keys)
-        self._prompt.prechosen_path = self._maybe_append_global_off_book_move(chosen_path)
+        if not self._maybe_append_global_off_book_move(chosen_path):
+            chosen_path = chosen_path[:len(chosen_path)-1]
 
-        offset = len(self._prompt.prechosen_path) - prpt_len
+
+        # determine the anchor node and index for the prompt
+        offset = len(chosen_path) - prpt_len
         anchor = self._root
         for j in range(offset):
-            anchor = self._session.child_for_move(anchor, self._prompt.prechosen_path[j])
+            anchor = self._session.child_for_move(anchor, chosen_path[j])
         index = offset - 1
         
-        if anchor.turn() != self._session.options.side:
-            anchor = self._session.child_for_move(anchor, self._prompt.prechosen_path[offset])
-            index += 1
+        # make sure we are anchored at their move
+        assert anchor.turn() == self._session.options.side
+
+        self._prompt.prechosen_path = chosen_path
         self._prompt.node = anchor
         self._prompt.anchor_node = anchor
         self._prompt.node_index = index
@@ -823,9 +833,14 @@ class RepetitionEngine():
     def _maybe_append_global_off_book_move(
         self,
         prechosen_path: tuple[UCI, ...],
-    ) -> tuple[UCI, ...]:
+    ) -> bool:
+        """With probability self.non_file_move_freq, append an off-book move for the opponent after the prechosen path.
+        Assumes prechosen_path ends on opponent's move.
+        The move gets added to self._prompt.prechosen_path.
+        Returns True if an off-book move was appended, False otherwise.
+        """
         if self._rng.random() >= self.non_file_move_freq:
-            return prechosen_path
+            return False
 
         end_node = self._root
         for move_uci in prechosen_path:
@@ -833,9 +848,10 @@ class RepetitionEngine():
 
         off_book_selection = self._select_off_book_move(end_node.board(), use_engine=False)
         if off_book_selection.move is None:
-            return prechosen_path
+            return False
 
-        return (*prechosen_path, off_book_selection.move.uci())
+        prechosen_path += (off_book_selection.move.uci(),)
+        return True
 
     def _try_choose_prompt(self, node: Optional[Node] = None, complete: bool = False) -> bool:
         # TODO: settle the logic for node vs self._root. We could in theory ask 
