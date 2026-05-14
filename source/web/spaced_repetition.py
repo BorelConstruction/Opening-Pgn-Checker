@@ -136,10 +136,11 @@ class RepetitionEngine():
     MAX_GLOBAL_PROMPT_LENGTH = 10
 
     def __init__(self, session: RepertoireSession, root: Node, start_range: int, prompt_state: PromptState,
-                 probs_cache_name: str, non_file_freq: float) -> None:
+                 probs_cache_name: str, non_file_freq: float, local_generation: bool) -> None:
         self._session = session
         self.non_file_move_freq = non_file_freq
         self._rng = random.Random()
+        self.local_generation = local_generation
 
         # updates whenever asked to generate a new prompt
         self._prompt_spec = None
@@ -840,9 +841,9 @@ class RepetitionEngine():
         # TODO: settle the logic for node vs self._root. We could in theory ask 
         # to study from a given node but only once. Then do we rebuild the local_prompt_dict?
         # Kind of silly, maybe it is really only "in theory" that this parameter is useful.
-        if complete:
-            return self._choose_prompt_globally()
-        return self._choose_prompt_locally(node)
+        if self.local_generation:
+            return self._choose_prompt_locally(node)
+        return self._choose_prompt_globally()
 
     def _choose_prompt_locally(self, node: Optional[Node] = None) -> bool:
         """Simulate walking through a randomly chosen line. 
@@ -1874,6 +1875,7 @@ class AppController:
             self._prompt,
             self._probs_cache_name(),
             self._cfg.non_file_move_frequency,
+            self._cfg.local_generation
         )
         self._rep_controller = RepetitionController(
             NaiveScheduler(self._log),

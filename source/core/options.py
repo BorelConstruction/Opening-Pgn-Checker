@@ -204,6 +204,14 @@ class SpacedRepetitionOptions(RepertoireOptions):
         },
     )
 
+    local_generation: bool = field(
+        default=True,
+        metadata={
+            "label": "Generate Prompts Move by Move",
+            "ui_hint": "checkbox",
+        },
+    )
+
     def validate(self):
         super().validate()
         if not (0.0 <= self.non_file_move_frequency <= 1.0):
