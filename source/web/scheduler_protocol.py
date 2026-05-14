@@ -67,6 +67,10 @@ class RepetitionEngine(Protocol):
         """Start generating a new prompt of given type."""
         ...
 
+    def start_prompt_by_id(self, prompt_id: PromptId, spec_id: SpecId) -> Prompt:
+        """Start a specific prompt identified outside the engine."""
+        ...
+
     def on_response(self, response: Any) -> Prompt:
         """
         Process user response, update internal state, and advance or terminate the prompt.
@@ -123,6 +127,11 @@ class RepetitionController:
         spec_id = self.scheduler.next()
         self.current_spec_id = spec_id
         self._prompt = self.engine.start_prompt(spec_id)
+
+    def start_prompt_by_id(self, prompt_id: PromptId, spec_id: SpecId | None = None) -> None:
+        spec_id = spec_id or "by id"
+        self.current_spec_id = spec_id
+        self._prompt = self.engine.start_prompt_by_id(prompt_id, spec_id)
 
     def finalize_current_prompt(self) -> None:
         prompt_id = self.engine.current_prompt_id()

@@ -135,7 +135,7 @@ class RepetitionEngine():
     MAX_OFF_BOOK_BLACKLIST_ATTEMPTS = 3
     MAX_GLOBAL_PROMPT_LENGTH = 10
 
-    def __init__(self, session: RepertoireSession, root: Node, start_range: int, prompt_state: PromptState,
+    def __init__(self, session: RepertoireSession, root: Node, start_range: int,
                  probs_cache_name: str, non_file_freq: float, local_generation: bool) -> None:
         self._session = session
         self.non_file_move_freq = non_file_freq
@@ -145,7 +145,7 @@ class RepetitionEngine():
         # updates whenever asked to generate a new prompt
         self._prompt_spec = None
 
-        self._prompt = prompt_state
+        self._prompt = PromptState(node=None, off_file=False, message="", anchor_node=None)
 
         # starting point for prompt generation
         self._root = root
@@ -344,12 +344,7 @@ class RepetitionEngine():
         self._grades = []
         self._move_performance = {}
         self._current_hints = None
-        self._prompt.node = None
-        self._prompt.message = ""
-        self._prompt.off_file = False
-        self._prompt.anchor_node = None
-        self._prompt.prechosen_path = None
-        self._prompt.node_index = None
+        self._prompt = PromptState(node=None, off_file=False, message="", anchor_node=None)
         self._last_weight_updates = []
 
     def _relative_move_path_for_node(self, node: Node) -> Optional[list[UCI]]:
@@ -365,7 +360,7 @@ class RepetitionEngine():
         except RuntimeError:
             return self._add_temporary_node(parent, move)
 
-    def _restore_history_prompt(self, prompt_id: PromptLineId) -> None:
+    def _create_prompt_from_id(self, prompt_id: PromptLineId) -> PromptState:
         full_moves = list(prompt_id.moves)
 
         node = self._session.game
@@ -381,13 +376,19 @@ class RepetitionEngine():
                 anchor_node = node
                 anchor_index = len(prechosen_path) - 1
 
-        self._prompt.prechosen_path = tuple(prechosen_path)
-        self._prompt.anchor_node = anchor_node
-        self._prompt.node = anchor_node
-        self._prompt.node_index = anchor_index
-        self._prompt.message = "Restudying prompt from history."
+        if anchor_node is None or anchor_index is None:
+            raise ValueError(f"Prompt id {prompt_id!r} does not resolve to a known prompt start")
 
-    def start_prompt(self, spec_id: SpecId) -> None:
+        return PromptState(
+            node=anchor_node,
+            off_file=False,
+            message="",
+            anchor_node=anchor_node,
+            prechosen_path=tuple(prechosen_path),
+            node_index=anchor_index,
+        )
+
+    def start_prompt(self, spec_id: SpecId) -> PromptState:
         self._reset_prompt_state()
 
         if spec_id == "new":
@@ -398,10 +399,10 @@ class RepetitionEngine():
 
         return self._prompt
 
-    def start_history_prompt(self, prompt_id: PromptLineId, spec_id: SpecId = "history") -> PromptState:
+    def start_prompt_by_id(self, prompt_id: PromptLineId, spec_id: SpecId = "history") -> PromptState:
         self._reset_prompt_state()
         self._spec_id = spec_id
-        self._restore_history_prompt(prompt_id)
+        self._prompt = self._create_prompt_from_id(prompt_id)
         return self._prompt
 
     def _choose_random_prompt(self) -> PromptState:
@@ -1753,7 +1754,6 @@ class AppController:
         self.active = False
         self._mode = "idle"  # idle | guess | review
 
-        self._prompt = PromptState(node=None, off_file=False, message="", anchor_node=None)
         self._log = PromptLog()
 
         self._review_base_root_path: list[int] = []
@@ -1881,14 +1881,12 @@ class AppController:
             default_cache_path=lambda: default_repertoire_cache_path(options),
         )
         self._orientation = "white" if options.play_white else "black"
-        self._prompt = PromptState(node=None, off_file=False, message="", anchor_node=None)
         
         self._log.load_from_file(self._log_cache_name())
         self._rep_engine: RepetitionEngine = RepetitionEngine(
             self._session,
             self._session.starting_node,
             self._cfg.start_range,
-            self._prompt,
             self._probs_cache_name(),
             self._cfg.non_file_move_frequency,
             self._cfg.local_generation
@@ -1911,7 +1909,7 @@ class AppController:
         self._rep_controller.start_next_prompt()
         self.show_prompt()
 
-    def show_prompt(self, prompt: str = None, **kwargs) -> None:
+    def show_prompt(self, prompt: PromptState | None = None, **kwargs) -> None:
         if prompt is None:
             prompt = self._rep_controller.get_prompt_view()
 
@@ -1929,7 +1927,6 @@ class AppController:
         self.active = False
         self._mode = "idle"
         self._games = []
-        self._prompt = None
         self._close_session()
 
     def _broadcast_ui_state(self, include_history: bool = True) -> None:
@@ -2324,7 +2321,8 @@ class AppController:
         
         continue_prompt = self._rep_controller.on_user_response(uci)
         if not continue_prompt:
-            self._enter_review_mode(node=self._prompt.node, message=self._prompt.message)
+            prompt = self._rep_controller.get_prompt_view()
+            self._enter_review_mode(node=prompt.node, message=prompt.message)
         else:
             self.show_prompt()
 
@@ -2352,8 +2350,9 @@ class AppController:
 
         blacklisted_uci = self._rep_engine.blacklist_current_move()
         self._finalize_finished_prompt()
+        prompt = self._rep_controller.get_prompt_view()
         self._enter_review_mode(
-            node=self._prompt.node,
+            node=prompt.node,
             message=f"Blacklisted {blacklisted_uci}. Browse the tree or click New.",
         )
 
@@ -2361,7 +2360,9 @@ class AppController:
         if self._mode != "guess":
             return
 
-        if self._prompt.node is not None:
+        prompt = self._rep_controller.get_prompt_view()
+
+        if prompt.node is not None:
             expected_uci = self._rep_engine.expected_uci()
             if expected_uci:
                 message = f"Expected: {expected_uci}. Browse the tree or click New."
@@ -2370,7 +2371,7 @@ class AppController:
         else:
             message = "Off-file prompt. Browse the repertoire tree or click New."
 
-        self._enter_review_mode(node=self._prompt.node, message=message)
+        self._enter_review_mode(node=prompt.node, message=message)
 
     def goto_review_path(self, path: list[int]) -> None:
         if self._mode != "review":
@@ -2422,7 +2423,7 @@ class AppController:
     def study_history_prompt(self, prompt_id: PromptLineId, spec_id: SpecId) -> None:
         self.active = True
         self._mode = "guess"
-        self._rep_engine.start_history_prompt(prompt_id, spec_id=spec_id)
+        self._rep_controller.start_prompt_by_id(prompt_id, spec_id)
         self.show_prompt()
 
     def _show_history_board(self, position_fen: str, message: str) -> None:
