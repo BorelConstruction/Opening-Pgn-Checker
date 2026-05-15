@@ -48,7 +48,7 @@ class MoveEntryData(TypedDict):
 
 
 class PositionMoveData(TypedDict):
-    moves: dict[UCI, MoveEntryData]
+    moves: dict[UCI, MoveEntryData] | None
     blacklist: list[UCI]
 
 
@@ -152,13 +152,13 @@ class RepetitionEngine():
         # max of how far we move from the root, in MOVES
         self.start_range = start_range
 
-        self._move_probs = CacheDict(
-            lambda position_fen: PositionMoveData(moves={}, blacklist=[]),
+        self._pos_drill_data = CacheDict(
+            lambda position_fen: PositionMoveData(moves=None, blacklist=[]),
             item_to_json=self._moveprobs_item_to_json,
             item_from_json=self._moveprobs_item_from_json,
             auto_save=False,
         )
-        self._move_probs.load_from_file(probs_cache_name)
+        self._pos_drill_data.load_from_file(probs_cache_name)
 
         self._session.fill_the_TT(self._session.game)
         self._grades: list[MoveGrade] = []
@@ -212,7 +212,7 @@ class RepetitionEngine():
                 pass
             if n.turn() == self._session.options.side:
                 return
-            children_uci_weights = self._moves_for_(n)
+            children_uci_weights = self._get_moves_for_(n)
             for child in self._session.variations(n):
                 if child.move.uci() not in children_uci_weights:
                     continue
@@ -267,8 +267,8 @@ class RepetitionEngine():
             if expected_node := self._current_expected_node():
                 self._update_ease(self._prompt.node, expected_node.move.uci(), False) # TODO: let move_performance do this all in one place
             self._move_performance_for(self._prompt.node).add_giveup()
-        self._recompute_line_move_probs(self._prompt.node, -ease)
-        self._move_probs.serialize()
+        self._recompute_line_pos_drill_data(self._prompt.node, -ease)
+        self._pos_drill_data.serialize()
 
     def sync_move_weights_with_pgn(self) -> WeightSyncSummary:
         positions_checked = 0
@@ -277,9 +277,11 @@ class RepetitionEngine():
 
         self._clear_temporary_nodes()
 
-        for position_fen, position_data in list(self._move_probs.items()):
+        for position_fen, position_data in list(self._pos_drill_data.items()):
             positions_checked += 1
             move_weights = position_data["moves"]
+            if move_weights is None:
+                continue
             current_moves = self._pgn_move_ucis_for_position(position_fen)
 
             stale_moves = [uci for uci in move_weights if uci not in current_moves]
@@ -295,7 +297,7 @@ class RepetitionEngine():
                     move_weights[uci] = MoveEntryData(weight=added_weight, ease=0.0)
                 moves_added += len(missing_moves)
 
-        self._move_probs.serialize()
+        self._pos_drill_data.serialize()
         self._refresh_prompt_dicts()
         return WeightSyncSummary(
             positions_checked=positions_checked,
@@ -324,7 +326,7 @@ class RepetitionEngine():
         parent = node.parent
         if not hasattr(parent, "parent"):
             return 1.0
-        return self._moves_for_(parent.parent)[parent.move.uci()]["weight"]
+        return self._get_moves_for_(parent.parent)[parent.move.uci()]["weight"]
 
     def set_start(self, root: Optional[Node] = None, start_range: Optional[int] = None) -> None:
         if root is not None:
@@ -452,10 +454,12 @@ class RepetitionEngine():
 
         if isinstance(payload, dict):
             position_fen = payload["fen"]
-            raw_move_probs = payload.get("moves", {})
+            if "moves" not in payload:
+                raise KeyError(f"Missing moves payload for position {position_fen!r}")
+            raw_pos_drill_data = payload["moves"]
             raw_blacklist = payload.get("blacklist", [])
         else:
-            position_fen, raw_move_probs = payload
+            position_fen, raw_pos_drill_data = payload
             raw_blacklist = []
 
         move_probs: dict[UCI, MoveEntryData] = {}
@@ -464,7 +468,12 @@ class RepetitionEngine():
             if raw_uci not in blacklist:
                 blacklist.append(raw_uci)
 
-        for uci, raw_entry in raw_move_probs.items():
+        if raw_pos_drill_data is None:
+            return position_fen, PositionMoveData(moves=None, blacklist=blacklist)
+        if not isinstance(raw_pos_drill_data, dict):
+            raise TypeError(f"Moves payload for position {position_fen!r} must be a dict or null")
+
+        for uci, raw_entry in raw_pos_drill_data.items():
             if isinstance(raw_entry, dict):
                 raw_weight = raw_entry.get("weight", raw_entry.get("prob"))
                 if raw_weight is None:
@@ -480,33 +489,27 @@ class RepetitionEngine():
 
         return position_fen, PositionMoveData(moves=move_probs, blacklist=blacklist)
 
-    def _move_probs_for(self, position: BoardLike) -> PositionMoveData:
-        return self._move_probs[fen(position)]
-
-    def _moves_for_(self, parent: Node, blacklist_included: bool = False) -> dict[UCI, MoveEntryData]:
-        position_data = self._move_probs_for(parent)
-        move_weights = {m:p for m, p in position_data["moves"].items() if blacklist_included or m not in position_data["blacklist"]}
-        if not move_weights:
-            move_weights.update(
-                {
+    def _get_moves_for_(self, parent: Node, blacklist_included: bool = False) -> dict[UCI, MoveEntryData]:
+        position_data = self._pos_drill_data[fen(parent)]
+        if position_data["moves"] is None:
+            position_data["moves"] = {
                     move_uci: MoveEntryData(weight=float(freq), ease=0.0)
                     for move_uci, freq in self._get_moves_and_freqs(parent).items()
                 }
-            )
-        return move_weights
+            
+        return {m:p for m, p in position_data["moves"].items() if blacklist_included or m not in position_data["blacklist"]}
 
     def _blacklist_for(self, position: BoardLike) -> list[UCI]:
-        return self._move_probs_for(position)["blacklist"]
-
+        return self._pos_drill_data[fen(position)]["blacklist"]
 
     def _is_learned_move(self, parent: Node, uci: UCI) -> bool:
         try:
-            return self._moves_for_(parent)[uci]["ease"] >= self.LEARNED_EASE_THRESHOLD
+            return self._get_moves_for_(parent)[uci]["ease"] >= self.LEARNED_EASE_THRESHOLD
         except KeyError:
             return False
 
     def _is_blacklisted_move(self, position: BoardLike, uci: UCI) -> bool:
-        position_data = self._move_probs.get(fen(position))
+        position_data = self._pos_drill_data.get(fen(position))
         if position_data is None:
             return False
         return uci in position_data["blacklist"]
@@ -606,9 +609,10 @@ class RepetitionEngine():
         )
 
     def _update_ease(self, node: Node, uci: UCI, correct: bool) -> None:
-        if uci not in self._moves_for_(node):
-            self._moves_for_(node)[uci] = MoveEntryData(weight=0.0, ease=0.0)
-        self._moves_for_(node)[uci]["ease"] += \
+        moves = self._get_moves_for_(node, blacklist_included=True)
+        if uci not in moves:
+            moves[uci] = MoveEntryData(weight=0.0, ease=0.0)
+        moves[uci]["ease"] += \
             self.MOVE_EASE_CORRECT_STEP if correct else -self.MOVE_EASE_INCORRECT_STEP
 
     def _handle_file_guess(self, uci: UCI) -> MoveGrade:
@@ -922,7 +926,7 @@ class RepetitionEngine():
         off_book = off_book or (maybe_off_book and self._rng.random() < self.non_file_move_freq)
 
         children = self._prompt_variations(parent)
-        move_weights = self._moves_for_(parent)
+        move_weights = self._get_moves_for_(parent)
         blacklisted_moves = set(self._blacklist_for(parent))
         eligible_moves = {
             uci: entry
@@ -1150,7 +1154,7 @@ class RepetitionEngine():
                 continue
             boosted_positions.add(parent_fen)
 
-            move_weights = self._moves_for_(parent)
+            move_weights = self._get_moves_for_(parent)
             if move_uci not in move_weights:
                 raise RuntimeError(f"Missing move data for {move_uci!r} from position {parent_fen!r}")
 
@@ -1158,7 +1162,7 @@ class RepetitionEngine():
             # self._normalize_move_entries(move_weights)
             updated += 1
 
-        self._move_probs.serialize()
+        self._pos_drill_data.serialize()
         return updated
 
     def _move_factor_details(self, parent: Node, move_uci: UCI, base_factor: float) -> tuple[float, str]:
@@ -1194,7 +1198,7 @@ class RepetitionEngine():
         return max(0.0, -grade.eval_diff)
     
     
-    def _recompute_line_move_probs(self, node: Node, diff: float) -> None:
+    def _recompute_line_pos_drill_data(self, node: Node, diff: float) -> None:
         """
         Make moves of a line less (or more) likely to appear,
         thus adapting to user's need to see it again.
@@ -1209,7 +1213,7 @@ class RepetitionEngine():
             child = node
             move = child.move
             node = child.parent
-            parent_dict = self._moves_for_(node)
+            parent_dict = self._get_moves_for_(node)
             move_uci = move.uci()
             if move_uci not in parent_dict:
                 continue
@@ -1306,7 +1310,7 @@ class RepetitionEngine():
 
     def _sorted_weighted_moves_for(self, parent: Node) -> list[tuple[UCI, float, str, Optional[Node]]]:
         entries: list[tuple[UCI, float, str, Optional[Node]]] = []
-        for move_uci, entry in self._moves_for_(parent).items():
+        for move_uci, entry in self._get_moves_for_(parent).items():
             try:
                 san = node_san(parent, move_uci)
             except Exception:
@@ -1333,7 +1337,7 @@ class RepetitionEngine():
     ) -> list[dict[str, Any]]:
         if remaining_prefix:
             move_uci = remaining_prefix[0]
-            move_weights = self._moves_for_(parent)
+            move_weights = self._get_moves_for_(parent)
             weight = move_weights.get(move_uci, {}).get("weight")
             try:
                 child = self._session.child_for_move(parent, move_uci)
