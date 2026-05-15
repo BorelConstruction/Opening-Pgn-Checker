@@ -87,6 +87,12 @@ class PromptMovePerformance:
 
 
 @dataclass(frozen=True)
+class MovePerformanceKey:
+    position_fen: str
+    move_uci: UCI
+
+
+@dataclass(frozen=True)
 class OffBookSelection:
     move: Optional[chess.Move]
     message: str = ""
@@ -162,7 +168,7 @@ class RepetitionEngine():
 
         self._session.fill_the_TT(self._session.game)
         self._grades: list[MoveGrade] = []
-        self._move_performance: dict[int, PromptMovePerformance] = {}
+        self._move_performance: dict[MovePerformanceKey, PromptMovePerformance] = {}
         self._current_hints: Optional[Hints] = None
         self._temporary_nodes: list[Node] = []
         self._last_weight_updates: list[WeightUpdateTrace] = []
@@ -264,10 +270,11 @@ class RepetitionEngine():
     def finish_prompt(self, ease=0.25, gave_up=False) -> None:
         self._is_finished = True
         if gave_up:
-            if expected_node := self._current_expected_node():
-                self._update_ease(self._prompt.node, expected_node.move.uci(), False) # TODO: let move_performance do this all in one place
-            self._move_performance_for(self._prompt.node).add_giveup()
-        self._recompute_line_pos_drill_data(self._prompt.node, -ease)
+            if feedback_target := self._current_feedback_target():
+                parent, move_uci = feedback_target
+                self._update_ease(parent, move_uci, False) # TODO: let move_performance do this all in one place
+                self._move_performance_for(parent, move_uci).add_giveup()
+        self._recompute_line_move_weights(self._prompt.node, -ease)
         self._pos_drill_data.serialize()
 
     def sync_move_weights_with_pgn(self) -> WeightSyncSummary:
@@ -571,32 +578,40 @@ class RepetitionEngine():
         # see TT-backed continuations.
         return self._session.variations(position, use_TT=True)
 
-    def _move_performance_for(self, node: Node) -> PromptMovePerformance:
-        node_id = id(node)
-        if node_id not in self._move_performance:
-            self._move_performance[node_id] = PromptMovePerformance()
-        return self._move_performance[node_id]
+    def _move_performance_key(self, parent: BoardLike, move_uci: UCI) -> MovePerformanceKey:
+        return MovePerformanceKey(position_fen=fen(parent), move_uci=move_uci)
 
-    def _current_feedback_node(self) -> Optional[Node]:
-        if self._prompt.node is None:
+    def _move_performance_for(self, parent: BoardLike, move_uci: UCI) -> PromptMovePerformance:
+        key = self._move_performance_key(parent, move_uci)
+        if key not in self._move_performance:
+            self._move_performance[key] = PromptMovePerformance()
+        return self._move_performance[key]
+
+    def _current_feedback_target(self) -> Optional[tuple[Node, UCI]]:
+        parent = self._prompt.node
+        if parent is None:
             return None
 
-        expected_node = self._current_expected_node()
-        if expected_node is not None:
-            return expected_node
-        return self._prompt.node
+        expected_uci = self.expected_uci()
+        if expected_uci is None:
+            return None
+        if expected_uci not in self._get_moves_for_(parent, blacklist_included=True):
+            return None
+        return parent, expected_uci
 
     def _record_hint(self, determines_move: bool) -> None:
-        target = self._current_feedback_node()
+        target = self._current_feedback_target()
         if target is None:
             return
-        self._move_performance_for(target).add_hint(determines_move)
+        parent, move_uci = target
+        self._move_performance_for(parent, move_uci).add_hint(determines_move)
 
     def _record_error(self, grade: MoveGrade) -> None:
-        target = self._current_feedback_node()
+        target = self._current_feedback_target()
         if target is None:
             return
-        self._move_performance_for(target).add_error(grade)
+        parent, move_uci = target
+        self._move_performance_for(parent, move_uci).add_error(grade)
 
     def _hint_matches_current_prompt(self, expected_uci: UCI) -> bool:
         if self._current_hints is None or self._prompt.node is None:
@@ -666,9 +681,10 @@ class RepetitionEngine():
             rel_eval_diff=rel_eval_diff,
         )
         self._grades.append(grade)
-        target = self._current_feedback_node()
-        if target is not None and target.parent is not None and target.move is not None:
-            self._update_ease(target.parent, target.move.uci(), False)
+        target = self._current_feedback_target()
+        if target is not None:
+            parent, move_uci = target
+            self._update_ease(parent, move_uci, False)
         self._record_error(grade)
         return grade
 
@@ -1168,11 +1184,7 @@ class RepetitionEngine():
     def _move_factor_details(self, parent: Node, move_uci: UCI, base_factor: float) -> tuple[float, str]:
         factor = base_factor
         reason_parts = [f"base={base_factor:.2f}"]
-        performance = None
-        try:
-            performance = self._move_performance.get(id(self._session.child_for_move(parent, move_uci)))
-        except RuntimeError:
-            performance = None
+        performance = self._move_performance.get(self._move_performance_key(parent, move_uci))
         if performance is not None:
             if performance.hint_requests:
                 hint_delta = self.HINT_FACTOR_STEP * performance.hint_requests
@@ -1198,7 +1210,7 @@ class RepetitionEngine():
         return max(0.0, -grade.eval_diff)
     
     
-    def _recompute_line_pos_drill_data(self, node: Node, diff: float) -> None:
+    def _recompute_line_move_weights(self, node: Node, diff: float) -> None:
         """
         Make moves of a line less (or more) likely to appear,
         thus adapting to user's need to see it again.
@@ -1213,6 +1225,8 @@ class RepetitionEngine():
             child = node
             move = child.move
             node = child.parent
+            if node.turn() == self._session.options.side:
+                continue
             parent_dict = self._get_moves_for_(node)
             move_uci = move.uci()
             if move_uci not in parent_dict:
@@ -1225,6 +1239,7 @@ class RepetitionEngine():
             sys.stderr.write(f"Updating weight for {move_uci}: {before:.2f} -> {after:.2f}\n")
             parent_dict[move_uci]["weight"] = after
             relative_path = self._relative_move_path_for_node(child)
+            
             if relative_path is not None:
                 self._last_weight_updates.append(
                     WeightUpdateTrace(
