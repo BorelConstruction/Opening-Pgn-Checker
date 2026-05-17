@@ -16,7 +16,7 @@ The workflow:
  - Scheduler -SpecId-> RepetitionController -SpecId-> RepetitionEngine
  - On user response:
     - RepetitionController -response-> RepetitionEngine
-    - RepetitionEngine updates move weights
+    - RepetitionEngine updates move learning state
     - RepetitionEngine continues or terminates the prompt
  - On prompt end:
     - RepetitionEngine -PromptId-> SessionLog

@@ -17,7 +17,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srGuessGiveUpBtn = document.getElementById("srGuessGiveUp");
   const srGuessFinishBtn = document.getElementById("srGuessFinish");
   const srGuessBlacklistBtn = document.getElementById("srGuessBlacklist");
-  const srGuessTooEasyBtn = document.getElementById("srGuessTooEasy");
   const treeContainer = document.getElementById("variation-tree");
   const reviewNextMovesPanel = document.getElementById("reviewNextMovesPanel");
   const reviewNextMovesList = document.getElementById("reviewNextMovesList");
@@ -327,7 +326,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srGuessGiveUpBtn.disabled = !isGuess;
     srGuessFinishBtn.disabled = !isGuess;
     srGuessBlacklistBtn.disabled = !isGuess;
-    srGuessTooEasyBtn.disabled = !isGuess;
     refreshAnalyzeLichessLink();
   }
 
@@ -756,6 +754,13 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     return `${value.toFixed(3)}`;
   }
 
+  function formatDebugPerformance(performance) {
+    if (!Array.isArray(performance) || performance.length !== 2) return "";
+    const [successes, attempts] = performance;
+    if (!Number.isInteger(successes) || !Number.isInteger(attempts) || attempts <= 0) return "";
+    return `P=${(successes / attempts).toFixed(2)} (${successes}/${attempts})`;
+  }
+
   const DEBUG_SVG_NS = "http://www.w3.org/2000/svg";
   const DEBUG_NODE_MIN_WIDTH = 26;
   const DEBUG_NODE_MAX_WIDTH = 94;
@@ -804,7 +809,8 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     if (node.isAnchor) parts.push("anchor");
     if (node.isCurrent) parts.push("current");
     if (node.onPromptPath) parts.push("prompt path");
-    if (node.recompute) parts.push("recomputed");
+    const performanceLabel = formatDebugPerformance(node.performance);
+    if (performanceLabel) parts.push(performanceLabel);
     return parts.join(" | ");
   }
 
@@ -818,11 +824,10 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     const lines = [];
     if (node.showWeightLabel) {
       lines.push(formatDebugWeight(node.weight));
-      if (node.recompute) {
-        lines.push(
-          `${node.recompute.before.toFixed(3)} -> ${node.recompute.after.toFixed(3)} x${node.recompute.factor.toFixed(2)}`,
-        );
-      }
+    }
+    const performanceLabel = formatDebugPerformance(node.performance);
+    if (performanceLabel) {
+      lines.push(performanceLabel);
     }
 
     if (!lines.length) {
@@ -903,7 +908,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   }
 
   function debugNodeStroke(node) {
-    if (node.recompute) return "rgba(251, 191, 36, 0.7)";
     if (node.isCurrent) return "rgba(56, 189, 248, 0.95)";
     if (node.onPromptPath) return "rgba(34, 197, 94, 0.8)";
     if (node.isAnchor) return "rgba(229, 231, 235, 0.45)";
@@ -911,7 +915,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   }
 
   function debugEdgeStroke(node) {
-    if (node.recompute) return "#fbbf24";
     if (node.isCurrent) return "#38bdf8";
     if (node.onPromptPath) return "#22c55e";
     if (node.onCurrentPath) return "#7dd3fc";
@@ -919,7 +922,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   }
 
   function debugEdgeStrokeWidth(node) {
-    if (node.recompute) return 2.8;
     if (node.isCurrent || node.onPromptPath) return 2.4;
     return 1.5;
   }
@@ -952,11 +954,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     const labelY = (edge.parent.centerY + edge.child.centerY) / 2 - labelHeight / 2;
 
     const labelGroup = debugSvgEl("g", { class: "debug-edge-label-group" });
-    if (edge.node.recompute && typeof edge.node.recompute.reason === "string" && edge.node.recompute.reason) {
-      const title = debugSvgEl("title");
-      title.textContent = edge.node.recompute.reason;
-      labelGroup.appendChild(title);
-    }
 
     labelGroup.appendChild(
       debugSvgEl("rect", {
@@ -1046,7 +1043,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     }
 
     debugWeightPanel.hidden = false;
-    const debugTitle = typeof debug.title === "string" && debug.title ? debug.title : "Weight visualizer";
+    const debugTitle = typeof debug.title === "string" && debug.title ? debug.title : "Weight / performance visualizer";
     debugWeightTree.innerHTML = "";
 
     if (typeof debug.error === "string" && debug.error) {
@@ -1204,7 +1201,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   srGuessGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
   srGuessFinishBtn.addEventListener("click", () => send({ type: "sr_finish_prompt" }));
   srGuessBlacklistBtn.addEventListener("click", () => send({ type: "sr_blacklist_prompt" }));
-  srGuessTooEasyBtn.addEventListener("click", () => send({ type: "sr_finish_prompt", ease: 0.5 }));
   srSearchMoveBtn.addEventListener("click", () => {
     state.searchMoveDismissed = false;
     renderSearchMove();

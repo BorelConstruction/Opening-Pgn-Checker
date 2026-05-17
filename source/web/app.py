@@ -203,12 +203,8 @@ async def ws(ws: WebSocket) -> None:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
             elif msg_type == "sr_finish_prompt":
-                ease = msg.get("ease", 0.25)
-                if not isinstance(ease, (int, float)):
-                    await ws.send_json({"type": "error", "message": "ease must be a number"})
-                    continue
                 try:
-                    sr_controller.finish_prompt(ease=float(ease))
+                    sr_controller.finish_prompt()
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 

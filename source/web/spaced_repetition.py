@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from copy import deepcopy
 from enum import Enum
 import json
 import os
@@ -15,7 +14,7 @@ from typing import Any, Iterable, Optional, TypeVar, TypedDict, Union
 import chess
 import chess.pgn
 from chess.pgn import GameNode as Node
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
 from source.core.caching import CacheDict
 from source.core.position_similarity import compare_positions
@@ -44,7 +43,7 @@ SEARCH_MOVE_BOOST_MIN_SIMILARITY = 0.8
 
 class MoveEntryData(TypedDict):
     weight: float
-    ease: float
+    performance: tuple[int, int]
 
 
 class PositionMoveData(TypedDict):
@@ -68,22 +67,33 @@ class MoveGrade():
 
 @dataclass
 class PromptMovePerformance:
-    hint_requests: int = 0
-    gave_up: bool = False
-    errors: list[MoveGrade] = field(default_factory=list)
+    successes: int = 0
+    attempts: int = 0
+    resolved_without_success: bool = False
 
     def add_giveup(self) -> None:
-        self.gave_up = True
+        if self.resolved_without_success:
+            return
+        self.attempts += 1
+        self.resolved_without_success = True
 
     def add_hint(self, determines_move: bool) -> None:
-        if not self.gave_up:
-            self.hint_requests += 1
-        self.gave_up = self.gave_up or determines_move
+        if self.resolved_without_success:
+            return
+        self.attempts += 1
+        if determines_move:
+            self.resolved_without_success = True
 
-    def add_error(self, grade: MoveGrade) -> None:
-        if grade.correctness != MoveCorrectness.INCORRECT:
-            raise ValueError("Only incorrect grades may be stored as move errors")
-        self.errors.append(grade)
+    def add_incorrect_attempt(self) -> None:
+        if self.resolved_without_success:
+            return
+        self.attempts += 1
+
+    def add_correct_attempt(self) -> None:
+        if self.resolved_without_success:
+            return
+        self.successes += 1
+        self.attempts += 1
 
 
 @dataclass(frozen=True)
@@ -106,15 +116,6 @@ class WeightSyncSummary:
     moves_removed: int
 
 
-@dataclass(frozen=True)
-class WeightUpdateTrace:
-    path: tuple[UCI, ...]
-    before: float
-    after: float
-    factor: float
-    reason: str
-
-
 DEBUG_WEIGHT_TREE_FORWARD_PLIES = 6
 
 
@@ -125,17 +126,12 @@ class RepetitionEngine():
     or picked by a chess engine.
 
     Keeps the result of generating in self._prompt and stores prompt-local
-    performance data so move weights can be adjusted from real user behavior.
+    performance data so cached move performance can be updated from real user behavior.
     """
-    HINT_FACTOR_STEP = 0.10
-    GAVE_UP_FACTOR = 1.15
-    ERROR_FACTOR_STEP = 1.2
-    ERROR_EVAL_LOSS_SCALE = 0.1
-    ERROR_EVAL_LOSS_CAP = 2
-    MIN_MOVE_FACTOR = 0.05
-    MOVE_EASE_CORRECT_STEP = 1.0
-    MOVE_EASE_INCORRECT_STEP = 1.0
-    LEARNED_EASE_THRESHOLD = 3.0
+    DEFAULT_RIGHT_PROBABILITY = 0.5
+    LEARNED_RIGHT_THRESHOLD = 0.85
+    LEARNED_MIN_ATTEMPTS = 3
+    LOCAL_UNLEARNED_RIGHT_THRESHOLD = 0.9
     LEARNED_MOVE_SKIP_PROBABILITY = 0.90
     MAX_PROMPT_SELECTION_ATTEMPTS = 100
     MAX_OFF_BOOK_BLACKLIST_ATTEMPTS = 3
@@ -171,8 +167,10 @@ class RepetitionEngine():
         self._move_performance: dict[MovePerformanceKey, PromptMovePerformance] = {}
         self._current_hints: Optional[Hints] = None
         self._temporary_nodes: list[Node] = []
-        self._last_weight_updates: list[WeightUpdateTrace] = []
+        self._global_successes = 0
+        self._global_attempts = 0
 
+        self._refresh_global_performance_totals()
         self._refresh_prompt_dicts()
 
     def summarize(self) -> Feedback:
@@ -247,6 +245,20 @@ class RepetitionEngine():
         self._prompt_dict_global = self.make_prompt_dict_global()
         self._prompt_dict_relative = self.make_prompt_dict_relative()
 
+    def _refresh_global_performance_totals(self) -> None:
+        successes = 0
+        attempts = 0
+        for position_data in self._pos_drill_data.values():
+            moves = position_data["moves"]
+            if moves is None:
+                continue
+            for entry in moves.values():
+                move_successes, move_attempts = entry["performance"]
+                successes += move_successes
+                attempts += move_attempts
+        self._global_successes = successes
+        self._global_attempts = attempts
+
     def get_hint_circles(self) -> list[Circle]:
         if self._prompt.node is None:
             raise RuntimeError("Cannot provide a hint without an active prompt")
@@ -267,14 +279,13 @@ class RepetitionEngine():
     def is_finished(self) -> bool:
         return self._is_finished
     
-    def finish_prompt(self, ease=0.25, gave_up=False) -> None:
+    def finish_prompt(self, gave_up: bool = False) -> None:
         self._is_finished = True
         if gave_up:
             if feedback_target := self._current_feedback_target():
                 parent, move_uci = feedback_target
-                self._update_ease(parent, move_uci, False) # TODO: let move_performance do this all in one place
                 self._move_performance_for(parent, move_uci).add_giveup()
-        self._recompute_line_move_weights(self._prompt.node, -ease)
+        self._commit_current_feedback_target()
         self._pos_drill_data.serialize()
 
     def sync_move_weights_with_pgn(self) -> WeightSyncSummary:
@@ -301,9 +312,10 @@ class RepetitionEngine():
             if missing_moves:
                 added_weight = self._added_move_weight(position_fen, retained_weights)
                 for uci in missing_moves:
-                    move_weights[uci] = MoveEntryData(weight=added_weight, ease=0.0)
+                    move_weights[uci] = MoveEntryData(weight=added_weight, performance=(0, 0))
                 moves_added += len(missing_moves)
 
+        self._refresh_global_performance_totals()
         self._pos_drill_data.serialize()
         self._refresh_prompt_dicts()
         return WeightSyncSummary(
@@ -354,7 +366,6 @@ class RepetitionEngine():
         self._move_performance = {}
         self._current_hints = None
         self._prompt = PromptState(node=None, off_file=False, message="", anchor_node=None)
-        self._last_weight_updates = []
 
     def _relative_move_path_for_node(self, node: Node) -> Optional[list[UCI]]:
         root_moves = node_moves(self._root, san=False)
@@ -487,20 +498,35 @@ class RepetitionEngine():
                     raise KeyError(f"Missing move weight for {uci!r} from position {position_fen!r}")
                 move_probs[uci] = MoveEntryData(
                     weight=float(raw_weight),
-                    ease=float(raw_entry.get("ease", 0.0)),
+                    performance=self._performance_from_json(raw_entry.get("performance", (0, 0))),
                 )
                 if raw_entry.get("blacklisted", False) and uci not in blacklist:
                     blacklist.append(uci)
             else:
-                move_probs[uci] = MoveEntryData(weight=float(raw_entry), ease=0.0)
+                move_probs[uci] = MoveEntryData(weight=float(raw_entry), performance=(0, 0))
 
         return position_fen, PositionMoveData(moves=move_probs, blacklist=blacklist)
+
+    def _performance_from_json(self, raw_performance: Any) -> tuple[int, int]:
+        if not isinstance(raw_performance, (list, tuple)) or len(raw_performance) != 2:
+            raise TypeError("Move performance must be a pair of integers")
+
+        successes, attempts = raw_performance
+        if isinstance(successes, bool) or isinstance(attempts, bool):
+            raise TypeError("Move performance values must be integers")
+        if not isinstance(successes, int) or not isinstance(attempts, int):
+            raise TypeError("Move performance values must be integers")
+        if successes < 0 or attempts < 0:
+            raise ValueError("Move performance values must be non-negative")
+        if successes > attempts:
+            raise ValueError("Move successes cannot exceed attempts")
+        return successes, attempts
 
     def _get_moves_for_(self, parent: Node, blacklist_included: bool = False) -> dict[UCI, MoveEntryData]:
         position_data = self._pos_drill_data[fen(parent)]
         if position_data["moves"] is None:
             position_data["moves"] = {
-                    move_uci: MoveEntryData(weight=float(freq), ease=0.0)
+                    move_uci: MoveEntryData(weight=float(freq), performance=(0, 0))
                     for move_uci, freq in self._get_moves_and_freqs(parent).items()
                 }
             
@@ -511,7 +537,11 @@ class RepetitionEngine():
 
     def _is_learned_move(self, parent: Node, uci: UCI) -> bool:
         try:
-            return self._get_moves_for_(parent)[uci]["ease"] >= self.LEARNED_EASE_THRESHOLD
+            attempts = self._move_attempts(parent, uci)
+            return (
+                attempts >= self.LEARNED_MIN_ATTEMPTS
+                and self._move_right_probability(parent, uci) > self.LEARNED_RIGHT_THRESHOLD
+            )
         except KeyError:
             return False
 
@@ -587,6 +617,65 @@ class RepetitionEngine():
             self._move_performance[key] = PromptMovePerformance()
         return self._move_performance[key]
 
+    def _move_entry(self, parent: BoardLike, move_uci: UCI) -> MoveEntryData:
+        moves = self._get_moves_for_(parent, blacklist_included=True)
+        if move_uci not in moves:
+            raise KeyError(f"Missing move data for {move_uci!r} from position {fen(parent)!r}")
+        return moves[move_uci]
+
+    def _global_right_probability(self) -> float:
+        if self._global_attempts <= 0:
+            return self.DEFAULT_RIGHT_PROBABILITY
+        return self._global_successes / self._global_attempts
+
+    def _move_successes_attempts(self, parent: BoardLike, move_uci: UCI) -> tuple[int, int]:
+        return self._move_entry(parent, move_uci)["performance"]
+
+    def _move_attempts(self, parent: BoardLike, move_uci: UCI) -> int:
+        return self._move_successes_attempts(parent, move_uci)[1]
+
+    def _move_right_probability(self, parent: BoardLike, move_uci: UCI) -> float:
+        successes, attempts = self._move_successes_attempts(parent, move_uci)
+        if attempts <= 0:
+            return self._global_right_probability()
+        return successes / attempts
+
+    def _move_wrong_probability(self, parent: BoardLike, move_uci: UCI) -> float:
+        return 1.0 - self._move_right_probability(parent, move_uci)
+
+    def _apply_move_performance_delta(
+        self,
+        parent: BoardLike,
+        move_uci: UCI,
+        *,
+        successes_delta: int,
+        attempts_delta: int,
+    ) -> None:
+        if successes_delta < 0 or attempts_delta < 0:
+            raise ValueError("Performance deltas must be non-negative")
+        if successes_delta > attempts_delta:
+            raise ValueError("Performance success delta cannot exceed attempts delta")
+        if attempts_delta == 0:
+            return
+
+        entry = self._move_entry(parent, move_uci)
+        successes, attempts = entry["performance"]
+        entry["performance"] = (successes + successes_delta, attempts + attempts_delta)
+        self._global_successes += successes_delta
+        self._global_attempts += attempts_delta
+
+    def _commit_move_performance(self, parent: BoardLike, move_uci: UCI) -> None:
+        key = self._move_performance_key(parent, move_uci)
+        performance = self._move_performance.pop(key, None)
+        if performance is None or performance.attempts == 0:
+            return
+        self._apply_move_performance_delta(
+            parent,
+            move_uci,
+            successes_delta=performance.successes,
+            attempts_delta=performance.attempts,
+        )
+
     def _current_feedback_target(self) -> Optional[tuple[Node, UCI]]:
         parent = self._prompt.node
         if parent is None:
@@ -606,12 +695,26 @@ class RepetitionEngine():
         parent, move_uci = target
         self._move_performance_for(parent, move_uci).add_hint(determines_move)
 
-    def _record_error(self, grade: MoveGrade) -> None:
+    def _record_incorrect_attempt(self) -> None:
         target = self._current_feedback_target()
         if target is None:
             return
         parent, move_uci = target
-        self._move_performance_for(parent, move_uci).add_error(grade)
+        self._move_performance_for(parent, move_uci).add_incorrect_attempt()
+
+    def _record_correct_attempt(self) -> None:
+        target = self._current_feedback_target()
+        if target is None:
+            return
+        parent, move_uci = target
+        self._move_performance_for(parent, move_uci).add_correct_attempt()
+
+    def _commit_current_feedback_target(self) -> None:
+        target = self._current_feedback_target()
+        if target is None:
+            return
+        parent, move_uci = target
+        self._commit_move_performance(parent, move_uci)
 
     def _hint_matches_current_prompt(self, expected_uci: UCI) -> bool:
         if self._current_hints is None or self._prompt.node is None:
@@ -622,13 +725,6 @@ class RepetitionEngine():
             and self._current_hints.starting_square == expected_uci[:2]
             and self._current_hints.target_square == expected_uci[2:4]
         )
-
-    def _update_ease(self, node: Node, uci: UCI, correct: bool) -> None:
-        moves = self._get_moves_for_(node, blacklist_included=True)
-        if uci not in moves:
-            moves[uci] = MoveEntryData(weight=0.0, ease=0.0)
-        moves[uci]["ease"] += \
-            self.MOVE_EASE_CORRECT_STEP if correct else -self.MOVE_EASE_INCORRECT_STEP
 
     def _handle_file_guess(self, uci: UCI) -> MoveGrade:
         uci = uci_from_lichess_to_pgn(uci)
@@ -641,7 +737,8 @@ class RepetitionEngine():
             return grade
 
         if expected_uci == uci:
-            self._update_ease(prpt_data.node, uci, True)
+            self._record_correct_attempt()
+            self._commit_current_feedback_target()
             grade = MoveGrade(MoveCorrectness.CORRECT)
             self._grades.append(grade)
             return grade
@@ -653,6 +750,7 @@ class RepetitionEngine():
                 None,
             )
             if chosen_alternative_node is not None:
+                self._record_incorrect_attempt()
                 grade = MoveGrade(MoveCorrectness.ALTERNATIVE,
                                   msg = "Not the main move. Change the settings to explore alternatives")
                 self._grades.append(grade)
@@ -681,11 +779,7 @@ class RepetitionEngine():
             rel_eval_diff=rel_eval_diff,
         )
         self._grades.append(grade)
-        target = self._current_feedback_target()
-        if target is not None:
-            parent, move_uci = target
-            self._update_ease(parent, move_uci, False)
-        self._record_error(grade)
+        self._record_incorrect_attempt()
         return grade
 
     def _handle_off_file_guess(self, uci: UCI) -> MoveGrade:
@@ -716,8 +810,8 @@ class RepetitionEngine():
             eval_diff=move_eval - expected_eval,
         )
         self._grades.append(grade)
-        if grade == MoveCorrectness.INCORRECT:
-            self._record_error(grade)
+        if grade.correctness == MoveCorrectness.INCORRECT:
+            self._record_incorrect_attempt()
         return grade
 
     def _evaluate_move(self, position: Union[chess.Board, Node], move: Union[chess.Move, str]) -> float:
@@ -814,23 +908,27 @@ class RepetitionEngine():
         all_prompts = self._prompt_dict_relative
         possible_prompt_keys = set()
 
-        # length (starting from anchor node).
+        # Length from the anchor to the final opponent move, in plies.
         prpt_len = self._rng.randint(1, self.MAX_GLOBAL_PROMPT_LENGTH)
-        # Even so that we end on opponent's move after maybe off-book
-        prpt_len -= prpt_len % 2
+        if prpt_len % 2 == 0:
+            prpt_len -= 1
         # make sure we are anchored at our move
         possible_start_index = int(self._root.turn() == self._session.options.side)
         # i is offset from root. So root ---i---> anchor ---prpt_len---> prompt end
         for i in range(possible_start_index, self.start_range*2+1, 2):
             possible_prompt_keys.update([k[:i+prpt_len] for k in all_prompts.keys() if len(k) >= i+prpt_len])
-        preferred_prompt_keys = sorted(possible_prompt_keys, key=lambda k: all_prompts[k]/all_prompts[k[:-prpt_len]], reverse=True)[:6]
+        scored_prompt_keys = [
+            (prompt_key, self._expected_damage_for_prompt_path(prompt_key, prpt_len))
+            for prompt_key in possible_prompt_keys
+        ]
+        scored_prompt_keys = [item for item in scored_prompt_keys if item[1] >= 0.0]
+        scored_prompt_keys.sort(key=lambda item: item[1], reverse=True)
+        preferred_prompt_keys = [prompt_key for prompt_key, _ in scored_prompt_keys[:6]]
 
         if not preferred_prompt_keys:
             return False
 
         chosen_path = self._rng_choice(preferred_prompt_keys)
-        if not self._maybe_append_global_off_book_move(chosen_path):
-            chosen_path = chosen_path[:len(chosen_path)-1]
 
 
         # determine the anchor node and index for the prompt
@@ -849,29 +947,6 @@ class RepetitionEngine():
         self._prompt.node_index = index
         msg = f"Complete prompt: {self._prompt.prechosen_path}" if DEBUG_MODE else ""
         self._prompt.message = msg
-        return True
-
-    def _maybe_append_global_off_book_move(
-        self,
-        prechosen_path: tuple[UCI, ...],
-    ) -> bool:
-        """With probability self.non_file_move_freq, append an off-book move for the opponent after the prechosen path.
-        Assumes prechosen_path ends on opponent's move.
-        The move gets added to self._prompt.prechosen_path.
-        Returns True if an off-book move was appended, False otherwise.
-        """
-        if self._rng.random() >= self.non_file_move_freq:
-            return False
-
-        end_node = self._root
-        for move_uci in prechosen_path:
-            end_node = self._session.child_for_move(end_node, move_uci)
-
-        off_book_selection = self._select_off_book_move(end_node.board(), use_engine=False)
-        if off_book_selection.move is None:
-            return False
-
-        prechosen_path += (off_book_selection.move.uci(),)
         return True
 
     def _try_choose_prompt(self, node: Optional[Node] = None, complete: bool = False) -> bool:
@@ -923,6 +998,62 @@ class RepetitionEngine():
             return False
         self._set_prompt_start()
         return True
+
+    def _expected_damage_for_prompt_path(
+        self,
+        prompt_path: tuple[UCI, ...],
+        prompt_length: int,
+    ) -> float:
+        anchor_offset = len(prompt_path) - prompt_length
+        node = self._root
+        try:
+            for move_uci in prompt_path[:anchor_offset]:
+                node = self._session.child_for_move(node, move_uci)
+        except RuntimeError:
+            return -1.0
+
+        if node.turn() != self._session.options.side:
+            raise RuntimeError("Global prompt anchors must start on the side-to-move position")
+
+        move_probability = 1.0
+        expected_damage = 0.0
+        for move_uci in prompt_path[anchor_offset:]:
+            try:
+                if node.turn() == self._session.options.side:
+                    expected_damage += self._move_wrong_probability(node, move_uci) * move_probability
+                else:
+                    move_probability *= self._get_moves_for_(node)[move_uci]["weight"]
+            except KeyError:
+                return -1.0
+            try:
+                node = self._session.child_for_move(node, move_uci)
+            except RuntimeError:
+                return -1.0
+
+        return expected_damage
+
+    def _candidate_response_stats(
+        self,
+        parent: Node,
+        move_uci: UCI,
+        *,
+        child: Optional[Node],
+    ) -> tuple[float, int]:
+        if parent.turn() == self._session.options.side:
+            return self._move_right_probability(parent, move_uci), self._move_attempts(parent, move_uci)
+
+        if child is None:
+            return self._global_right_probability(), 0
+
+        expected_node = next(iter(self._prompt_variations(child)), None)
+        if expected_node is None:
+            return self._global_right_probability(), 0
+
+        response_uci = expected_node.move.uci()
+        try:
+            return self._move_right_probability(child, response_uci), self._move_attempts(child, response_uci)
+        except KeyError:
+            return self._global_right_probability(), 0
 
     def _choose_move(
         self,
@@ -979,8 +1110,26 @@ class RepetitionEngine():
         if not eligible_moves:
             return False, ""
 
-        weights_dict = {k: v["weight"] for k, v in eligible_moves.items()}
-        sys.stderr.write(f"Choosing move... weights_dict: {[(k, round(v['weight'], 2)) for k, v in eligible_moves.items()]}\n")
+        candidate_children: dict[UCI, Optional[Node]] = {}
+        for move_uci in eligible_moves:
+            try:
+                candidate_children[move_uci] = self._session.child_for_move(parent, move_uci)
+            except RuntimeError:
+                candidate_children[move_uci] = None
+
+        unlearned_weights = {}
+        fallback_weights = {}
+        for move_uci, entry in eligible_moves.items():
+            child = candidate_children[move_uci]
+            right_probability, _ = self._candidate_response_stats(parent, move_uci, child=child)
+            if right_probability < self.LOCAL_UNLEARNED_RIGHT_THRESHOLD:
+                unlearned_weights[move_uci] = entry["weight"]
+            fallback_weights[move_uci] = (1.0 - right_probability) * entry["weight"]
+
+        weights_dict = unlearned_weights or fallback_weights
+        if sum(weights_dict.values()) <= 0.0:
+            weights_dict = {move_uci: entry["weight"] for move_uci, entry in eligible_moves.items()}
+        sys.stderr.write(f"Choosing move... selection_weights: {[(k, round(v, 3)) for k, v in weights_dict.items()]}\n")
         choice = self._rng_choice(weights_dict)
 
         message = ""
@@ -1175,88 +1324,16 @@ class RepetitionEngine():
                 raise RuntimeError(f"Missing move data for {move_uci!r} from position {parent_fen!r}")
 
             move_weights[move_uci]["weight"] *= SEARCH_MOVE_BOOST_FACTOR
-            # self._normalize_move_entries(move_weights)
             updated += 1
 
+        self._refresh_prompt_dicts()
         self._pos_drill_data.serialize()
         return updated
-
-    def _move_factor_details(self, parent: Node, move_uci: UCI, base_factor: float) -> tuple[float, str]:
-        factor = base_factor
-        reason_parts = [f"base={base_factor:.2f}"]
-        performance = self._move_performance.get(self._move_performance_key(parent, move_uci))
-        if performance is not None:
-            if performance.hint_requests:
-                hint_delta = self.HINT_FACTOR_STEP * performance.hint_requests
-                factor += hint_delta
-                reason_parts.append(f"hints=+{hint_delta:.2f}")
-            if performance.gave_up:
-                factor = max(factor, self.GAVE_UP_FACTOR)
-                reason_parts.append(f"gave_up>={self.GAVE_UP_FACTOR:.2f}")
-            for idx, error in enumerate(performance.errors, start=1):
-                eval_loss = self._grade_eval_loss(error)
-                error_factor = max(1 + eval_loss * self.ERROR_EVAL_LOSS_SCALE, self.ERROR_EVAL_LOSS_CAP)
-                factor *= error_factor
-                reason_parts.append(f"err{idx}=x{error_factor:.2f}")
-
-        bounded_factor = max(self.MIN_MOVE_FACTOR, factor)
-        if bounded_factor != factor:
-            reason_parts.append(f"min={self.MIN_MOVE_FACTOR:.2f}")
-        return bounded_factor, ", ".join(reason_parts)
 
     def _grade_eval_loss(self, grade: MoveGrade) -> float:
         if grade.correctness == MoveCorrectness.CORRECT or grade.eval_diff is None:
             return 0.0
         return max(0.0, -grade.eval_diff)
-    
-    
-    def _recompute_line_move_weights(self, node: Node, diff: float) -> None:
-        """
-        Make moves of a line less (or more) likely to appear,
-        thus adapting to user's need to see it again.
-        """
-        self._last_weight_updates = []
-        if not node: # can happen if "New" is clicked before we started
-            return
-        
-        base_factor = max(self.MIN_MOVE_FACTOR, 1.0 + diff)
-
-        while fen(self._session.game) != fen(node):
-            child = node
-            move = child.move
-            node = child.parent
-            if node.turn() == self._session.options.side:
-                continue
-            parent_dict = self._get_moves_for_(node)
-            move_uci = move.uci()
-            if move_uci not in parent_dict:
-                continue
-            factor, reason = self._move_factor_details(node, move_uci, base_factor)
-            before = parent_dict[move_uci]["weight"]
-            after = before * factor
-            # Keep easy lines de-emphasized by default, but pull difficult prompt
-            # prefixes back into the queue when the user needed help on a later move.
-            sys.stderr.write(f"Updating weight for {move_uci}: {before:.2f} -> {after:.2f}\n")
-            parent_dict[move_uci]["weight"] = after
-            relative_path = self._relative_move_path_for_node(child)
-            
-            if relative_path is not None:
-                self._last_weight_updates.append(
-                    WeightUpdateTrace(
-                        path=tuple(relative_path),
-                        before=before,
-                        after=after,
-                        factor=factor,
-                        reason=reason,
-                    )
-                )
-
-    def _normalize_move_entries(self, entries: dict[UCI, MoveEntryData]) -> None:
-        total = sum(entry["weight"] for entry in entries.values())
-        if total <= 0.0:
-            return
-        for entry in entries.values():
-            entry["weight"] /= total
 
 
     def _rng_choice(self, weights_dict: dict[K, float] | list[K]) -> K:
@@ -1311,20 +1388,20 @@ class RepetitionEngine():
         return message
 
     # Debug-only helpers below derive tree state from nodes and prompt metadata.
-    # They do not participate in prompt selection or weight recomputation logic.
+    # They do not participate in prompt selection or performance updates.
     def _path_is_prefix(self, prefix: tuple[UCI, ...], path: tuple[UCI, ...]) -> bool:
         return prefix == path[:len(prefix)]
-
-    def _weight_update_map(self) -> dict[tuple[UCI, ...], WeightUpdateTrace]:
-        return {trace.path: trace for trace in self._last_weight_updates}
 
     def _debug_prompt_path(self) -> tuple[UCI, ...] | None:
         if self._spec_id != "new" or self._prompt.prechosen_path is None:
             return None
         return tuple(self._prompt.prechosen_path)
 
-    def _sorted_weighted_moves_for(self, parent: Node) -> list[tuple[UCI, float, str, Optional[Node]]]:
-        entries: list[tuple[UCI, float, str, Optional[Node]]] = []
+    def _sorted_weighted_moves_for(
+        self,
+        parent: Node,
+    ) -> list[tuple[UCI, float, tuple[int, int], str, Optional[Node]]]:
+        entries: list[tuple[UCI, float, tuple[int, int], str, Optional[Node]]] = []
         for move_uci, entry in self._get_moves_for_(parent).items():
             try:
                 san = node_san(parent, move_uci)
@@ -1334,8 +1411,8 @@ class RepetitionEngine():
                 child = self._session.child_for_move(parent, move_uci)
             except RuntimeError:
                 child = None
-            entries.append((move_uci, entry["weight"], san, child))
-        entries.sort(key=lambda item: (-item[1], item[2], item[0]))
+            entries.append((move_uci, entry["weight"], entry["performance"], san, child))
+        entries.sort(key=lambda item: (-item[1], item[3], item[0]))
         return entries
 
     def _build_debug_children(
@@ -1348,12 +1425,13 @@ class RepetitionEngine():
         current_path: tuple[UCI, ...],
         anchor_path: tuple[UCI, ...],
         prompt_path: tuple[UCI, ...] | None,
-        weight_updates: dict[tuple[UCI, ...], WeightUpdateTrace],
     ) -> list[dict[str, Any]]:
         if remaining_prefix:
             move_uci = remaining_prefix[0]
             move_weights = self._get_moves_for_(parent)
-            weight = move_weights.get(move_uci, {}).get("weight")
+            move_entry = move_weights.get(move_uci)
+            weight = None if move_entry is None else move_entry["weight"]
+            performance = (0, 0) if move_entry is None else move_entry["performance"]
             try:
                 child = self._session.child_for_move(parent, move_uci)
             except RuntimeError:
@@ -1367,6 +1445,7 @@ class RepetitionEngine():
                     parent,
                     move_uci,
                     weight,
+                    performance,
                     san,
                     child,
                     (*path, move_uci),
@@ -1375,7 +1454,6 @@ class RepetitionEngine():
                     current_path=current_path,
                     anchor_path=anchor_path,
                     prompt_path=prompt_path,
-                    weight_updates=weight_updates,
                 )
             ]
 
@@ -1383,12 +1461,13 @@ class RepetitionEngine():
             return []
 
         children: list[dict[str, Any]] = []
-        for move_uci, weight, san, child in self._sorted_weighted_moves_for(parent):
+        for move_uci, weight, performance, san, child in self._sorted_weighted_moves_for(parent):
             children.append(
                 self._build_debug_move_node(
                     parent,
                     move_uci,
                     weight,
+                    performance,
                     san,
                     child,
                     (*path, move_uci),
@@ -1397,7 +1476,6 @@ class RepetitionEngine():
                     current_path=current_path,
                     anchor_path=anchor_path,
                     prompt_path=prompt_path,
-                    weight_updates=weight_updates,
                 )
             )
         return children
@@ -1407,6 +1485,7 @@ class RepetitionEngine():
         parent: Node,
         move_uci: UCI,
         weight: Optional[float],
+        performance: tuple[int, int],
         san: str,
         child: Optional[Node],
         path: tuple[UCI, ...],
@@ -1416,12 +1495,10 @@ class RepetitionEngine():
         current_path: tuple[UCI, ...],
         anchor_path: tuple[UCI, ...],
         prompt_path: tuple[UCI, ...] | None,
-        weight_updates: dict[tuple[UCI, ...], WeightUpdateTrace],
     ) -> dict[str, Any]:
         board = parent.board()
         move_number = board.fullmove_number
         color = "white" if parent.turn() == chess.WHITE else "black"
-        weight_update = weight_updates.get(path)
         children: list[dict[str, Any]] = []
         if child is not None:
             children = self._build_debug_children(
@@ -1432,7 +1509,6 @@ class RepetitionEngine():
                 current_path=current_path,
                 anchor_path=anchor_path,
                 prompt_path=prompt_path,
-                weight_updates=weight_updates,
             )
 
         return {
@@ -1445,6 +1521,7 @@ class RepetitionEngine():
             "uci": move_uci,
             "weight": weight,
             "showWeightLabel": parent.turn() != self._session.options.side,
+            "performance": list(performance),
             "children": children,
             "onCurrentPath": self._path_is_prefix(path, current_path),
             "isCurrent": path == current_path,
@@ -1454,12 +1531,6 @@ class RepetitionEngine():
                 and len(path) > len(anchor_path)
                 and self._path_is_prefix(path, prompt_path)
             ),
-            "recompute": None if weight_update is None else {
-                "before": weight_update.before,
-                "after": weight_update.after,
-                "factor": weight_update.factor,
-                "reason": weight_update.reason,
-            },
         }
 
     def _build_debug_tree_payload(
@@ -1472,9 +1543,8 @@ class RepetitionEngine():
         anchor_path: tuple[UCI, ...],
         prompt_path: tuple[UCI, ...] | None,
     ) -> dict[str, Any]:
-        weight_updates = self._weight_update_map()
         return {
-            "title": "Weight visualizer",
+            "title": "Weight / performance visualizer",
             "tree": {
                 "kind": "position",
                 "label": root_label,
@@ -1487,7 +1557,6 @@ class RepetitionEngine():
                     current_path=current_path,
                     anchor_path=anchor_path,
                     prompt_path=prompt_path,
-                    weight_updates=weight_updates,
                 ),
                 "onCurrentPath": True,
                 "isCurrent": len(current_path) == 0,
@@ -2355,11 +2424,11 @@ class AppController:
     def give_up(self) -> None:
         self.finish_prompt(gave_up=True)
 
-    def finish_prompt(self, ease: float = 0.25, gave_up: bool = False) -> None:
+    def finish_prompt(self, gave_up: bool = False) -> None:
         if self._mode != "guess":
             return
 
-        self._rep_engine.finish_prompt(ease=ease, gave_up=gave_up)
+        self._rep_engine.finish_prompt(gave_up=gave_up)
         self._finalize_finished_prompt()
         self._reveal_prompt_in_review()
 
