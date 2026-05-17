@@ -6,11 +6,18 @@ A toolkit for analyzing and improving chess opening PGN files, with optional vis
 
 Features:
 
+* PgnChecker:
+
    - Detects gaps in an opening repertoire
    - Looks for ways to improve the repertoire
    - Generates candidate continuations
    - Annotates PGN with NAGs and color highlights
    - Builds a graph of stochastic relationships between moves from a position using a pgn or database (experimental)
+ 
+* Spaced Repetition
+    - Lets the user drill opening lines, aiming to maximize benefit of learning per unit of time
+    - Lets compare moves between lines
+    - Provides variation tree interface with automatic transposition handling
 
 The application is launched via a GUI or CLI.
 
@@ -35,8 +42,17 @@ gui/main.py
 **Output:**
 - A new PGN written to output_pgns/
 
+### 2. Spaced Repetition
 
-### 2. Graph Builder
+**Input:**
+- PGN file
+- Lichess API token
+- Chess engine path
+
+**Output:**
+- A web-interface for drills
+
+### 3. Graph Builder
 
 **Input:**
 - The starting position of an opening
@@ -71,6 +87,7 @@ python -m source.gui.main
 
 2. Choose a feature:
 - PGN Checker
+- Spaced Repetition
 - Move Graph Builder
 
 3. Choose the inputs:
@@ -89,7 +106,7 @@ python -m source.gui.main
 - Zeitnot: read as "don't confuse!"
 - Development advantage: "safe to confuse, our responses are all the same"/"same as in another line"
 
-## Use case examples
+## Builder Use case examples
 
 - I have an opening file deemed complete, and I use the checker to verify I didn't miss anything. I may or may not go for auto-suggestions.
 - I have an opening line idea and I want to quickly complete it into an opening file.
@@ -107,7 +124,11 @@ python -m source.gui.main
 
 ## Motivation
 
+PgnChecker:
+
 1. Making opening files is hard work, and the tool is hoped to save 50+% of time.
 2. In a highbrower way, I am curious about finding structure underlying data. In particular, I believe that the PGN tree memorization can be greatly aided by explicating patterns found within this tree. Teasing as many of these as possible is a long-term goal. I can think of a dozen ways to be smart about opening lines; it would be interesting to see which are possible to implement.
 
-Other long-term ideas include a memorization tool (I don't find widely available spaced repetition tools like that of Chessable adequate), a probability-based move search tool, a better version of OpeningTree.
+Spaced Repetition:
+
+The tools I've tried on the Internet don't seem optimal. I believe they aren't flexible enough and fail to appreciate the dangers of "overfitting". This tool is supposed to provide user with many memory hooks and help with not confusing lines, paying attention to opponent moves etc.
