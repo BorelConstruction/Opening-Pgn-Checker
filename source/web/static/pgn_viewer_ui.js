@@ -16,6 +16,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const guessActions = document.getElementById("guessActions");
   const srGuessGiveUpBtn = document.getElementById("srGuessGiveUp");
   const srGuessFinishBtn = document.getElementById("srGuessFinish");
+  const srGuessFinishNewBtn = document.getElementById("srGuessFinishNew");
   const srGuessBlacklistBtn = document.getElementById("srGuessBlacklist");
   const treeContainer = document.getElementById("variation-tree");
   const reviewNextMovesPanel = document.getElementById("reviewNextMovesPanel");
@@ -187,7 +188,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   }
 
   function refreshAnalyzeLichessLink() {
-    const analysisUrl = isReviewMode() ? buildLichessAnalysisUrl(getCurrentFen()) : "";
+    const analysisUrl = buildLichessAnalysisUrl(getCurrentFen());
 
     srAnalyzeLichessLink.href = analysisUrl || "#";
     srAnalyzeLichessLink.classList.toggle("disabled", !analysisUrl);
@@ -325,6 +326,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srUpdateWeightsBtn.disabled = !active;
     srGuessGiveUpBtn.disabled = !isGuess;
     srGuessFinishBtn.disabled = !isGuess;
+    srGuessFinishNewBtn.disabled = !isGuess;
     srGuessBlacklistBtn.disabled = !isGuess;
     refreshAnalyzeLichessLink();
   }
@@ -1221,6 +1223,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   srUpdateWeightsBtn.addEventListener("click", () => send({ type: "sr_update_weights" }));
   srGuessGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
   srGuessFinishBtn.addEventListener("click", () => send({ type: "sr_finish_prompt" }));
+  srGuessFinishNewBtn.addEventListener("click", () => send({ type: "sr_finish_prompt_new" }));
   srGuessBlacklistBtn.addEventListener("click", () => send({ type: "sr_blacklist_prompt" }));
   srSearchMoveBtn.addEventListener("click", () => {
     state.searchMoveDismissed = false;

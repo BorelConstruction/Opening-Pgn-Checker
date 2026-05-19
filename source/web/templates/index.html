@@ -22,21 +22,20 @@
         <button id="srHint" title="Spaced repetition: get a hint">Hint</button>
         <button id="srStudyFromHere" title="Spaced repetition: use the current review position as the study start">Study from here</button>
         <button id="srSearchMove" title="Spaced repetition: search occurrences of the last move">Search move</button>
+        <a
+          id="srAnalyzeLichess"
+          class="button-link"
+          href="#"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Spaced repetition: analyze the current board position on Lichess"
+        >Analyze on Lichess</a>
+        <span class="controls-spacer" aria-hidden="true"></span>
         <button
           id="srUpdateWeights"
           class="button-compact"
           title="Spaced repetition: reconcile cached move weights with the current PGN"
         >Update weights</button>
-        <a
-          id="srAnalyzeLichess"
-          class="button-link disabled"
-          href="#"
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-disabled="true"
-          tabindex="-1"
-          title="Spaced repetition: analyze the current review position on Lichess"
-        >Analyze on Lichess</a>
         <span id="status" class="status">disconnected</span>
       </div>
     </div>
@@ -55,11 +54,6 @@
       <div class="right">
         <div class="panel">
           <div class="row">
-            <label for="fen">FEN</label>
-            <input id="fen" type="text" spellcheck="false" />
-            <button id="setFen">Set</button>
-          </div>
-          <div class="row">
             <label>Message</label>
             <div id="message" class="message"></div>
           </div>
@@ -68,7 +62,8 @@
         <div class="panel tree-panel" id="treePanel">
           <div id="guessActions" class="guess-actions" hidden>
             <button id="srGuessGiveUp" type="button" title="Spaced repetition: reveal the line and browse variations">Give Up</button>
-            <button id="srGuessFinish" type="button" title="Spaced repetition: reveal the line, browse variations, and mark that no further learning is needed">Finish Learning</button>
+            <button id="srGuessFinish" type="button" title="Spaced repetition: reveal the line, browse variations, and mark that no further learning is needed">Finish and Browse</button>
+            <button id="srGuessFinishNew" type="button" title="Spaced repetition: mark the line finished and immediately start a new prompt">Finish and Start New</button>
             <button id="srGuessBlacklist" type="button" title="Spaced repetition: reveal the line, browse variations, and blacklist the current move from future prompts">Don't Show This Move</button>
           </div>
           <div id="variation-tree" class="variation-tree"></div>
@@ -95,6 +90,14 @@
             <button id="clearLog">Clear</button>
           </div>
           <pre id="log" class="log"></pre>
+        </div>
+
+        <div class="panel">
+          <div class="row">
+            <label for="fen">FEN</label>
+            <input id="fen" type="text" spellcheck="false" />
+            <button id="setFen">Set</button>
+          </div>
         </div>
       </div>
     </div>

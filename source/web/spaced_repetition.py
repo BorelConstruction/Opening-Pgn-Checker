@@ -683,7 +683,7 @@ class RepetitionEngine():
     def _global_right_probability(self) -> float:
         if self._global_attempts <= 0:
             return self.DEFAULT_RIGHT_PROBABILITY
-        return self._global_successes / self._global_attempts
+        return (self._global_successes + 1) / (self._global_attempts + 2)
 
     def _move_successes_attempts(self, parent: BoardLike, move_uci: UCI) -> tuple[int, int]:
         return self._move_entry(parent, move_uci)["performance"]
@@ -695,7 +695,7 @@ class RepetitionEngine():
         successes, attempts = self._move_successes_attempts(parent, move_uci)
         if attempts <= 0:
             return self._global_right_probability()
-        return successes / attempts
+        return (successes + 1) / (attempts + 2)
 
     def _move_wrong_probability(self, parent: BoardLike, move_uci: UCI) -> float:
         return 1.0 - self._move_right_probability(parent, move_uci)
@@ -2478,6 +2478,14 @@ class AppController:
         self._rep_engine.finish_prompt(gave_up=gave_up)
         self._finalize_finished_prompt()
         self._reveal_prompt_in_review()
+
+    def finish_prompt_and_start_new(self) -> None:
+        if self._mode != "guess":
+            return
+
+        self._rep_engine.finish_prompt()
+        self._finalize_finished_prompt()
+        self.start_next_prompt()
 
     def blacklist_current_move(self) -> None:
         if self._mode != "guess":
