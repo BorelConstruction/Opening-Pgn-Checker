@@ -503,7 +503,20 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     }
 
     const prefix = node.color === "black" ? `${node.moveNumber}...` : `${node.moveNumber}.`;
-    return `${prefix} ${node.san}`;
+    const nags = formatNodeNags(node);
+    return nags ? `${prefix} ${node.san} ${nags}` : `${prefix} ${node.san}`;
+  }
+
+  function formatNodeNags(node) {
+    if (!node) return "";
+    if (!Object.prototype.hasOwnProperty.call(node, "nags")) return "";
+    if (!Array.isArray(node.nags)) {
+      throw new Error("Tree node nags must be an array when present");
+    }
+
+    return node.nags
+      .filter((nag) => typeof nag === "string" && nag.trim())
+      .join(" ");
   }
 
   function handleKeyNavigation(event) {
@@ -1105,10 +1118,18 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       return;
     }
 
+    const nags = formatNodeNags(ctx.node);
     const comment = ctx.node && typeof ctx.node.comment === "string" ? ctx.node.comment.trim() : "";
+    const sections = [];
+    if (nags) {
+      sections.push(`NAGs: ${nags}`);
+    }
+    if (comment) {
+      sections.push(comment);
+    }
     commentPanel.hidden = false;
-    commentText.textContent = comment || "No PGN comment for this node.";
-    commentText.classList.toggle("empty", !comment);
+    commentText.textContent = sections.join("\n\n") || "No PGN comment or NAGs for this node.";
+    commentText.classList.toggle("empty", sections.length === 0);
   }
 
   function applySrState(sr) {

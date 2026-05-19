@@ -1275,12 +1275,9 @@ class RepetitionEngine():
         Return a dict UCI -> frequency for children of all nodes with
         the same position as 'node'.
         """
-        moves = set()
-        for n in self._session.cache[fen(node)].TTed:
-            moves.update(m.move.uci() for m in n.variations)
-
+        moves = set(child.move.uci() for child in self._prompt_variations(node))
         return self._child_freqs(node, moves)
-    
+
     def _child_freqs(self, node: Node, variations: Iterable[UCI]) -> dict[UCI, float]:
         """
         Return a dict UCI -> frequency for moves of the board of 'node'

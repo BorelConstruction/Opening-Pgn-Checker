@@ -61,9 +61,15 @@ def export_pgn_subtree(
 
             move = child.move
 
-            dst_child = dst.add_variation(move)
             if include_comments:
-                dst_child.comment = getattr(child, "comment", "") or ""
+                dst_child = dst.add_variation(
+                    move,
+                    comment=getattr(child, "comment", "") or "",
+                    starting_comment=getattr(child, "starting_comment", "") or "",
+                    nags=sorted(getattr(child, "nags", set()) or ()),
+                )
+            else:
+                dst_child = dst.add_variation(move)
 
             next_on_preferred = bool(on_preferred_line and preferred_idx is not None and idx == preferred_idx)
             if next_on_preferred and depth + 1 > preferred_ply:
