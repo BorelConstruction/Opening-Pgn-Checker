@@ -219,8 +219,10 @@ class RepetitionEngine():
                     prompt_dict_global[tuple(path_from_root[:-2])] * children_uci_weights[child.move.uci()]["weight"]
                 path_from_root.pop()
                 
-        
-        self._session.traverse(node, visit=visit, post=lambda n, p, v: path_from_root.pop())
+        def post(n, p, v):
+            if path_from_root:
+                path_from_root.pop()
+        self._session.traverse(node, visit=visit, post=post)
         return prompt_dict_global
 
     def make_prompt_dict_relative(self):
@@ -502,16 +504,7 @@ class RepetitionEngine():
         return position_fen, PositionMoveData(moves=move_probs, blacklist=blacklist)
 
     def _performance_from_json(self, raw_performance: Any) -> tuple[int, int]:
-        if not isinstance(raw_performance, (list, tuple)) or len(raw_performance) != 2:
-            raise TypeError("Move performance must be a pair of integers")
-
         successes, attempts = raw_performance
-        if any(isinstance(value, bool) or not isinstance(value, int) for value in (successes, attempts)):
-            raise TypeError("Move performance values must be integers")
-        if successes < 0 or attempts < 0:
-            raise ValueError("Move performance values must be non-negative")
-        if successes > attempts:
-            raise ValueError("Move successes cannot exceed attempts")
         return successes, attempts
 
 
@@ -555,13 +548,80 @@ class RepetitionEngine():
         self.finish_prompt()
         return blacklisted_uci
 
+    def _remove_temporary_node(self, node: Node) -> None:
+        try:
+            self._temporary_nodes.remove(node)
+        except ValueError as exc:
+            raise RuntimeError("Temporary node was not registered for cleanup") from exc
+        self._session.remove_variation(node)
+
+    def _resume_from_off_file_prompt(self) -> None:
+        temporary_node = self._prompt.node
+        if temporary_node is None or temporary_node.parent is None:
+            raise RuntimeError("Off-file prompt has no parent to resume from")
+        if not self._prompt.off_file:
+            raise RuntimeError("Cannot resume when the prompt is not off-file")
+
+        self._remove_temporary_node(temporary_node)
+        self._prompt.node = temporary_node.parent
+        self._prompt.off_file = False
+
+    def _has_file_continuation(self, parent: Node) -> bool:
+        if self._prompt.node_index is not None and self._prompt.prechosen_path is not None:
+            child_index = self._prompt.node_index + 1
+            if child_index >= len(self._prompt.prechosen_path):
+                return False
+
+            expected_uci = self._prompt.prechosen_path[child_index]
+            return any(child.move.uci() == expected_uci for child in self._prompt_variations(parent))
+
+        children = self._prompt_variations(parent)
+        if not children:
+            return False
+        if parent.turn() == self._session.options.side:
+            return True
+
+        move_weights = self._get_moves_for_(parent)
+        blacklisted_moves = set(self._blacklist_for(parent))
+        return any(
+            child.move.uci() in move_weights and child.move.uci() not in blacklisted_moves
+            for child in children
+        )
+
+    def _maybe_choose_off_file_prompt(self, parent: Node) -> tuple[Node | None, str]:
+        if parent.turn() == self._session.options.side:
+            return None, ""
+        if self._rng.random() >= self.non_file_move_freq:
+            return None, ""
+
+        off_book_selection = self._select_off_book_move(parent, use_engine=False)
+        if off_book_selection.move is None:
+            return None, ""
+
+        child = self._add_temporary_node(parent, off_book_selection.move)
+        self._prompt.off_file = True
+        return child, off_book_selection.message
+
     def on_response(self, uci: str) -> PromptState:
         if self._prompt.off_file:
             grade = self._handle_off_file_guess(uci)
-            self._prompt.message = grade.msg
             if grade.correctness == MoveCorrectness.CORRECT:
                 self._current_hints = None
-                self.finish_prompt()
+                if self._prompt.node is None or self._prompt.node.parent is None:
+                    self._prompt.message = grade.msg
+                    self.finish_prompt()
+                    return self._prompt
+                if not self._has_file_continuation(self._prompt.node.parent):
+                    self._prompt.message = grade.msg
+                    self.finish_prompt()
+                    return self._prompt
+
+                self._resume_from_off_file_prompt()
+                self._advance_line()
+                self._prompt.message = f"{grade.msg} {self._prompt.message}".strip()
+                return self._prompt
+
+            self._prompt.message = grade.msg
             return self._prompt
 
         grade = self._handle_file_guess(uci)
@@ -801,7 +861,15 @@ class RepetitionEngine():
         if learned_node is False:
             return False, ""
 
-        return self._choose_move(learned_node, off_book=True)
+        next_node, selection_debug = self._choose_move(learned_node, off_book=True)
+        if next_node is False:
+            return False, selection_debug
+
+        if self._prompt.node_index is not None:
+            self._prompt.node_index += 1
+            if not self._prompt.off_file:
+                self._prompt.node_index += 1
+        return next_node, selection_debug
 
     def _advance_skipping_lrned_moves(self) -> bool:
         """
@@ -835,7 +903,19 @@ class RepetitionEngine():
         update self._prompt accordingly.
         If the line cannot be continued, updates the state to "prompt finished".
         """
+        if self._prompt.node is None:
+            raise RuntimeError("Cannot advance a prompt without an active node")
+        if self._prompt.off_file:
+            raise RuntimeError("Cannot advance the file line while on an off-file prompt")
+
         if self._prompt.node_index is not None:
+            if self._prompt.node.turn() != self._session.options.side:
+                next_node, selection_debug = self._maybe_choose_off_file_prompt(self._prompt.node)
+                if next_node is not None:
+                    self._prompt.node = next_node
+                    self._prompt.message = selection_debug
+                    return
+
             try:
                 child_index = self._prompt.node_index+1
                 next_node = self._session.child_for_move(
@@ -845,15 +925,16 @@ class RepetitionEngine():
                 if next_node is None:
                     self._prompt.off_file = True
                     next_node = self._add_temporary_node(self._prompt.node, self._prompt.prechosen_path[child_index])
-
+                else:
+                    self._prompt.node_index += 1
 
                 self._prompt.node = next_node
-                self._prompt.node_index += 1
                 return
             except IndexError:
                 self._prompt.node_index = None
 
-        next_node, selection_debug = self._choose_move(self._prompt.node)
+        parent = self._prompt.node
+        next_node, selection_debug = self._choose_move(parent, maybe_off_book=True)
 
         if next_node is False:
             self._prompt.message = selection_debug
@@ -862,6 +943,8 @@ class RepetitionEngine():
 
         self._prompt.node = next_node
         self._prompt.message = selection_debug
+        if self._prompt.off_file:
+            return
         if not self._advance_skipping_lrned_moves():
             self._prompt.message = selection_debug
             self.finish_prompt()
@@ -961,9 +1044,9 @@ class RepetitionEngine():
                 return False
             node = next_node
 
-        # Final step: potentially off_book move for opponent's move
+        # Final step: land on the next file move for the opponent.
         assert node.turn() != self._session.options.side, f"Prompt selection should end on our turn {line_length}" # TODO: remove this after a while
-        next_node, selection_debug = self._choose_move(node, maybe_off_book=True)
+        next_node, selection_debug = self._choose_move(node, maybe_off_book=False)
         if next_node is False:
             return False
         
@@ -1017,7 +1100,7 @@ class RepetitionEngine():
         use_engine: bool = False,
     ) -> tuple[Node | bool, str]:
         """
-        Chooses a move randomly to simulate a step along aline. 
+        Chooses a move randomly to simulate a step along a line. 
         Determines changes in self._prompt.off_file.
         Returns the resulting node and a debug string.
 
@@ -1116,10 +1199,7 @@ class RepetitionEngine():
         position: BoardLike,
         *,
         use_engine: bool,
-    ) -> OffBookSelection:
-        if side(fen(position)) == self._session.options.side:
-            raise ValueError("Should only select off-book moves for opponent's turn")
-        
+    ) -> OffBookSelection:        
         db_selection = self._choose_db_off_book_move(position)
         if db_selection.move is not None or db_selection.blacklist_exhausted:
             return db_selection
@@ -1776,6 +1856,7 @@ class SpacedRepetitionFeature:
         sr_controller.start(self.options, self._session)
         return "Spaced repetition launched at http://127.0.0.1:8000/"
 
+
     def close(self) -> None:
         from .app import sr_controller
 
@@ -1924,32 +2005,40 @@ class AppController:
         return state
 
     def start(self, options: SpacedRepetitionOptions, session: Optional[RepertoireSession] = None) -> None:
-        self._cfg = options
-        self._session = session or RepertoireSession(
-            options,
-            default_cache_path=lambda: default_repertoire_cache_path(options),
-        )
-        self._orientation = "white" if options.play_white else "black"
-        
-        self._log.load_from_file(self._log_cache_name())
-        self._rep_engine: RepetitionEngine = RepetitionEngine(
-            self._session,
-            self._session.starting_node,
-            self._cfg.start_range,
-            self._probs_cache_name(),
-            self._cfg.non_file_move_frequency,
-            self._cfg.local_generation
-        )
-        self._rep_controller = RepetitionController(
-            NaiveScheduler(self._log),
-            self._rep_engine,
-            self._log,
-        )
+        try:
+            self._cfg = options
+            self._session = session or RepertoireSession(
+                options,
+                default_cache_path=lambda: default_repertoire_cache_path(options),
+            )
+            self._orientation = "white" if options.play_white else "black"
+            
+            self._log.load_from_file(self._log_cache_name())
+            self._session.cache.autosave_interval = 600
+            self._rep_engine: RepetitionEngine = RepetitionEngine(
+                self._session,
+                self._session.starting_node,
+                self._cfg.start_range,
+                self._probs_cache_name(),
+                self._cfg.non_file_move_frequency,
+                self._cfg.local_generation
+            )
+            self._rep_controller = RepetitionController(
+                NaiveScheduler(self._log),
+                self._rep_engine,
+                self._log,
+            )
 
-        if options.preload_db:
-            self._prefetch_db_stats()
+            if options.preload_db:
+                self._prefetch_db_stats()
 
-        self.start_next_prompt()
+            self.start_next_prompt()
+        finally: # TODO: make sure to find the approptiate moment to save the cache
+            try:
+                self._session.save_cache()
+            except Exception as exc:
+                sys.stderr.write(f"Failed to save cache: {exc}\n")
+            self._session.close()
 
 
     def start_next_prompt(self) -> None:
