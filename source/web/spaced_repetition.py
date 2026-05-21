@@ -174,7 +174,7 @@ class RepetitionEngine():
         total_loss = sum(self._grade_eval_loss(grade) for grade in self._grades)
         return Feedback(total_loss / len(self._grades))
 
-    def expected_uci(self) -> Optional[UCI]:
+    def expected_uci(self, use_engine: bool = False) -> Optional[UCI]:
         prpt_data = self._prompt
         if prpt_data.node_index is not None and prpt_data.prechosen_path is not None:
             try:
@@ -189,11 +189,12 @@ class RepetitionEngine():
         if expected_node is not None:
             return expected_node.move.uci()
 
-        best_move = self._session.query(fen(prpt_data.node), "q-eval").move
-        if best_move is None:
-            return None
-        return best_move.uci()
-    
+        if use_engine:
+            best_move = self._session.query(fen(prpt_data.node), "q-eval").move
+            if best_move is not None:
+                return best_move.uci()
+        return None
+
     def make_prompt_dict_global(self, node: Node | None = None) -> dict[tuple[str], float]:
         if self._session.options.check_alternatives:
             raise ValueError("Global prompt choice if currently only available for mainline choices.")
@@ -262,7 +263,7 @@ class RepetitionEngine():
         if self._prompt.node is None:
             raise RuntimeError("Cannot provide a hint without an active prompt")
 
-        expected_uci = self.expected_uci()
+        expected_uci = self.expected_uci(use_engine=True)
         if expected_uci is None:
             return []
 
@@ -379,7 +380,7 @@ class RepetitionEngine():
         return any(temporary_node is node for temporary_node in self._temporary_nodes)
 
     def _non_temporary_children(self, node: Node) -> list[Node]:
-        return [child for child in node.variations if not self._is_temporary_node(child)]
+        return [child for child in self._session.variations(node) if not self._is_temporary_node(child)]
 
     def _tt_nodes_for_position(self, position: BoardLike, *, include_temporary: bool = False) -> list[Node]:
         nodes = self._session.cache[fen(position)].TTed
@@ -695,7 +696,8 @@ class RepetitionEngine():
             uci_from_lichess_to_pgn(uci),
         )
         if chosen_node is None:
-            raise RuntimeError("User move matched expected continuation but no file child was found")
+            self.finish_prompt()
+            return self._prompt
         self._prompt.node = chosen_node
         if self._prompt.node_index is not None:
             self._prompt.node_index += 1
@@ -871,13 +873,12 @@ class RepetitionEngine():
             return grade
         if not self._session.options.check_alternatives: # TODO: this is currently leaky. We use the knowledge of
             # how expected_uci is constructed. Need some alternative_moves and a design that ensures their accord
-            self._session.options.check_alternatives = True
             chosen_alternative_node = next(
-                (c for c in self._non_temporary_children(prpt_data.node) if c.move.uci() == uci),
+                (c for c in self._session.variations(self._prompt.node, use_TT=True) if c.move.uci() == uci 
+                    and c not in self._temporary_nodes),
                 None,
             )
             if chosen_alternative_node is not None:
-                self._record_incorrect_attempt()
                 grade = MoveGrade(MoveCorrectness.ALTERNATIVE,
                                   msg = "Not the main move. Change the settings to explore alternatives")
                 self._grades.append(grade)
