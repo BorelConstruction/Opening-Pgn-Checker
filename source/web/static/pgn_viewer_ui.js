@@ -773,7 +773,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     if (!Array.isArray(performance) || performance.length !== 2) return "";
     const [successes, attempts] = performance;
     if (!Number.isInteger(successes) || !Number.isInteger(attempts) || attempts <= 0) return "";
-    return `P=${(successes / attempts).toFixed(2)} (${successes}/${attempts})`;
+    return `${successes}/${attempts}`;
   }
 
   const DEBUG_SVG_NS = "http://www.w3.org/2000/svg";

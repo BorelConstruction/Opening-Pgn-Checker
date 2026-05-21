@@ -197,6 +197,9 @@ class RepetitionEngine():
     def make_prompt_dict_global(self, node: Node | None = None) -> dict[tuple[str], float]:
         if self._session.options.check_alternatives:
             raise ValueError("Global prompt choice if currently only available for mainline choices.")
+
+        def file_children(current: Node) -> list[Node]:
+            return [child for child in self._session.variations(current) if not self._is_temporary_node(child)]
         
         prompt_dict_global = defaultdict(float)
         prompt_dict_global[()] = 1.0
@@ -211,7 +214,7 @@ class RepetitionEngine():
             if n.turn() == self._session.options.side:
                 return
             children_uci_weights = self._get_moves_for_(n)
-            for child in self._session.variations(n):
+            for child in file_children(n):
                 if child.move.uci() not in children_uci_weights:
                     continue
                 path_from_root.append(child.move.uci())
@@ -222,7 +225,7 @@ class RepetitionEngine():
         def post(n, p, v):
             if path_from_root:
                 path_from_root.pop()
-        self._session.traverse(node, visit=visit, post=post)
+        self._session.traverse(node, visit=visit, post=post, get_children=file_children)
         return prompt_dict_global
 
     def make_prompt_dict_relative(self):
@@ -321,11 +324,9 @@ class RepetitionEngine():
         )
 
     def _pgn_move_ucis_for_position(self, position_fen: str) -> set[UCI]:
-        position_cache = self._session.cache[position_fen]
-
         moves: set[UCI] = set()
-        for node in position_cache.TTed:
-            moves.update(child.move.uci() for child in node.variations)
+        for node in self._tt_nodes_for_position(position_fen):
+            moves.update(child.move.uci() for child in self._non_temporary_children(node))
         return moves
 
     def _added_move_weight(
@@ -337,7 +338,11 @@ class RepetitionEngine():
         if sibling_weights:
             return sum(entry["weight"] for entry in sibling_weights.values())
 
-        node = self._session.cache[position_fen].TTed[0]
+        tt_nodes = self._tt_nodes_for_position(position_fen)
+        if not tt_nodes:
+            raise RuntimeError(f"No file nodes remain for position {position_fen!r}")
+
+        node = tt_nodes[0]
         parent = node.parent
         if not hasattr(parent, "parent"):
             return 1.0
@@ -370,11 +375,57 @@ class RepetitionEngine():
             return None
         return node_path[len(root_moves):]
 
+    def _is_temporary_node(self, node: Node) -> bool:
+        return any(temporary_node is node for temporary_node in self._temporary_nodes)
+
+    def _non_temporary_children(self, node: Node) -> list[Node]:
+        return [child for child in node.variations if not self._is_temporary_node(child)]
+
+    def _tt_nodes_for_position(self, position: BoardLike, *, include_temporary: bool = False) -> list[Node]:
+        nodes = self._session.cache[fen(position)].TTed
+        if include_temporary:
+            return list(nodes)
+        return [node for node in nodes if not self._is_temporary_node(node)]
+
+    def _child_for_move(
+        self,
+        parent: Node,
+        move: chess.Move | UCI,
+        *,
+        include_temporary: bool = False,
+    ) -> Optional[Node]:
+        move_uci = move.uci() if isinstance(move, chess.Move) else move
+
+        for child in self._non_temporary_children(parent):
+            if child.move.uci() != move_uci:
+                continue
+            return child
+
+        if include_temporary:
+            for child in parent.variations:
+                if child.move.uci() == move_uci:
+                    return child
+
+        for cached_parent in self._tt_nodes_for_position(parent, include_temporary=include_temporary):
+            if cached_parent is parent:
+                continue
+            for child in self._non_temporary_children(cached_parent):
+                if child.move.uci() != move_uci:
+                    continue
+                return child
+
+            if include_temporary:
+                for child in cached_parent.variations:
+                    if child.move.uci() == move_uci:
+                        return child
+
+        return None
+
     def _prompt_child_for_move(self, parent: Node, move: chess.Move | UCI) -> Node:
-        try:
-            return self._session.child_for_move(parent, move)
-        except RuntimeError:
-            return self._add_temporary_node(parent, move)
+        child = self._child_for_move(parent, move)
+        if child is not None:
+            return child
+        return self._add_temporary_node(parent, move)
 
     def _create_prompt_from_id(self, prompt_id: PromptLineId) -> PromptState:
         full_moves = list(prompt_id.moves)
@@ -521,12 +572,18 @@ class RepetitionEngine():
     def _blacklist_for(self, position: BoardLike) -> list[UCI]:
         return self._pos_drill_data[fen(position)]["blacklist"]
 
-    def _is_learned_move(self, parent: Node, uci: UCI) -> bool:
+    def _is_learned_prompt_position(self, prompt_node: Node) -> bool:
+        if prompt_node.parent is None or prompt_node.move is None:
+            return False
+        if prompt_node.turn() != self._session.options.side:
+            return False
+        parent = prompt_node.parent
+        move_uci = prompt_node.move.uci()
         try:
-            attempts = self._move_attempts(parent, uci)
+            attempts = self._move_attempts(parent, move_uci)
             return (
                 attempts >= self.LEARNED_MIN_ATTEMPTS
-                and self._move_right_probability(parent, uci) > self.LEARNED_RIGHT_THRESHOLD
+                and self._move_right_probability(parent, move_uci) > self.LEARNED_RIGHT_THRESHOLD
             )
         except KeyError:
             return False
@@ -633,10 +690,12 @@ class RepetitionEngine():
             return self._prompt
 
         self._commit_current_tested_move()
-        chosen_node = self._session.child_for_move(
+        chosen_node = self._child_for_move(
             self._prompt.node,
             uci_from_lichess_to_pgn(uci),
         )
+        if chosen_node is None:
+            raise RuntimeError("User move matched expected continuation but no file child was found")
         self._prompt.node = chosen_node
         if self._prompt.node_index is not None:
             self._prompt.node_index += 1
@@ -652,15 +711,46 @@ class RepetitionEngine():
         if self._prompt.node is None:
             return None
 
+        if self._prompt.node_index is not None and self._prompt.prechosen_path is not None:
+            child_index = self._prompt.node_index + 1
+            if child_index >= len(self._prompt.prechosen_path):
+                return None
+            expected_uci = self._prompt.prechosen_path[child_index]
+            return self._child_for_move(self._prompt.node, expected_uci)
+
         expected_moves = self._prompt_variations(self._prompt.node)
         if not expected_moves:
             return None
         return expected_moves[0]
 
     def _prompt_variations(self, position: BoardLike) -> list[Node]:
-        # Prompt generation and validation are position-based, so they should
-        # see TT-backed continuations.
-        return self._session.variations(position, use_TT=True)
+        def prompt_children(node: Node) -> list[Node]:
+            children = self._session.variations(node, use_TT=False)
+            return [child for child in children if not self._is_temporary_node(child)]
+
+        if isinstance(position, Node) and self._is_temporary_node(position):
+            return prompt_children(position)
+
+        # On our turn with alternatives disabled, stick to the actual node's
+        # main line.
+        if (
+            isinstance(position, Node)
+            and not self._session.options.check_alternatives
+            and position.turn() == self._session.options.side
+        ):
+            return prompt_children(position)
+
+        # Opponent move selection and transposition-aware prompt discovery can
+        # still use TT-backed continuations, but temporary nodes must not
+        # contaminate the file view of a position.
+        tt_nodes = self._tt_nodes_for_position(position)
+        if not tt_nodes and isinstance(position, Node):
+            return prompt_children(position)
+
+        children: list[Node] = []
+        for node in tt_nodes:
+            children.extend(prompt_children(node))
+        return children
 
     def _move_performance_for(self, parent: BoardLike, move_uci: UCI) -> PromptMovePerformance:
         """Return prompt-local performance for a move, creating it on first use."""
@@ -701,17 +791,18 @@ class RepetitionEngine():
         return 1.0 - self._move_right_probability(parent, move_uci)
 
     def _current_tested_move(self) -> Optional[tuple[Node, UCI]]:
-        """Return the move the current prompt is asking the user to find."""
-        parent = self._prompt.node
-        if parent is None:
+        """Return the opponent move entry that produced the current prompt."""
+        prompt_node = self._prompt.node
+        if prompt_node is None or prompt_node.parent is None or prompt_node.move is None:
+            return None
+        if prompt_node.turn() != self._session.options.side:
             return None
 
-        expected_uci = self.expected_uci()
-        if expected_uci is None:
+        parent = prompt_node.parent
+        move_uci = prompt_node.move.uci()
+        if move_uci not in self._get_moves_for_(parent, blacklist_included=True):
             return None
-        if expected_uci not in self._get_moves_for_(parent, blacklist_included=True):
-            return None
-        return parent, expected_uci
+        return parent, move_uci
 
     def _record_hint(self, determines_move: bool) -> None:
         tested_move = self._current_tested_move()
@@ -782,7 +873,7 @@ class RepetitionEngine():
             # how expected_uci is constructed. Need some alternative_moves and a design that ensures their accord
             self._session.options.check_alternatives = True
             chosen_alternative_node = next(
-                (c for c in prpt_data.node.variations if c.move.uci() == uci),
+                (c for c in self._non_temporary_children(prpt_data.node) if c.move.uci() == uci),
                 None,
             )
             if chosen_alternative_node is not None:
@@ -819,6 +910,7 @@ class RepetitionEngine():
         return grade
 
     def _handle_off_file_guess(self, uci: UCI) -> MoveGrade:
+        # TODO: if we transposed, contunue along the file?
         ev = self._session.query(fen(self._prompt.node), "q-eval")
         expected_eval, best_reply = ev.eval, ev.move
 
@@ -853,48 +945,57 @@ class RepetitionEngine():
     def _evaluate_move(self, position: Union[chess.Board, Node], move: Union[chess.Move, str]) -> float:
         return self._session.q_eval_move(position, move).eval
 
-    def _skip_current_prompt_position(self) -> tuple[Node | bool, str]:
+    def _should_skip_current_prompt_position(self, skip_index: int) -> bool:
+        if self._prompt.node is None or self._prompt.off_file:
+            return False
+        if self._current_expected_node() is None:
+            return False
+        if not self._is_learned_prompt_position(self._prompt.node):
+            return False
+
+        skip_probability = self.LEARNED_MOVE_SKIP_PROBABILITY * (0.5 ** skip_index)
+        return self._rng.random() < skip_probability
+
+    def _advance_past_current_prompt_position(self) -> None:
+        """
+        Skip the current prompt by auto-playing its expected response, then
+        advance once to the next opponent move selection.
+        """
         if self._prompt.node is None:
-            raise RuntimeError("Cannot skip a prompt position without an active prompt")
-
-        learned_node, _ = self._choose_move(self._prompt.node, maybe_off_book=False)
-        if learned_node is False:
-            return False, ""
-
-        next_node, selection_debug = self._choose_move(learned_node, off_book=True)
-        if next_node is False:
-            return False, selection_debug
-
+            raise RuntimeError("Cannot skip a prompt without an active node")
+        if self._prompt.off_file:
+            raise RuntimeError("Cannot skip a learned prompt while off-file")
         if self._prompt.node_index is not None:
-            self._prompt.node_index += 1
-            if not self._prompt.off_file:
-                self._prompt.node_index += 1
-        return next_node, selection_debug
+            raise RuntimeError("Learned-prompt skipping is only supported for locally generated prompts")
 
-    def _advance_skipping_lrned_moves(self) -> bool:
-        """
-        Advance self._prmpt ~until a non-learned move.
-        Returns False if prompt generation failed after skipping (e.g. out of moves).
-        """
-        i = 0
-        while True:
-            if self._prompt.off_file:
-                return True
+        expected_node = self._current_expected_node()
+        if expected_node is None:
+            self.finish_prompt()
+            return
 
-            expected_node = self._current_expected_node()
-            if expected_node is None:
-                return True
-            if not self._is_learned_move(self._prompt.node, expected_node.move.uci()):
-                return True
-            if self._rng.random() >= self.LEARNED_MOVE_SKIP_PROBABILITY * (1/2)**i:
-                return True
-            i += 1
+        self._prompt.node = expected_node
+        self._current_hints = None
 
-            next_node, selection_debug = self._skip_current_prompt_position()
-            if next_node is False:
-                return True
-            self._prompt.node = next_node
+        next_node, selection_debug = self._choose_move(self._prompt.node, maybe_off_book=True)
+        if next_node is False:
             self._prompt.message = selection_debug
+            self.finish_prompt()
+            return
+
+        self._prompt.node = next_node
+        self._prompt.message = selection_debug
+
+    def _skip_learned_prompt_positions(self) -> None:
+        """
+        Repeatedly skip learned prompt positions by following the current
+        expected reply and then advancing to the next prompt candidate.
+        """
+        skip_index = 0
+        while self._should_skip_current_prompt_position(skip_index):
+            skip_index += 1
+            self._advance_past_current_prompt_position()
+            if self._is_finished or self._prompt.off_file:
+                return
 
     def _advance_line(self) -> None:
         """
@@ -918,7 +1019,7 @@ class RepetitionEngine():
 
             try:
                 child_index = self._prompt.node_index+1
-                next_node = self._session.child_for_move(
+                next_node = self._child_for_move(
                     self._prompt.node,
                     self._prompt.prechosen_path[child_index],
                 )
@@ -945,9 +1046,8 @@ class RepetitionEngine():
         self._prompt.message = selection_debug
         if self._prompt.off_file:
             return
-        if not self._advance_skipping_lrned_moves():
-            self._prompt.message = selection_debug
-            self.finish_prompt()
+        self._skip_learned_prompt_positions()
+        if self._is_finished or self._prompt.off_file:
             return
 
         message = f"Correct: {node_san(self._prompt.node)}. Continue along the line."
@@ -994,7 +1094,9 @@ class RepetitionEngine():
         offset = len(chosen_path) - prpt_len
         anchor = self._root
         for j in range(offset):
-            anchor = self._session.child_for_move(anchor, chosen_path[j])
+            anchor = self._child_for_move(anchor, chosen_path[j])
+            if anchor is None:
+                raise RuntimeError(f"Missing file child for prompt path move {chosen_path[j]!r}")
         index = offset - 1
         
         # make sure we are anchored at their move
@@ -1053,7 +1155,8 @@ class RepetitionEngine():
         self._prompt.node = next_node
         self._prompt.message = selection_debug
 
-        if not self._advance_skipping_lrned_moves():
+        self._skip_learned_prompt_positions()
+        if self._is_finished:
             return False
         self._set_prompt_start()
         return True
@@ -1067,7 +1170,9 @@ class RepetitionEngine():
         node = self._root
         try:
             for move_uci in prompt_path[:anchor_offset]:
-                node = self._session.child_for_move(node, move_uci)
+                node = self._child_for_move(node, move_uci)
+                if node is None:
+                    return -1.0
         except RuntimeError:
             return -1.0
 
@@ -1078,14 +1183,15 @@ class RepetitionEngine():
         expected_damage = 0.0
         for move_uci in prompt_path[anchor_offset:]:
             try:
-                if node.turn() == self._session.options.side:
-                    expected_damage += self._move_wrong_probability(node, move_uci) * move_probability
-                else:
+                if node.turn() != self._session.options.side:
                     move_probability *= self._get_moves_for_(node)[move_uci]["weight"]
+                    expected_damage += self._move_wrong_probability(node, move_uci) * move_probability
             except KeyError:
                 return -1.0
             try:
-                node = self._session.child_for_move(node, move_uci)
+                node = self._child_for_move(node, move_uci)
+                if node is None:
+                    return -1.0
             except RuntimeError:
                 return -1.0
 
@@ -1109,6 +1215,15 @@ class RepetitionEngine():
         off_book = off_book or (maybe_off_book and self._rng.random() < self.non_file_move_freq)
 
         children = self._prompt_variations(parent)
+        if parent.turn() == self._session.options.side:
+            if not children:
+                return False, ""
+            choice = self._rng_choice(children)
+            message = ""
+            if DEBUG_MODE:
+                message = self._format_rng_weights({child.move.uci(): 1.0 for child in children})
+            return choice, message
+
         move_weights = self._get_moves_for_(parent)
         blacklisted_moves = set(self._blacklist_for(parent))
         eligible_moves = {
@@ -1118,17 +1233,9 @@ class RepetitionEngine():
         }
 
         if not children or not eligible_moves: # TODO: transp
-            # if there are no moves for us in the file but we are still here, that's improper usage
-            if parent.turn() == self._session.options.side:
-                return False, ""
             # if there are no moves for them, we can try anyway
             off_book = True
             use_engine = True
-
-        # a tiny optimization
-        if parent.turn() == self._session.options.side and not self._session.options.check_alternatives:
-            return children[0], "our move"
-        # TODO: if check_alternatives
 
         if off_book:
             # Try to find an off-book move with probability non_file_move_freq
@@ -1148,29 +1255,13 @@ class RepetitionEngine():
 
         unlearned_weights = {}
         fallback_weights = {}
-        if parent.turn() == self._session.options.side:
-            for move_uci, entry in eligible_moves.items():
-                right_probability = self._move_right_probability(parent, move_uci)
-                if right_probability < self.LOCAL_UNLEARNED_RIGHT_THRESHOLD:
-                    unlearned_weights[move_uci] = entry["weight"]
-                fallback_weights[move_uci] = (1.0 - right_probability) * entry["weight"]
-        else:
-            for move_uci, entry in eligible_moves.items():
-                child = self._session.child_for_move(parent, move_uci)
-                expected_node = next(iter(self._prompt_variations(child)), None)
-                if expected_node is None:
-                    right_probability = self._global_right_probability()
-                else:
-                    response_uci = expected_node.move.uci()
-                    try:
-                        right_probability = self._move_right_probability(child, response_uci)
-                    except KeyError:
-                        right_probability = self._global_right_probability()
-                if right_probability < self.LOCAL_UNLEARNED_RIGHT_THRESHOLD:
-                    unlearned_weights[move_uci] = entry["weight"]
-                fallback_weights[move_uci] = (1.0 - right_probability) * entry["weight"]
-
+        for move_uci, entry in eligible_moves.items():
+            right_probability = self._move_right_probability(parent, move_uci)
+            if right_probability < self.LOCAL_UNLEARNED_RIGHT_THRESHOLD:
+                unlearned_weights[move_uci] = entry["weight"]
+            fallback_weights[move_uci] = (1.0 - right_probability) * entry["weight"]
         weights_dict = unlearned_weights or fallback_weights
+
         if sum(weights_dict.values()) <= 0.0:
             weights_dict = {move_uci: entry["weight"] for move_uci, entry in eligible_moves.items()}
         sys.stderr.write(f"Choosing move... selection_weights: {[(k, round(v, 3)) for k, v in weights_dict.items()]}\n")
@@ -1179,7 +1270,10 @@ class RepetitionEngine():
         message = ""
         if DEBUG_MODE:
             message = self._format_rng_weights(weights_dict)
-        return self._session.child_for_move(parent, choice), message
+        child = self._child_for_move(parent, choice)
+        if child is None:
+            raise RuntimeError(f"Chosen move {choice!r} does not resolve to a non-temporary child")
+        return child, message
 
     def _add_temporary_node(
         self,
@@ -1446,7 +1540,7 @@ class RepetitionEngine():
             except Exception:
                 san = move_uci
             try:
-                child = self._session.child_for_move(parent, move_uci)
+                child = self._child_for_move(parent, move_uci)
             except RuntimeError:
                 child = None
             entries.append((move_uci, entry["weight"], entry["performance"], san, child))
@@ -1471,7 +1565,7 @@ class RepetitionEngine():
             weight = None if move_entry is None else move_entry["weight"]
             performance = (0, 0) if move_entry is None else move_entry["performance"]
             try:
-                child = self._session.child_for_move(parent, move_uci)
+                child = self._child_for_move(parent, move_uci)
             except RuntimeError:
                 child = None
             try:
