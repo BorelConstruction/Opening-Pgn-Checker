@@ -382,18 +382,14 @@ class RepetitionEngine():
     def _non_temporary_children(self, node: Node) -> list[Node]:
         return [child for child in self._session.variations(node) if not self._is_temporary_node(child)]
 
-    def _tt_nodes_for_position(self, position: BoardLike, *, include_temporary: bool = False) -> list[Node]:
+    def _tt_nodes_for_position(self, position: BoardLike) -> list[Node]:
         nodes = self._session.cache[fen(position)].TTed
-        if include_temporary:
-            return list(nodes)
         return [node for node in nodes if not self._is_temporary_node(node)]
 
     def _child_for_move(
         self,
         parent: Node,
         move: chess.Move | UCI,
-        *,
-        include_temporary: bool = False,
     ) -> Optional[Node]:
         move_uci = move.uci() if isinstance(move, chess.Move) else move
 
@@ -402,23 +398,13 @@ class RepetitionEngine():
                 continue
             return child
 
-        if include_temporary:
-            for child in parent.variations:
-                if child.move.uci() == move_uci:
-                    return child
-
-        for cached_parent in self._tt_nodes_for_position(parent, include_temporary=include_temporary):
+        for cached_parent in self._tt_nodes_for_position(parent):
             if cached_parent is parent:
                 continue
             for child in self._non_temporary_children(cached_parent):
                 if child.move.uci() != move_uci:
                     continue
                 return child
-
-            if include_temporary:
-                for child in cached_parent.variations:
-                    if child.move.uci() == move_uci:
-                        return child
 
         return None
 
@@ -725,14 +711,12 @@ class RepetitionEngine():
             return None
         return expected_moves[0]
 
-    def _prompt_variations(self, position: BoardLike) -> list[Node]:
+    def _prompt_variations(self, position: BoardLike, include_temporary: bool = False) -> list[Node]:
         def prompt_children(node: Node) -> list[Node]:
             children = self._session.variations(node, use_TT=False)
-            return [child for child in children if not self._is_temporary_node(child)]
-
-        if isinstance(position, Node) and self._is_temporary_node(position):
-            return prompt_children(position)
-
+            return [child for child in children if
+                     include_temporary or (not self._is_temporary_node(child))]
+        
         # On our turn with alternatives disabled, stick to the actual node's
         # main line.
         if (
@@ -1254,17 +1238,12 @@ class RepetitionEngine():
         if not eligible_moves:
             return False, ""
 
-        unlearned_weights = {}
-        fallback_weights = {}
+        weights_dict = {}
         for move_uci, entry in eligible_moves.items():
             right_probability = self._move_right_probability(parent, move_uci)
             if right_probability < self.LOCAL_UNLEARNED_RIGHT_THRESHOLD:
-                unlearned_weights[move_uci] = entry["weight"]
-            fallback_weights[move_uci] = (1.0 - right_probability) * entry["weight"]
-        weights_dict = unlearned_weights or fallback_weights
+                weights_dict[move_uci] = (1.0 - right_probability) * entry["weight"]
 
-        if sum(weights_dict.values()) <= 0.0:
-            weights_dict = {move_uci: entry["weight"] for move_uci, entry in eligible_moves.items()}
         sys.stderr.write(f"Choosing move... selection_weights: {[(k, round(v, 3)) for k, v in weights_dict.items()]}\n")
         choice = self._rng_choice(weights_dict)
 
@@ -1338,18 +1317,20 @@ class RepetitionEngine():
         )
 
     def _off_book_db_candidates(self, position: BoardLike) -> list[tuple[chess.Move, float]]:
-        """Find off-book non-BL DB moves with frequency >= 5% and score_rate <= 75%."""
+        """Find off-book non-BL DB moves with frequency >= 5%, score_rate <= 75%, and no obvious replies."""
         move_weights = self._get_db_moves_and_nums(position)
         if not move_weights:
             return []
 
-        position_board = to_board(position)
-        exclude = set(n.move.uci() for n in self._prompt_variations(position))
+        exclude = set(n.move.uci() for n in self._prompt_variations(position, include_temporary=True))
+        # we included temporary nodes to avoid prompting with e.g. same off-file twice in a row
         exclude.update(self._blacklist_for(position))
 
         # Filter candidates: frequency >= 5%, score_rate <= 75%
         candidates: list[tuple[chess.Move, float]] = []
         for uci, weight in move_weights.items():
+            position_board = to_board(position)
+
             if uci in exclude:
                 continue
 
@@ -1360,6 +1341,13 @@ class RepetitionEngine():
             # don't prompt with stupid moves
             if score_rate > 0.75:
                 continue
+
+            # don't prompt if the reply is obvious
+            position_board.push_uci(uci)
+            stats = self._session.query(fen(position_board), "db_lichess")
+            match stats["moves"]:
+                case [popular, *_] if self._session.move_freq(position_board, popular["uci"]) > 0.9:
+                    continue
 
             candidates.append((chess.Move.from_uci(uci), weight))
 
