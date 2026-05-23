@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from enum import Enum
 import json
+import math
 import os
 import random
 import sys
@@ -43,7 +45,7 @@ SEARCH_MOVE_BOOST_MIN_SIMILARITY = 0.8
 
 class MoveEntryData(TypedDict):
     weight: float
-    performance: tuple[int, int]
+    memory: MoveMemoryState
 
 
 class PositionMoveData(TypedDict):
@@ -66,34 +68,205 @@ class MoveGrade():
 
 
 @dataclass
-class PromptMovePerformance:
-    successes: int = 0
+class MemoryModel(ABC):
+    @abstractmethod
+    def predict_success(self, elapsed_seconds: float) -> float:
+        """Estimate recall probability after the given elapsed time."""
+
+    @abstractmethod
+    def update(self, elapsed_seconds: float, remembered: bool) -> None:
+        """Update model parameters from a recall outcome."""
+
+    @abstractmethod
+    def clone(self) -> MemoryModel:
+        """Create a deep copy suitable for prompt-local updates."""
+
+    @abstractmethod
+    def to_json(self) -> dict[str, Any]:
+        """Serialize the model state."""
+
+    @property
+    @abstractmethod
+    def model_type(self) -> str:
+        """Stable identifier used for persistence."""
+
+    def debug_payload(self) -> dict[str, Any]:
+        return {"type": self.model_type}
+
+
+@dataclass
+class NaiveMemoryModel(MemoryModel):
+    """
+    P(success after t days) = exp(-a * t).
+
+    The default rate is normalized so the predicted success after one day is 0.5.
+    """
+
+    SECONDS_PER_DAY = 24.0 * 60.0 * 60.0
+    FAILURE_SCALE = 0.5
+
+    a: float = math.log(2.0)
+
+    @property
+    def model_type(self) -> str:
+        return "naive_exponential"
+
+    def predict_success(self, elapsed_seconds: float) -> float:
+        if elapsed_seconds < 0.0:
+            raise ValueError("Elapsed time must be non-negative")
+        elapsed_days = elapsed_seconds / self.SECONDS_PER_DAY
+        return math.exp(-self.a * elapsed_days)
+
+    def update(self, elapsed_seconds: float, remembered: bool) -> None:
+        if elapsed_seconds < 0.0:
+            raise ValueError("Elapsed time must be non-negative")
+        elapsed_days = elapsed_seconds / self.SECONDS_PER_DAY
+        if remembered:
+            self.a += elapsed_days
+            return
+        self.a *= self.FAILURE_SCALE
+
+    def clone(self) -> MemoryModel:
+        return NaiveMemoryModel(a=self.a)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "type": self.model_type,
+            "a": self.a,
+        }
+
+    def debug_payload(self) -> dict[str, Any]:
+        return {
+            "type": self.model_type,
+            "a": self.a,
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> NaiveMemoryModel:
+        if not isinstance(payload, dict):
+            raise TypeError("Naive memory model payload must be a dict")
+        return cls(a=float(payload.get("a", math.log(2.0))))
+
+
+def memory_model_from_json(payload: Any) -> MemoryModel:
+    if payload is None:
+        return NaiveMemoryModel()
+    if not isinstance(payload, dict):
+        raise TypeError("Memory model payload must be a dict")
+
+    model_type = payload.get("type", "naive_exponential")
+    if model_type == "naive_exponential":
+        return NaiveMemoryModel.from_json(payload)
+    raise ValueError(f"Unsupported memory model type: {model_type!r}")
+
+
+@dataclass
+class MoveMemoryState:
+    model: MemoryModel
     attempts: int = 0
-    gave_up: bool = False
+    successes: int = 0
+    last_attempt_time: Optional[float] = None
+    last_failure_time: Optional[float] = None
 
-    def add_giveup(self) -> None:
-        if self.gave_up:
-            return
-        self.attempts += 1
-        self.gave_up = True
+    MIN_SUCCESS_DELAY_AFTER_FAILURE_SECONDS = 60.0
+    INITIAL_ELAPSED_SECONDS = NaiveMemoryModel.SECONDS_PER_DAY
 
-    def add_hint(self, determines_move: bool) -> None:
-        if self.gave_up:
-            return
-        self.attempts += 1
-        if determines_move:
-            self.gave_up = True
+    def predict_success(self, now: float, default_probability: float) -> float:
+        if self.last_attempt_time is None:
+            return default_probability
+        elapsed_seconds = max(0.0, now - self.last_attempt_time)
+        return self.model.predict_success(elapsed_seconds)
 
-    def add_incorrect_attempt(self) -> None:
-        if self.gave_up:
-            return
-        self.attempts += 1
+    def update(self, *, attempt_time: float, remembered: bool) -> bool:
+        if remembered and self.last_failure_time is not None:
+            if attempt_time - self.last_failure_time < self.MIN_SUCCESS_DELAY_AFTER_FAILURE_SECONDS:
+                return False
 
-    def add_correct_attempt(self) -> None:
-        if self.gave_up:
-            return
-        self.successes += 1
+        if self.last_attempt_time is None:
+            elapsed_seconds = self.INITIAL_ELAPSED_SECONDS
+        else:
+            elapsed_seconds = max(0.0, attempt_time - self.last_attempt_time)
+
+        self.model.update(elapsed_seconds, remembered)
         self.attempts += 1
+        self.last_attempt_time = attempt_time
+        if remembered:
+            self.successes += 1
+            self.last_failure_time = None
+        else:
+            self.last_failure_time = attempt_time
+        return True
+
+    def clone(self) -> MoveMemoryState:
+        return MoveMemoryState(
+            model=self.model.clone(),
+            attempts=self.attempts,
+            successes=self.successes,
+            last_attempt_time=self.last_attempt_time,
+            last_failure_time=self.last_failure_time,
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "model": self.model.to_json(),
+            "attempts": self.attempts,
+            "successes": self.successes,
+            "lastAttemptTime": self.last_attempt_time,
+            "lastFailureTime": self.last_failure_time,
+        }
+
+    def debug_payload(self, now: float, default_probability: float) -> dict[str, Any]:
+        payload = self.model.debug_payload()
+        payload.update(
+            {
+                "attempts": self.attempts,
+                "successes": self.successes,
+                "predictSuccess": self.predict_success(now, default_probability),
+            }
+        )
+        return payload
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    return float(value)
+
+
+def move_memory_state_from_json(payload: Any) -> MoveMemoryState:
+    if payload is None:
+        return MoveMemoryState(model=NaiveMemoryModel())
+
+    if isinstance(payload, (list, tuple)):
+        if len(payload) != 2:
+            raise ValueError("Legacy move performance payload must contain two values")
+        successes, attempts = payload
+        return MoveMemoryState(
+            model=NaiveMemoryModel(),
+            attempts=int(attempts),
+            successes=int(successes),
+        )
+
+    if not isinstance(payload, dict):
+        raise TypeError("Move memory payload must be a dict, list, or tuple")
+
+    if "model" in payload:
+        return MoveMemoryState(
+            model=memory_model_from_json(payload["model"]),
+            attempts=int(payload.get("attempts", 0)),
+            successes=int(payload.get("successes", 0)),
+            last_attempt_time=_optional_float(payload.get("lastAttemptTime")),
+            last_failure_time=_optional_float(payload.get("lastFailureTime")),
+        )
+
+    if "attempts" in payload or "successes" in payload:
+        return MoveMemoryState(
+            model=NaiveMemoryModel(),
+            attempts=int(payload.get("attempts", 0)),
+            successes=int(payload.get("successes", 0)),
+        )
+
+    return MoveMemoryState(model=memory_model_from_json(payload))
 
 
 @dataclass(frozen=True)
@@ -120,7 +293,7 @@ class RepetitionEngine():
     or picked by a chess engine.
 
     Keeps the result of generating in self._prompt and stores prompt-local
-    performance data so cached move performance can be updated from real user behavior.
+    memory updates so cached move models can be updated from real user behavior.
     """
     DEFAULT_RIGHT_PROBABILITY = 0.5
     LEARNED_RIGHT_THRESHOLD = 0.85
@@ -158,13 +331,10 @@ class RepetitionEngine():
 
         self._session.fill_the_TT(self._session.game)
         self._grades: list[MoveGrade] = []
-        self._pending_move_performance: dict[tuple[str, UCI], PromptMovePerformance] = {}
+        self._pending_move_memory: dict[tuple[str, UCI], MoveMemoryState] = {}
         self._current_hints: Optional[Hints] = None
         self._temporary_nodes: list[Node] = []
-        self._global_successes = 0
-        self._global_attempts = 0
 
-        self._refresh_global_performance_totals()
         self._refresh_prompt_dicts()
 
     def summarize(self) -> Feedback:
@@ -245,20 +415,6 @@ class RepetitionEngine():
         self._prompt_dict_global = self.make_prompt_dict_global()
         self._prompt_dict_relative = self.make_prompt_dict_relative()
 
-    def _refresh_global_performance_totals(self) -> None:
-        successes = 0
-        attempts = 0
-        for position_data in self._pos_drill_data.values():
-            moves = position_data["moves"]
-            if moves is None:
-                continue
-            for entry in moves.values():
-                move_successes, move_attempts = entry["performance"]
-                successes += move_successes
-                attempts += move_attempts
-        self._global_successes = successes
-        self._global_attempts = attempts
-
     def get_hint_circles(self) -> list[Circle]:
         if self._prompt.node is None:
             raise RuntimeError("Cannot provide a hint without an active prompt")
@@ -282,9 +438,7 @@ class RepetitionEngine():
     def finish_prompt(self, gave_up: bool = False) -> None:
         self._is_finished = True
         if gave_up:
-            if tested_move := self._current_tested_move():
-                parent, move_uci = tested_move
-                self._move_performance_for(parent, move_uci).add_giveup()
+            self._update_current_tested_move(remembered=False)
         self._commit_current_tested_move()
         self._pos_drill_data.serialize()
 
@@ -312,10 +466,9 @@ class RepetitionEngine():
             if missing_moves:
                 added_weight = self._added_move_weight(position_fen, retained_weights)
                 for uci in missing_moves:
-                    move_weights[uci] = MoveEntryData(weight=added_weight, performance=(0, 0))
+                    move_weights[uci] = MoveEntryData(weight=added_weight, memory=self._new_move_memory_state())
                 moves_added += len(missing_moves)
 
-        self._refresh_global_performance_totals()
         self._pos_drill_data.serialize()
         self._refresh_prompt_dicts()
         return WeightSyncSummary(
@@ -365,7 +518,7 @@ class RepetitionEngine():
         self._review_path = None
         self._search_move_payload = None
         self._grades = []
-        self._pending_move_performance = {}
+        self._pending_move_memory = {}
         self._current_hints = None
         self._prompt = PromptState(node=None, off_file=False, message="", anchor_node=None)
 
@@ -491,9 +644,19 @@ class RepetitionEngine():
         item: tuple[str, PositionMoveData],
     ) -> dict[str, Any]:
         position_fen, position_data = item
+        raw_moves = position_data["moves"]
+        serialized_moves = None
+        if raw_moves is not None:
+            serialized_moves = {
+                move_uci: {
+                    "weight": entry["weight"],
+                    "memory": entry["memory"].to_json(),
+                }
+                for move_uci, entry in raw_moves.items()
+            }
         return {
             "fen": position_fen,
-            "moves": position_data["moves"],
+            "moves": serialized_moves,
             "blacklist": list(position_data["blacklist"]),
         }
 
@@ -532,25 +695,23 @@ class RepetitionEngine():
                     raise KeyError(f"Missing move weight for {uci!r} from position {position_fen!r}")
                 move_probs[uci] = MoveEntryData(
                     weight=float(raw_weight),
-                    performance=self._performance_from_json(raw_entry.get("performance", (0, 0))),
+                    memory=move_memory_state_from_json(raw_entry.get("memory", raw_entry.get("performance"))),
                 )
                 if raw_entry.get("blacklisted", False) and uci not in blacklist:
                     blacklist.append(uci)
             else:
-                move_probs[uci] = MoveEntryData(weight=float(raw_entry), performance=(0, 0))
+                move_probs[uci] = MoveEntryData(weight=float(raw_entry), memory=self._new_move_memory_state())
 
         return position_fen, PositionMoveData(moves=move_probs, blacklist=blacklist)
 
-    def _performance_from_json(self, raw_performance: Any) -> tuple[int, int]:
-        successes, attempts = raw_performance
-        return successes, attempts
-
+    def _new_move_memory_state(self) -> MoveMemoryState:
+        return MoveMemoryState(model=NaiveMemoryModel())
 
     def _get_moves_for_(self, parent: Node, blacklist_included: bool = False) -> dict[UCI, MoveEntryData]:
         position_data = self._pos_drill_data[fen(parent)]
         if position_data["moves"] is None:
             position_data["moves"] = {
-                    move_uci: MoveEntryData(weight=float(freq), performance=(0, 0))
+                    move_uci: MoveEntryData(weight=float(freq), memory=self._new_move_memory_state())
                     for move_uci, freq in self._get_moves_and_freqs(parent).items()
                 }
             
@@ -570,7 +731,7 @@ class RepetitionEngine():
             attempts = self._move_attempts(parent, move_uci)
             return (
                 attempts >= self.LEARNED_MIN_ATTEMPTS
-                and self._move_right_probability(parent, move_uci) > self.LEARNED_RIGHT_THRESHOLD
+                and self._move_predict_success(parent, move_uci) > self.LEARNED_RIGHT_THRESHOLD
             )
         except KeyError:
             return False
@@ -738,17 +899,17 @@ class RepetitionEngine():
             children.extend(prompt_children(node))
         return children
 
-    def _move_performance_for(self, parent: BoardLike, move_uci: UCI) -> PromptMovePerformance:
-        """Return prompt-local performance for a move, creating it on first use."""
+    def _move_memory_for(self, parent: BoardLike, move_uci: UCI) -> MoveMemoryState:
+        """Return prompt-local memory state for a move, creating it on first use."""
         key = (fen(parent), move_uci)
-        performance = self._pending_move_performance.get(key)
-        if performance is None:
-            performance = PromptMovePerformance()
-            self._pending_move_performance[key] = performance
-        return performance
+        memory_state = self._pending_move_memory.get(key)
+        if memory_state is None:
+            memory_state = self._move_entry(parent, move_uci)["memory"].clone()
+            self._pending_move_memory[key] = memory_state
+        return memory_state
 
-    def _pop_move_performance(self, parent: BoardLike, move_uci: UCI) -> Optional[PromptMovePerformance]:
-        return self._pending_move_performance.pop((fen(parent), move_uci), None)
+    def _pop_move_memory(self, parent: BoardLike, move_uci: UCI) -> Optional[MoveMemoryState]:
+        return self._pending_move_memory.pop((fen(parent), move_uci), None)
 
     def _move_entry(self, parent: BoardLike, move_uci: UCI) -> MoveEntryData:
         moves = self._get_moves_for_(parent, blacklist_included=True)
@@ -756,25 +917,20 @@ class RepetitionEngine():
             raise KeyError(f"Missing move data for {move_uci!r} from position {fen(parent)!r}")
         return moves[move_uci]
 
-    def _global_right_probability(self) -> float:
-        if self._global_attempts <= 0:
-            return self.DEFAULT_RIGHT_PROBABILITY
-        return (self._global_successes + 1) / (self._global_attempts + 2)
-
-    def _move_successes_attempts(self, parent: BoardLike, move_uci: UCI) -> tuple[int, int]:
-        return self._move_entry(parent, move_uci)["performance"]
+    def _move_memory_state(self, parent: BoardLike, move_uci: UCI) -> MoveMemoryState:
+        return self._move_entry(parent, move_uci)["memory"]
 
     def _move_attempts(self, parent: BoardLike, move_uci: UCI) -> int:
-        return self._move_successes_attempts(parent, move_uci)[1]
+        return self._move_memory_state(parent, move_uci).attempts
 
-    def _move_right_probability(self, parent: BoardLike, move_uci: UCI) -> float:
-        successes, attempts = self._move_successes_attempts(parent, move_uci)
-        if attempts <= 0:
-            return self._global_right_probability()
-        return (successes + 1) / (attempts + 2)
+    def _move_predict_success(self, parent: BoardLike, move_uci: UCI) -> float:
+        return self._move_memory_state(parent, move_uci).predict_success(
+            now=time.time(),
+            default_probability=self.DEFAULT_RIGHT_PROBABILITY,
+        )
 
     def _move_wrong_probability(self, parent: BoardLike, move_uci: UCI) -> float:
-        return 1.0 - self._move_right_probability(parent, move_uci)
+        return 1.0 - self._move_predict_success(parent, move_uci)
 
     def _current_tested_move(self) -> Optional[tuple[Node, UCI]]:
         """Return the opponent move entry that produced the current prompt."""
@@ -791,44 +947,37 @@ class RepetitionEngine():
         return parent, move_uci
 
     def _record_hint(self, determines_move: bool) -> None:
-        tested_move = self._current_tested_move()
-        if tested_move is None:
-            return
-        parent, move_uci = tested_move
-        self._move_performance_for(parent, move_uci).add_hint(determines_move)
+        del determines_move
+        self._update_current_tested_move(remembered=False)
 
     def _record_incorrect_attempt(self) -> None:
-        tested_move = self._current_tested_move()
-        if tested_move is None:
-            return
-        parent, move_uci = tested_move
-        self._move_performance_for(parent, move_uci).add_incorrect_attempt()
+        self._update_current_tested_move(remembered=False)
 
     def _record_correct_attempt(self) -> None:
+        self._update_current_tested_move(remembered=True)
+
+    def _update_current_tested_move(self, *, remembered: bool) -> None:
         tested_move = self._current_tested_move()
         if tested_move is None:
             return
         parent, move_uci = tested_move
-        self._move_performance_for(parent, move_uci).add_correct_attempt()
+        self._move_memory_for(parent, move_uci).update(
+            attempt_time=time.time(),
+            remembered=remembered,
+        )
 
     def _commit_current_tested_move(self) -> None:
-        """Persist prompt-local stats before advancing away from the current tested move."""
+        """Persist prompt-local memory updates before advancing away from the current tested move."""
         tested_move = self._current_tested_move()
         if tested_move is None:
             return
         parent, move_uci = tested_move
-        performance = self._pop_move_performance(parent, move_uci)
-        if performance is None or performance.attempts == 0:
+        memory_state = self._pop_move_memory(parent, move_uci)
+        if memory_state is None:
             return
 
         entry = self._move_entry(parent, move_uci)
-        successes, attempts = entry["performance"]
-        entry["performance"] = (
-            successes + performance.successes,
-            attempts + performance.attempts,
-        )
-        self._global_successes += performance.successes
-        self._global_attempts += performance.attempts
+        entry["memory"] = memory_state
 
     def _hint_matches_current_prompt(self, expected_uci: UCI) -> bool:
         if self._current_hints is None or self._prompt.node is None:
@@ -1240,9 +1389,9 @@ class RepetitionEngine():
 
         weights_dict = {}
         for move_uci, entry in eligible_moves.items():
-            right_probability = self._move_right_probability(parent, move_uci)
-            if right_probability < self.LOCAL_UNLEARNED_RIGHT_THRESHOLD:
-                weights_dict[move_uci] = (1.0 - right_probability) * entry["weight"]
+            predicted_success = self._move_predict_success(parent, move_uci)
+            if predicted_success < self.LOCAL_UNLEARNED_RIGHT_THRESHOLD:
+                weights_dict[move_uci] = (1.0 - predicted_success) * entry["weight"]
 
         sys.stderr.write(f"Choosing move... selection_weights: {[(k, round(v, 3)) for k, v in weights_dict.items()]}\n")
         choice = self._rng_choice(weights_dict)
@@ -1521,8 +1670,8 @@ class RepetitionEngine():
     def _sorted_weighted_moves_for(
         self,
         parent: Node,
-    ) -> list[tuple[UCI, float, tuple[int, int], str, Optional[Node]]]:
-        entries: list[tuple[UCI, float, tuple[int, int], str, Optional[Node]]] = []
+    ) -> list[tuple[UCI, float, MoveMemoryState, str, Optional[Node]]]:
+        entries: list[tuple[UCI, float, MoveMemoryState, str, Optional[Node]]] = []
         for move_uci, entry in self._get_moves_for_(parent).items():
             try:
                 san = node_san(parent, move_uci)
@@ -1532,7 +1681,7 @@ class RepetitionEngine():
                 child = self._child_for_move(parent, move_uci)
             except RuntimeError:
                 child = None
-            entries.append((move_uci, entry["weight"], entry["performance"], san, child))
+            entries.append((move_uci, entry["weight"], entry["memory"], san, child))
         entries.sort(key=lambda item: (-item[1], item[3], item[0]))
         return entries
 
@@ -1552,7 +1701,7 @@ class RepetitionEngine():
             move_weights = self._get_moves_for_(parent)
             move_entry = move_weights.get(move_uci)
             weight = None if move_entry is None else move_entry["weight"]
-            performance = (0, 0) if move_entry is None else move_entry["performance"]
+            memory_state = None if move_entry is None else move_entry["memory"]
             try:
                 child = self._child_for_move(parent, move_uci)
             except RuntimeError:
@@ -1566,7 +1715,7 @@ class RepetitionEngine():
                     parent,
                     move_uci,
                     weight,
-                    performance,
+                    memory_state,
                     san,
                     child,
                     (*path, move_uci),
@@ -1582,13 +1731,13 @@ class RepetitionEngine():
             return []
 
         children: list[dict[str, Any]] = []
-        for move_uci, weight, performance, san, child in self._sorted_weighted_moves_for(parent):
+        for move_uci, weight, memory_state, san, child in self._sorted_weighted_moves_for(parent):
             children.append(
                 self._build_debug_move_node(
                     parent,
                     move_uci,
                     weight,
-                    performance,
+                    memory_state,
                     san,
                     child,
                     (*path, move_uci),
@@ -1606,7 +1755,7 @@ class RepetitionEngine():
         parent: Node,
         move_uci: UCI,
         weight: Optional[float],
-        performance: tuple[int, int],
+        memory_state: Optional[MoveMemoryState],
         san: str,
         child: Optional[Node],
         path: tuple[UCI, ...],
@@ -1620,6 +1769,12 @@ class RepetitionEngine():
         board = parent.board()
         move_number = board.fullmove_number
         color = "white" if parent.turn() == chess.WHITE else "black"
+        performance = None
+        if memory_state is not None:
+            performance = memory_state.debug_payload(
+                now=time.time(),
+                default_probability=self.DEFAULT_RIGHT_PROBABILITY,
+            )
         children: list[dict[str, Any]] = []
         if child is not None:
             children = self._build_debug_children(
@@ -1642,7 +1797,7 @@ class RepetitionEngine():
             "uci": move_uci,
             "weight": weight,
             "showWeightLabel": parent.turn() != self._session.options.side,
-            "performance": list(performance),
+            "performance": performance,
             "children": children,
             "onCurrentPath": self._path_is_prefix(path, current_path),
             "isCurrent": path == current_path,

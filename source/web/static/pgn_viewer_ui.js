@@ -770,10 +770,24 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   }
 
   function formatDebugPerformance(performance) {
-    if (!Array.isArray(performance) || performance.length !== 2) return "";
-    const [successes, attempts] = performance;
-    if (!Number.isInteger(successes) || !Number.isInteger(attempts) || attempts <= 0) return "";
-    return `${successes}/${attempts}`;
+    if (Array.isArray(performance) && performance.length === 2) {
+      const [successes, attempts] = performance;
+      if (!Number.isInteger(successes) || !Number.isInteger(attempts) || attempts <= 0) return "";
+      return `${successes}/${attempts}`;
+    }
+    if (!performance || typeof performance !== "object") return "";
+
+    const parts = [];
+    if (Number.isInteger(performance.successes) && Number.isInteger(performance.attempts) && performance.attempts > 0) {
+      parts.push(`${performance.successes}/${performance.attempts}`);
+    }
+    if (Number.isFinite(performance.predictSuccess)) {
+      parts.push(`p=${performance.predictSuccess.toFixed(2)}`);
+    }
+    if (Number.isFinite(performance.a)) {
+      parts.push(`a=${performance.a.toFixed(3)}`);
+    }
+    return parts.join(" | ");
   }
 
   const DEBUG_SVG_NS = "http://www.w3.org/2000/svg";
