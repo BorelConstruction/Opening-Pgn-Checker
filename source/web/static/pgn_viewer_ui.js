@@ -770,22 +770,14 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   }
 
   function formatDebugPerformance(performance) {
-    if (Array.isArray(performance) && performance.length === 2) {
-      const [successes, attempts] = performance;
-      if (!Number.isInteger(successes) || !Number.isInteger(attempts) || attempts <= 0) return "";
-      return `${successes}/${attempts}`;
-    }
     if (!performance || typeof performance !== "object") return "";
 
     const parts = [];
-    if (Number.isInteger(performance.successes) && Number.isInteger(performance.attempts) && performance.attempts > 0) {
-      parts.push(`${performance.successes}/${performance.attempts}`);
-    }
     if (Number.isFinite(performance.predictSuccess)) {
-      parts.push(`p=${performance.predictSuccess.toFixed(2)}`);
+      parts.push(`p=${performance.predictSuccess.toFixed(1)}`);
     }
     if (Number.isFinite(performance.a)) {
-      parts.push(`a=${performance.a.toFixed(3)}`);
+      parts.push(`a=${performance.a.toExponential(2)}`);
     }
     return parts.join(" | ");
   }

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from collections import defaultdict
 from enum import Enum
 import json
-import math
 import os
 import random
 import sys
@@ -16,7 +14,7 @@ from typing import Any, Iterable, Optional, TypeVar, TypedDict, Union
 import chess
 import chess.pgn
 from chess.pgn import GameNode as Node
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from source.core.caching import CacheDict
 from source.core.position_similarity import compare_positions
@@ -34,6 +32,14 @@ from ..core.runner import quick_eval_lines
 from .pgn_export import export_pgn_subtree
 from .variation_tree import node_at_path, path_from_root, build_variation_tree
 from .scheduler_protocol import *
+from .memory_model import (
+    INITIAL_ELAPSED_SECONDS,
+    DELAY_BEFORE_GUESSED_MEANS_REMEMBERS,
+    MemoryModel,
+    NaiveMemoryModel,
+    PerformanceRecord,
+    memory_model_from_json,
+)
 
 # TODO: add transpotitioning moves to the move list?
 
@@ -45,12 +51,19 @@ SEARCH_MOVE_BOOST_MIN_SIMILARITY = 0.8
 
 class MoveEntryData(TypedDict):
     weight: float
-    memory: MoveMemoryState
 
 
 class PositionMoveData(TypedDict):
     moves: dict[UCI, MoveEntryData] | None
     blacklist: list[UCI]
+
+
+class PositionPerformanceData(TypedDict):
+    moves: dict[UCI, list[PerformanceRecord]] | None
+
+
+class PositionModelData(TypedDict):
+    moves: dict[UCI, MemoryModel] | None
 
 
 class MoveCorrectness(Enum):
@@ -68,205 +81,60 @@ class MoveGrade():
 
 
 @dataclass
-class MemoryModel(ABC):
-    @abstractmethod
-    def predict_success(self, elapsed_seconds: float) -> float:
-        """Estimate recall probability after the given elapsed time."""
+class AttemptsForMove:
+    tested_fen: str
+    tested_move_uci: UCI
+    prompt_time: float
+    grades: list[MoveGrade] = field(default_factory=list)
+    hint_used: bool = False
 
-    @abstractmethod
-    def update(self, elapsed_seconds: float, remembered: bool) -> None:
-        """Update model parameters from a recall outcome."""
+    def add_grade(self, grade: MoveGrade) -> None:
+        self.grades.append(grade)
 
-    @abstractmethod
-    def clone(self) -> MemoryModel:
-        """Create a deep copy suitable for prompt-local updates."""
-
-    @abstractmethod
-    def to_json(self) -> dict[str, Any]:
-        """Serialize the model state."""
-
-    @property
-    @abstractmethod
-    def model_type(self) -> str:
-        """Stable identifier used for persistence."""
-
-    def debug_payload(self) -> dict[str, Any]:
-        return {"type": self.model_type}
+    def add_hint(self) -> None:
+        self.hint_used = True
 
 
-@dataclass
-class NaiveMemoryModel(MemoryModel):
-    """
-    P(success after t days) = exp(-a * t).
+def performance_records_from_raw_attempt_history(
+    attempts: AttemptsForMove,
+    previous_records: Iterable[PerformanceRecord],
+) -> list[PerformanceRecord]:
+    records: list[PerformanceRecord] = []
+    if attempts.hint_used:
+        records.append(PerformanceRecord(False, attempts.prompt_time))
 
-    The default rate is normalized so the predicted success after one day is 0.5.
-    """
-
-    SECONDS_PER_DAY = 24.0 * 60.0 * 60.0
-    FAILURE_SCALE = 0.5
-
-    a: float = math.log(2.0)
-
-    @property
-    def model_type(self) -> str:
-        return "naive_exponential"
-
-    def predict_success(self, elapsed_seconds: float) -> float:
-        if elapsed_seconds < 0.0:
-            raise ValueError("Elapsed time must be non-negative")
-        elapsed_days = elapsed_seconds / self.SECONDS_PER_DAY
-        return math.exp(-self.a * elapsed_days)
-
-    def update(self, elapsed_seconds: float, remembered: bool) -> None:
-        if elapsed_seconds < 0.0:
-            raise ValueError("Elapsed time must be non-negative")
-        elapsed_days = elapsed_seconds / self.SECONDS_PER_DAY
-        if remembered:
-            self.a += elapsed_days
-            return
-        self.a *= self.FAILURE_SCALE
-
-    def clone(self) -> MemoryModel:
-        return NaiveMemoryModel(a=self.a)
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "type": self.model_type,
-            "a": self.a,
-        }
-
-    def debug_payload(self) -> dict[str, Any]:
-        return {
-            "type": self.model_type,
-            "a": self.a,
-        }
-
-    @classmethod
-    def from_json(cls, payload: Any) -> NaiveMemoryModel:
-        if not isinstance(payload, dict):
-            raise TypeError("Naive memory model payload must be a dict")
-        return cls(a=float(payload.get("a", math.log(2.0))))
-
-
-def memory_model_from_json(payload: Any) -> MemoryModel:
-    if payload is None:
-        return NaiveMemoryModel()
-    if not isinstance(payload, dict):
-        raise TypeError("Memory model payload must be a dict")
-
-    model_type = payload.get("type", "naive_exponential")
-    if model_type == "naive_exponential":
-        return NaiveMemoryModel.from_json(payload)
-    raise ValueError(f"Unsupported memory model type: {model_type!r}")
-
-
-@dataclass
-class MoveMemoryState:
-    model: MemoryModel
-    attempts: int = 0
-    successes: int = 0
-    last_attempt_time: Optional[float] = None
-    last_failure_time: Optional[float] = None
-
-    MIN_SUCCESS_DELAY_AFTER_FAILURE_SECONDS = 60.0
-    INITIAL_ELAPSED_SECONDS = NaiveMemoryModel.SECONDS_PER_DAY
-
-    def predict_success(self, now: float, default_probability: float) -> float:
-        if self.last_attempt_time is None:
-            return default_probability
-        elapsed_seconds = max(0.0, now - self.last_attempt_time)
-        return self.model.predict_success(elapsed_seconds)
-
-    def update(self, *, attempt_time: float, remembered: bool) -> bool:
-        if remembered and self.last_failure_time is not None:
-            if attempt_time - self.last_failure_time < self.MIN_SUCCESS_DELAY_AFTER_FAILURE_SECONDS:
-                return False
-
-        if self.last_attempt_time is None:
-            elapsed_seconds = self.INITIAL_ELAPSED_SECONDS
-        else:
-            elapsed_seconds = max(0.0, attempt_time - self.last_attempt_time)
-
-        self.model.update(elapsed_seconds, remembered)
-        self.attempts += 1
-        self.last_attempt_time = attempt_time
-        if remembered:
-            self.successes += 1
-            self.last_failure_time = None
-        else:
-            self.last_failure_time = attempt_time
-        return True
-
-    def clone(self) -> MoveMemoryState:
-        return MoveMemoryState(
-            model=self.model.clone(),
-            attempts=self.attempts,
-            successes=self.successes,
-            last_attempt_time=self.last_attempt_time,
-            last_failure_time=self.last_failure_time,
+    for grade in attempts.grades:
+        success = performance_record_success_from_raw_attempt_history(
+            grade=grade,
+            attempt_time=attempts.prompt_time,
+            previous_records=[*previous_records, *records],
         )
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "model": self.model.to_json(),
-            "attempts": self.attempts,
-            "successes": self.successes,
-            "lastAttemptTime": self.last_attempt_time,
-            "lastFailureTime": self.last_failure_time,
-        }
-
-    def debug_payload(self, now: float, default_probability: float) -> dict[str, Any]:
-        payload = self.model.debug_payload()
-        payload.update(
-            {
-                "attempts": self.attempts,
-                "successes": self.successes,
-                "predictSuccess": self.predict_success(now, default_probability),
-            }
-        )
-        return payload
+        if success is None:
+            continue
+        records.append(PerformanceRecord(success, attempts.prompt_time))
+    return records
 
 
-def _optional_float(value: Any) -> Optional[float]:
-    if value is None:
+def performance_record_success_from_raw_attempt_history(
+    *,
+    grade: MoveGrade,
+    attempt_time: float,
+    previous_records: Iterable[PerformanceRecord],
+) -> bool | None:
+    if grade.correctness == MoveCorrectness.INCORRECT:
+        return False
+    if grade.correctness != MoveCorrectness.CORRECT:
         return None
-    return float(value)
 
+    last_unsuccess_time: float | None = None
+    for record in previous_records:
+        if not record.success:
+            last_unsuccess_time = record.attempt_time
 
-def move_memory_state_from_json(payload: Any) -> MoveMemoryState:
-    if payload is None:
-        return MoveMemoryState(model=NaiveMemoryModel())
+    if last_unsuccess_time is None:
+        return True
+    return attempt_time - last_unsuccess_time > DELAY_BEFORE_GUESSED_MEANS_REMEMBERS
 
-    if isinstance(payload, (list, tuple)):
-        if len(payload) != 2:
-            raise ValueError("Legacy move performance payload must contain two values")
-        successes, attempts = payload
-        return MoveMemoryState(
-            model=NaiveMemoryModel(),
-            attempts=int(attempts),
-            successes=int(successes),
-        )
-
-    if not isinstance(payload, dict):
-        raise TypeError("Move memory payload must be a dict, list, or tuple")
-
-    if "model" in payload:
-        return MoveMemoryState(
-            model=memory_model_from_json(payload["model"]),
-            attempts=int(payload.get("attempts", 0)),
-            successes=int(payload.get("successes", 0)),
-            last_attempt_time=_optional_float(payload.get("lastAttemptTime")),
-            last_failure_time=_optional_float(payload.get("lastFailureTime")),
-        )
-
-    if "attempts" in payload or "successes" in payload:
-        return MoveMemoryState(
-            model=NaiveMemoryModel(),
-            attempts=int(payload.get("attempts", 0)),
-            successes=int(payload.get("successes", 0)),
-        )
-
-    return MoveMemoryState(model=memory_model_from_json(payload))
 
 
 @dataclass(frozen=True)
@@ -292,20 +160,28 @@ class RepetitionEngine():
     Prompts are generated move by move. A move may be randomnly chosen from a file,
     or picked by a chess engine.
 
-    Keeps the result of generating in self._prompt and stores prompt-local
-    memory updates so cached move models can be updated from real user behavior.
+        Keeps the result of generating in self._prompt_state and stores prompt-local
+        grades grouped by tested move.
     """
     DEFAULT_RIGHT_PROBABILITY = 0.5
     LEARNED_RIGHT_THRESHOLD = 0.85
-    LEARNED_MIN_ATTEMPTS = 3
     LOCAL_UNLEARNED_RIGHT_THRESHOLD = 0.9
     LEARNED_MOVE_SKIP_PROBABILITY = 0.90
     MAX_PROMPT_SELECTION_ATTEMPTS = 100
     MAX_OFF_BOOK_BLACKLIST_ATTEMPTS = 3
     MAX_GLOBAL_PROMPT_LENGTH = 10
 
-    def __init__(self, session: RepertoireSession, root: Node, start_range: int,
-                 probs_cache_name: str, non_file_freq: float, local_generation: bool) -> None:
+    def __init__(
+        self,
+        session: RepertoireSession,
+        root: Node,
+        start_range: int,
+        probs_cache_name: str,
+        performance_cache_name: str,
+        model_cache_name: str,
+        non_file_freq: float,
+        local_generation: bool,
+    ) -> None:
         self._session = session
         self.non_file_move_freq = non_file_freq
         self._rng = random.Random()
@@ -314,7 +190,7 @@ class RepetitionEngine():
         # updates whenever asked to generate a new prompt
         self._prompt_spec = None
 
-        self._prompt = PromptState(node=None, off_file=False, message="", anchor_node=None)
+        self._prompt_state = PromptState(node=None, off_file=False, message="", anchor_node=None)
 
         # starting point for prompt generation
         self._root = root
@@ -329,23 +205,38 @@ class RepetitionEngine():
         )
         self._pos_drill_data.load_from_file(probs_cache_name)
 
+        self._move_performance_data = CacheDict(
+            lambda position_fen: PositionPerformanceData(moves=None),
+            item_to_json=self._performance_item_to_json,
+            item_from_json=self._performance_item_from_json,
+            auto_save=False,
+        )
+        self._move_performance_data.load_from_file(performance_cache_name)
+
+        self._move_model_data = CacheDict(
+            lambda position_fen: PositionModelData(moves=None),
+            item_to_json=self._model_item_to_json,
+            item_from_json=self._model_item_from_json,
+            auto_save=False,
+        )
+        self._move_model_data.load_from_file(model_cache_name)
+
         self._session.fill_the_TT(self._session.game)
-        self._grades: list[MoveGrade] = []
-        self._pending_move_memory: dict[tuple[str, UCI], MoveMemoryState] = {}
-        self._current_hints: Optional[Hints] = None
+        self._prompt_performance: list[AttemptsForMove] = []
         self._temporary_nodes: list[Node] = []
 
         self._refresh_prompt_dicts()
 
     def summarize(self) -> Feedback:
-        if not self._grades:
+        grades = [grade for attempts in self._prompt_performance for grade in attempts.grades]
+        if not grades:
             return Feedback(0.0)
 
-        total_loss = sum(self._grade_eval_loss(grade) for grade in self._grades)
-        return Feedback(total_loss / len(self._grades))
+        total_loss = sum(self._grade_eval_loss(grade) for grade in grades)
+        return Feedback(total_loss / len(grades))
 
     def expected_uci(self, use_engine: bool = False) -> Optional[UCI]:
-        prpt_data = self._prompt
+        prpt_data = self._prompt_state
         if prpt_data.node_index is not None and prpt_data.prechosen_path is not None:
             try:
                 return prpt_data.prechosen_path[prpt_data.node_index+1]
@@ -416,31 +307,32 @@ class RepetitionEngine():
         self._prompt_dict_relative = self.make_prompt_dict_relative()
 
     def get_hint_circles(self) -> list[Circle]:
-        if self._prompt.node is None:
+        if self._prompt_state.node is None:
             raise RuntimeError("Cannot provide a hint without an active prompt")
 
         expected_uci = self.expected_uci(use_engine=True)
         if expected_uci is None:
             return []
 
-        if not self._hint_matches_current_prompt(expected_uci):
-            self._current_hints = Hints(self._prompt.node, expected_uci)
+        if not self._prompt_hints_match_current_prompt(expected_uci):
+            self._prompt_state.hints = Hints(self._prompt_state.node, expected_uci)
 
-        self._current_hints.add_hint()
+        if self._prompt_state.hints is None:
+            raise RuntimeError("Prompt hints should be initialized for the current prompt")
+        self._prompt_state.hints.add_hint()
 
-        self._record_hint(self._current_hints.determines_move)
-
-        return self._current_hints.circles
+        return self._prompt_state.hints.circles
 
     def is_finished(self) -> bool:
         return self._is_finished
     
     def finish_prompt(self, gave_up: bool = False) -> None:
+        self._finalize_current_move_performance()
         self._is_finished = True
-        if gave_up:
-            self._update_current_tested_move(remembered=False)
-        self._commit_current_tested_move()
+        self._commit_prompt_performance(gave_up=gave_up)
         self._pos_drill_data.serialize()
+        self._move_performance_data.serialize()
+        self._move_model_data.serialize()
 
     def sync_move_weights_with_pgn(self) -> WeightSyncSummary:
         positions_checked = 0
@@ -459,6 +351,7 @@ class RepetitionEngine():
             stale_moves = [uci for uci in move_weights if uci not in current_moves]
             for uci in stale_moves:
                 del move_weights[uci]
+                self._drop_cached_memory(position_fen, uci)
             moves_removed += len(stale_moves)
 
             retained_weights = dict(move_weights)
@@ -466,10 +359,12 @@ class RepetitionEngine():
             if missing_moves:
                 added_weight = self._added_move_weight(position_fen, retained_weights)
                 for uci in missing_moves:
-                    move_weights[uci] = MoveEntryData(weight=added_weight, memory=self._new_move_memory_state())
+                    move_weights[uci] = MoveEntryData(weight=added_weight)
                 moves_added += len(missing_moves)
 
         self._pos_drill_data.serialize()
+        self._move_performance_data.serialize()
+        self._move_model_data.serialize()
         self._refresh_prompt_dicts()
         return WeightSyncSummary(
             positions_checked=positions_checked,
@@ -517,10 +412,8 @@ class RepetitionEngine():
         self._review_payload = None
         self._review_path = None
         self._search_move_payload = None
-        self._grades = []
-        self._pending_move_memory = {}
-        self._current_hints = None
-        self._prompt = PromptState(node=None, off_file=False, message="", anchor_node=None)
+        self._prompt_performance = []
+        self._prompt_state = PromptState(node=None, off_file=False, message="", anchor_node=None)
 
     def _relative_move_path_for_node(self, node: Node) -> Optional[list[UCI]]:
         root_moves = node_moves(self._root, san=False)
@@ -604,17 +497,16 @@ class RepetitionEngine():
         else:
             raise ValueError(f"Unsupported spec_id: {spec_id!r}")
 
-        return self._prompt
+        return self._prompt_state
 
     def start_prompt_by_id(self, prompt_id: PromptLineId, spec_id: SpecId = "history") -> PromptState:
         self._reset_prompt_state()
         self._spec_id = spec_id
-        self._prompt = self._create_prompt_from_id(prompt_id)
-        return self._prompt
+        self._prompt_state = self._create_prompt_from_id(prompt_id)
+        self._activate_prompt_state()
+        return self._prompt_state
 
     def _choose_random_prompt(self) -> PromptState:
-    
-        self._clear_temporary_nodes()
         for _ in range(self.MAX_PROMPT_SELECTION_ATTEMPTS):
             try:
                 success = self._try_choose_prompt(self._root, complete=True)
@@ -623,7 +515,7 @@ class RepetitionEngine():
                 raise
 
             if success:
-                return self._prompt
+                return self._prompt_state
 
             # we may add some temporary moves while choosing, so reset to the file contents
             self._clear_temporary_nodes()
@@ -634,10 +526,14 @@ class RepetitionEngine():
         return self._spec_id
 
     def current_prompt_id(self):
-        return PromptLineId(fen(self._prompt.anchor_node), tuple(node_moves(self._prompt.node)))
+        return PromptLineId(fen(self._prompt_state.anchor_node), tuple(node_moves(self._prompt_state.node)))
 
     def _set_prompt_start(self) -> None:
-        self._prompt.anchor_node = self._prompt.node
+        self._prompt_state.anchor_node = self._prompt_state.node
+
+    def _activate_prompt_state(self) -> None:
+        self._prompt_state.prompt_time = time.time()
+        self._prompt_state.hints = None
 
     def _moveprobs_item_to_json(
         self,
@@ -650,7 +546,6 @@ class RepetitionEngine():
             serialized_moves = {
                 move_uci: {
                     "weight": entry["weight"],
-                    "memory": entry["memory"].to_json(),
                 }
                 for move_uci, entry in raw_moves.items()
             }
@@ -666,16 +561,14 @@ class RepetitionEngine():
     ) -> tuple[str, PositionMoveData]:
         if isinstance(payload, str):
             payload = json.loads(payload)
+        if not isinstance(payload, dict):
+            raise TypeError("Move-weight cache payload must be a dict")
 
-        if isinstance(payload, dict):
-            position_fen = payload["fen"]
-            if "moves" not in payload:
-                raise KeyError(f"Missing moves payload for position {position_fen!r}")
-            raw_pos_drill_data = payload["moves"]
-            raw_blacklist = payload.get("blacklist", [])
-        else:
-            position_fen, raw_pos_drill_data = payload
-            raw_blacklist = []
+        position_fen = payload["fen"]
+        if "moves" not in payload:
+            raise KeyError(f"Missing moves payload for position {position_fen!r}")
+        raw_pos_drill_data = payload["moves"]
+        raw_blacklist = payload.get("blacklist", [])
 
         move_probs: dict[UCI, MoveEntryData] = {}
         blacklist: list[UCI] = []
@@ -690,28 +583,105 @@ class RepetitionEngine():
 
         for uci, raw_entry in raw_pos_drill_data.items():
             if isinstance(raw_entry, dict):
-                raw_weight = raw_entry.get("weight", raw_entry.get("prob"))
+                raw_weight = raw_entry.get("weight")
                 if raw_weight is None:
                     raise KeyError(f"Missing move weight for {uci!r} from position {position_fen!r}")
                 move_probs[uci] = MoveEntryData(
                     weight=float(raw_weight),
-                    memory=move_memory_state_from_json(raw_entry.get("memory", raw_entry.get("performance"))),
                 )
                 if raw_entry.get("blacklisted", False) and uci not in blacklist:
                     blacklist.append(uci)
             else:
-                move_probs[uci] = MoveEntryData(weight=float(raw_entry), memory=self._new_move_memory_state())
+                raise TypeError(f"Move entry for {uci!r} from position {position_fen!r} must be a dict")
 
         return position_fen, PositionMoveData(moves=move_probs, blacklist=blacklist)
 
-    def _new_move_memory_state(self) -> MoveMemoryState:
-        return MoveMemoryState(model=NaiveMemoryModel())
+    def _performance_item_to_json(
+        self,
+        item: tuple[str, PositionPerformanceData],
+    ) -> dict[str, Any]:
+        position_fen, position_data = item
+        raw_moves = position_data["moves"]
+        serialized_moves = None
+        if raw_moves is not None:
+            serialized_moves = {
+                move_uci: [record.to_json() for record in records]
+                for move_uci, records in raw_moves.items()
+            }
+        return {
+            "fen": position_fen,
+            "moves": serialized_moves,
+        }
+
+    def _performance_item_from_json(
+        self,
+        payload: Any,
+    ) -> tuple[str, PositionPerformanceData]:
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if not isinstance(payload, dict):
+            raise TypeError("Performance cache payload must be a dict")
+
+        position_fen = payload["fen"]
+        raw_moves = payload["moves"]
+        if raw_moves is None:
+            return position_fen, PositionPerformanceData(moves=None)
+        if not isinstance(raw_moves, dict):
+            raise TypeError(f"Performance payload for position {position_fen!r} must be a dict or null")
+
+        moves = {
+            move_uci: [PerformanceRecord.from_json(record) for record in records]
+            for move_uci, records in raw_moves.items()
+        }
+        return position_fen, PositionPerformanceData(moves=moves)
+
+    def _model_item_to_json(
+        self,
+        item: tuple[str, PositionModelData],
+    ) -> dict[str, Any]:
+        position_fen, position_data = item
+        raw_moves = position_data["moves"]
+        serialized_moves = None
+        if raw_moves is not None:
+            serialized_moves = {
+                move_uci: model.to_json()
+                for move_uci, model in raw_moves.items()
+            }
+        return {
+            "fen": position_fen,
+            "moves": serialized_moves,
+        }
+
+    def _model_item_from_json(
+        self,
+        payload: Any,
+    ) -> tuple[str, PositionModelData]:
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if not isinstance(payload, dict):
+            raise TypeError("Model cache payload must be a dict")
+
+        position_fen = payload["fen"]
+        raw_moves = payload["moves"]
+        if raw_moves is None:
+            return position_fen, PositionModelData(moves=None)
+        if not isinstance(raw_moves, dict):
+            raise TypeError(f"Model payload for position {position_fen!r} must be a dict or null")
+
+        moves = {
+            move_uci: memory_model_from_json(model_payload)
+            for move_uci, model_payload in raw_moves.items()
+        }
+        return position_fen, PositionModelData(moves=moves)
+
+    def _new_move_model(self) -> MemoryModel:
+        return NaiveMemoryModel()
 
     def _get_moves_for_(self, parent: Node, blacklist_included: bool = False) -> dict[UCI, MoveEntryData]:
         position_data = self._pos_drill_data[fen(parent)]
         if position_data["moves"] is None:
             position_data["moves"] = {
-                    move_uci: MoveEntryData(weight=float(freq), memory=self._new_move_memory_state())
+                    move_uci: MoveEntryData(weight=float(freq))
                     for move_uci, freq in self._get_moves_and_freqs(parent).items()
                 }
             
@@ -723,16 +693,10 @@ class RepetitionEngine():
     def _is_learned_prompt_position(self, prompt_node: Node) -> bool:
         if prompt_node.parent is None or prompt_node.move is None:
             return False
-        if prompt_node.turn() != self._session.options.side:
-            return False
         parent = prompt_node.parent
         move_uci = prompt_node.move.uci()
         try:
-            attempts = self._move_attempts(parent, move_uci)
-            return (
-                attempts >= self.LEARNED_MIN_ATTEMPTS
-                and self._move_predict_success(parent, move_uci) > self.LEARNED_RIGHT_THRESHOLD
-            )
+            return self._move_predict_success(parent, move_uci) > self.LEARNED_RIGHT_THRESHOLD
         except KeyError:
             return False
 
@@ -748,8 +712,8 @@ class RepetitionEngine():
             blacklist.append(uci)
 
     def blacklist_current_move(self) -> UCI:
-        blacklisted_uci = self._prompt.node.move.uci()
-        self._blacklist_move(self._prompt.node.parent, blacklisted_uci)
+        blacklisted_uci = self._prompt_state.node.move.uci()
+        self._blacklist_move(self._prompt_state.node.parent, blacklisted_uci)
         self.finish_prompt()
         return blacklisted_uci
 
@@ -761,23 +725,23 @@ class RepetitionEngine():
         self._session.remove_variation(node)
 
     def _resume_from_off_file_prompt(self) -> None:
-        temporary_node = self._prompt.node
+        temporary_node = self._prompt_state.node
         if temporary_node is None or temporary_node.parent is None:
             raise RuntimeError("Off-file prompt has no parent to resume from")
-        if not self._prompt.off_file:
+        if not self._prompt_state.off_file:
             raise RuntimeError("Cannot resume when the prompt is not off-file")
 
         self._remove_temporary_node(temporary_node)
-        self._prompt.node = temporary_node.parent
-        self._prompt.off_file = False
+        self._prompt_state.node = temporary_node.parent
+        self._prompt_state.off_file = False
 
     def _has_file_continuation(self, parent: Node) -> bool:
-        if self._prompt.node_index is not None and self._prompt.prechosen_path is not None:
-            child_index = self._prompt.node_index + 1
-            if child_index >= len(self._prompt.prechosen_path):
+        if self._prompt_state.node_index is not None and self._prompt_state.prechosen_path is not None:
+            child_index = self._prompt_state.node_index + 1
+            if child_index >= len(self._prompt_state.prechosen_path):
                 return False
 
-            expected_uci = self._prompt.prechosen_path[child_index]
+            expected_uci = self._prompt_state.prechosen_path[child_index]
             return any(child.move.uci() == expected_uci for child in self._prompt_variations(parent))
 
         children = self._prompt_variations(parent)
@@ -804,70 +768,71 @@ class RepetitionEngine():
             return None, ""
 
         child = self._add_temporary_node(parent, off_book_selection.move)
-        self._prompt.off_file = True
+        self._prompt_state.off_file = True
         return child, off_book_selection.message
 
     def on_response(self, uci: str) -> PromptState:
-        if self._prompt.off_file:
+        if self._prompt_state.off_file:
             grade = self._handle_off_file_guess(uci)
+            self._save_grade(grade)
             if grade.correctness == MoveCorrectness.CORRECT:
-                self._current_hints = None
-                if self._prompt.node is None or self._prompt.node.parent is None:
-                    self._prompt.message = grade.msg
+                self._finalize_current_move_performance()
+                if self._prompt_state.node is None or self._prompt_state.node.parent is None:
+                    self._prompt_state.message = grade.msg
                     self.finish_prompt()
-                    return self._prompt
-                if not self._has_file_continuation(self._prompt.node.parent):
-                    self._prompt.message = grade.msg
+                    return self._prompt_state
+                if not self._has_file_continuation(self._prompt_state.node.parent):
+                    self._prompt_state.message = grade.msg
                     self.finish_prompt()
-                    return self._prompt
+                    return self._prompt_state
 
                 self._resume_from_off_file_prompt()
                 self._advance_line()
-                self._prompt.message = f"{grade.msg} {self._prompt.message}".strip()
-                return self._prompt
+                self._prompt_state.message = f"{grade.msg} {self._prompt_state.message}".strip()
+                return self._prompt_state
 
-            self._prompt.message = grade.msg
-            return self._prompt
+            self._prompt_state.message = grade.msg
+            return self._prompt_state
 
         grade = self._handle_file_guess(uci)
+        self._save_grade(grade)
         if grade.correctness in (MoveCorrectness.INCORRECT, MoveCorrectness.ALTERNATIVE):
-            self._prompt.message = grade.msg
-            return self._prompt
+            self._prompt_state.message = grade.msg
+            return self._prompt_state
         if grade.correctness == MoveCorrectness.UNDEF:
             self.finish_prompt()
-            return self._prompt
+            return self._prompt_state
 
-        self._commit_current_tested_move()
+        self._finalize_current_move_performance()
         chosen_node = self._child_for_move(
-            self._prompt.node,
+            self._prompt_state.node,
             uci_from_lichess_to_pgn(uci),
         )
         if chosen_node is None:
             self.finish_prompt()
-            return self._prompt
-        self._prompt.node = chosen_node
-        if self._prompt.node_index is not None:
-            self._prompt.node_index += 1
-        self._current_hints = None
+            return self._prompt_state
+        self._prompt_state.node = chosen_node
+        if self._prompt_state.node_index is not None:
+            self._prompt_state.node_index += 1
         self._advance_line()
 
         if not self._is_finished:
-            self._prompt.message += grade.msg
+            self._prompt_state.message += grade.msg
 
-        return self._prompt
+        return self._prompt_state
 
     def _current_expected_node(self) -> Optional[Node]:
-        if self._prompt.node is None:
+        if self._prompt_state.node is None:
             return None
 
-        if self._prompt.node_index is not None and self._prompt.prechosen_path is not None:
-            child_index = self._prompt.node_index + 1
-            if child_index >= len(self._prompt.prechosen_path):
+        if self._prompt_state.node_index is not None and self._prompt_state.prechosen_path is not None:
+            child_index = self._prompt_state.node_index + 1
+            if child_index >= len(self._prompt_state.prechosen_path):
                 return None
-            expected_uci = self._prompt.prechosen_path[child_index]
-            return self._child_for_move(self._prompt.node, expected_uci)
+            expected_uci = self._prompt_state.prechosen_path[child_index]
+            return self._child_for_move(self._prompt_state.node, expected_uci)
 
-        expected_moves = self._prompt_variations(self._prompt.node)
+        expected_moves = self._prompt_variations(self._prompt_state.node)
         if not expected_moves:
             return None
         return expected_moves[0]
@@ -899,42 +864,65 @@ class RepetitionEngine():
             children.extend(prompt_children(node))
         return children
 
-    def _move_memory_for(self, parent: BoardLike, move_uci: UCI) -> MoveMemoryState:
-        """Return prompt-local memory state for a move, creating it on first use."""
-        key = (fen(parent), move_uci)
-        memory_state = self._pending_move_memory.get(key)
-        if memory_state is None:
-            memory_state = self._move_entry(parent, move_uci)["memory"].clone()
-            self._pending_move_memory[key] = memory_state
-        return memory_state
-
-    def _pop_move_memory(self, parent: BoardLike, move_uci: UCI) -> Optional[MoveMemoryState]:
-        return self._pending_move_memory.pop((fen(parent), move_uci), None)
-
     def _move_entry(self, parent: BoardLike, move_uci: UCI) -> MoveEntryData:
         moves = self._get_moves_for_(parent, blacklist_included=True)
         if move_uci not in moves:
             raise KeyError(f"Missing move data for {move_uci!r} from position {fen(parent)!r}")
         return moves[move_uci]
 
-    def _move_memory_state(self, parent: BoardLike, move_uci: UCI) -> MoveMemoryState:
-        return self._move_entry(parent, move_uci)["memory"]
+    def _performance_history_for_key(self, position_fen: str, move_uci: UCI) -> list[PerformanceRecord]:
+        position_data = self._move_performance_data[position_fen]
+        if position_data["moves"] is None:
+            position_data["moves"] = {}
+        return position_data["moves"].setdefault(move_uci, [])
 
-    def _move_attempts(self, parent: BoardLike, move_uci: UCI) -> int:
-        return self._move_memory_state(parent, move_uci).attempts
+    def _performance_history_by_key(self, position_fen: str, move_uci: UCI) -> list[PerformanceRecord]:
+        position_data = self._move_performance_data[position_fen]
+        if position_data["moves"] is None:
+            return []
+        return position_data["moves"].get(move_uci, [])
+
+    def _performance_history(self, parent: BoardLike, move_uci: UCI) -> list[PerformanceRecord]:
+        return self._performance_history_by_key(fen(parent), move_uci)
+
+    def _move_model_for_key(self, position_fen: str, move_uci: UCI) -> MemoryModel:
+        position_data = self._move_model_data[position_fen]
+        if position_data["moves"] is None:
+            position_data["moves"] = {}
+        return position_data["moves"].setdefault(move_uci, self._new_move_model())
+
+    def _move_model_by_key(self, position_fen: str, move_uci: UCI) -> MemoryModel:
+        position_data = self._move_model_data[position_fen]
+        if position_data["moves"] is None:
+            return self._new_move_model()
+        return position_data["moves"].get(move_uci, self._new_move_model())
+
+    def _move_model(self, parent: BoardLike, move_uci: UCI) -> MemoryModel:
+        return self._move_model_by_key(fen(parent), move_uci)
+
+    def _drop_cached_memory(self, position_fen: str, move_uci: UCI) -> None:
+        history_data = self._move_performance_data[position_fen]
+        if history_data["moves"] is not None:
+            history_data["moves"].pop(move_uci, None)
+
+        model_data = self._move_model_data[position_fen]
+        if model_data["moves"] is not None:
+            model_data["moves"].pop(move_uci, None)
 
     def _move_predict_success(self, parent: BoardLike, move_uci: UCI) -> float:
-        return self._move_memory_state(parent, move_uci).predict_success(
-            now=time.time(),
-            default_probability=self.DEFAULT_RIGHT_PROBABILITY,
-        )
+        history = self._performance_history(parent, move_uci)
+        if not history:
+            return self.DEFAULT_RIGHT_PROBABILITY
+
+        elapsed_seconds = max(0.0, time.time() - history[-1].attempt_time)
+        return self._move_model(parent, move_uci).predict_success(elapsed_seconds)
 
     def _move_wrong_probability(self, parent: BoardLike, move_uci: UCI) -> float:
         return 1.0 - self._move_predict_success(parent, move_uci)
 
     def _current_tested_move(self) -> Optional[tuple[Node, UCI]]:
         """Return the opponent move entry that produced the current prompt."""
-        prompt_node = self._prompt.node
+        prompt_node = self._prompt_state.node
         if prompt_node is None or prompt_node.parent is None or prompt_node.move is None:
             return None
         if prompt_node.turn() != self._session.options.side:
@@ -946,76 +934,110 @@ class RepetitionEngine():
             return None
         return parent, move_uci
 
-    def _record_hint(self, determines_move: bool) -> None:
-        del determines_move
-        self._update_current_tested_move(remembered=False)
+    def _attempts_for_move(self, parent: BoardLike, move_uci: UCI) -> AttemptsForMove:
+        position_fen = fen(parent)
+        for attempts in self._prompt_performance:
+            if attempts.tested_fen == position_fen and attempts.tested_move_uci == move_uci:
+                return attempts
 
-    def _record_incorrect_attempt(self) -> None:
-        self._update_current_tested_move(remembered=False)
-
-    def _record_correct_attempt(self) -> None:
-        self._update_current_tested_move(remembered=True)
-
-    def _update_current_tested_move(self, *, remembered: bool) -> None:
-        tested_move = self._current_tested_move()
-        if tested_move is None:
-            return
-        parent, move_uci = tested_move
-        self._move_memory_for(parent, move_uci).update(
-            attempt_time=time.time(),
-            remembered=remembered,
+        if self._prompt_state.prompt_time is None:
+            raise RuntimeError("PromptState.prompt_time must be initialized before saving prompt performance")
+        attempts = AttemptsForMove(
+            tested_fen=position_fen,
+            tested_move_uci=move_uci,
+            prompt_time=self._prompt_state.prompt_time,
         )
+        self._prompt_performance.append(attempts)
+        return attempts
 
-    def _commit_current_tested_move(self) -> None:
-        """Persist prompt-local memory updates before advancing away from the current tested move."""
+    def _current_attempts_for_move(self) -> Optional[AttemptsForMove]:
         tested_move = self._current_tested_move()
         if tested_move is None:
-            return
+            return None
         parent, move_uci = tested_move
-        memory_state = self._pop_move_memory(parent, move_uci)
-        if memory_state is None:
+        return self._attempts_for_move(parent, move_uci)
+
+    def _save_grade(self, grade: MoveGrade) -> None:
+        attempts = self._current_attempts_for_move()
+        if attempts is None:
             return
+        attempts.add_grade(grade)
 
-        entry = self._move_entry(parent, move_uci)
-        entry["memory"] = memory_state
+    def _finalize_current_move_performance(self) -> None:
+        if self._prompt_state.hints is None:
+            return
+        attempts = self._current_attempts_for_move()
+        if attempts is None:
+            return
+        attempts.add_hint()
 
-    def _hint_matches_current_prompt(self, expected_uci: UCI) -> bool:
-        if self._current_hints is None or self._prompt.node is None:
+    def _commit_prompt_performance(self, *, gave_up: bool) -> None:
+        records_by_move: dict[tuple[str, UCI], list[PerformanceRecord]] = defaultdict(list)
+
+        for attempts in self._prompt_performance:
+            key = (attempts.tested_fen, attempts.tested_move_uci)
+            pending_records = records_by_move[key]
+            history = self._performance_history_by_key(attempts.tested_fen, attempts.tested_move_uci)
+            pending_records.extend(
+                performance_records_from_raw_attempt_history(
+                    attempts,
+                    [*history, *pending_records],
+                )
+            )
+
+        if gave_up:
+            tested_move = self._current_tested_move()
+            if tested_move is not None:
+                parent, move_uci = tested_move
+                if self._prompt_state.prompt_time is None:
+                    raise RuntimeError("PromptState.prompt_time must be initialized before finishing a prompt")
+                records_by_move[(fen(parent), move_uci)].append(
+                    PerformanceRecord(False, self._prompt_state.prompt_time)
+                )
+
+        for (position_fen, move_uci), new_records in records_by_move.items():
+            history = self._performance_history_for_key(position_fen, move_uci)
+            model = self._move_model_for_key(position_fen, move_uci)
+            for record in new_records:
+                if history:
+                    elapsed_seconds = max(0.0, record.attempt_time - history[-1].attempt_time)
+                else:
+                    elapsed_seconds = INITIAL_ELAPSED_SECONDS
+                model.update(elapsed_seconds, record.success)
+                history.append(record)
+
+    def _prompt_hints_match_current_prompt(self, expected_uci: UCI) -> bool:
+        if self._prompt_state.hints is None or self._prompt_state.node is None:
             return False
 
         return (
-            fen(self._current_hints.board) == fen(self._prompt.node)
-            and self._current_hints.starting_square == expected_uci[:2]
-            and self._current_hints.target_square == expected_uci[2:4]
+            fen(self._prompt_state.hints.board) == fen(self._prompt_state.node)
+            and self._prompt_state.hints.starting_square == expected_uci[:2]
+            and self._prompt_state.hints.target_square == expected_uci[2:4]
         )
 
     def _handle_file_guess(self, uci: UCI) -> MoveGrade:
         uci = uci_from_lichess_to_pgn(uci)
-        prpt_data = self._prompt
+        prpt_data = self._prompt_state
     
         expected_uci = self.expected_uci()
         if not expected_uci:
-            grade = MoveGrade(MoveCorrectness.UNDEF)
-            self._grades.append(grade)
-            return grade
+            return MoveGrade(MoveCorrectness.UNDEF)
 
         if expected_uci == uci:
-            self._record_correct_attempt()
-            grade = MoveGrade(MoveCorrectness.CORRECT)
-            self._grades.append(grade)
-            return grade
+            return MoveGrade(MoveCorrectness.CORRECT)
         if not self._session.options.check_alternatives: # TODO: this is currently leaky. We use the knowledge of
             # how expected_uci is constructed. Need some alternative_moves and a design that ensures their accord
             chosen_alternative_node = next(
-                (c for c in self._session.variations(self._prompt.node, use_TT=True) if c.move.uci() == uci 
+                (c for c in self._session.variations(self._prompt_state.node, use_TT=True) if c.move.uci() == uci 
                     and c not in self._temporary_nodes),
                 None,
             )
             if chosen_alternative_node is not None:
-                grade = MoveGrade(MoveCorrectness.ALTERNATIVE,
-                                  msg = "Not the main move. Change the settings to explore alternatives")
-                self._grades.append(grade)
-                return grade
+                return MoveGrade(
+                    MoveCorrectness.ALTERNATIVE,
+                    msg="Not the main move. Change the settings to explore alternatives",
+                )
 
         expected_moves = [expected_uci] # only this for now
         expected_sans = ", ".join(expected_moves)
@@ -1033,26 +1055,23 @@ class RepetitionEngine():
         if best_expected_eval not in (None, 0):
             rel_eval_diff = eval_diff / best_expected_eval
 
-        grade = MoveGrade(
+        return MoveGrade(
             MoveCorrectness.INCORRECT,
             msg=msg,
             eval_diff=eval_diff,
             rel_eval_diff=rel_eval_diff,
         )
-        self._grades.append(grade)
-        self._record_incorrect_attempt()
-        return grade
 
     def _handle_off_file_guess(self, uci: UCI) -> MoveGrade:
         # TODO: if we transposed, contunue along the file?
-        ev = self._session.query(fen(self._prompt.node), "q-eval")
+        ev = self._session.query(fen(self._prompt_state.node), "q-eval")
         expected_eval, best_reply = ev.eval, ev.move
 
-        user_ev = self._session.q_eval_move(self._prompt.node, uci)
+        user_ev = self._session.q_eval_move(self._prompt_state.node, uci)
         move_eval, reply_to_user = user_ev.eval, user_ev.move
 
-        best_reply_san = node_san(self._prompt.node, best_reply) if best_reply else "None"
-        san = node_san(self._prompt.node)
+        best_reply_san = node_san(self._prompt_state.node, best_reply) if best_reply else "None"
+        san = node_san(self._prompt_state.node)
         eval_gap = expected_eval - move_eval
         msg = f"Off-file {san}. Your move: eval {move_eval:+.2f} after {reply_to_user}."
         if uci == best_reply.uci() or eval_gap <= 0.2 or move_eval > 0.8*expected_eval:
@@ -1066,25 +1085,21 @@ class RepetitionEngine():
             grade = MoveCorrectness.INCORRECT
         msg = msg.strip()
 
-        grade = MoveGrade(
+        return MoveGrade(
             grade,
             msg=msg,
             eval_diff=move_eval - expected_eval,
         )
-        self._grades.append(grade)
-        if grade.correctness == MoveCorrectness.INCORRECT:
-            self._record_incorrect_attempt()
-        return grade
 
     def _evaluate_move(self, position: Union[chess.Board, Node], move: Union[chess.Move, str]) -> float:
         return self._session.q_eval_move(position, move).eval
 
     def _should_skip_current_prompt_position(self, skip_index: int) -> bool:
-        if self._prompt.node is None or self._prompt.off_file:
+        if self._prompt_state.node is None or self._prompt_state.off_file:
             return False
         if self._current_expected_node() is None:
             return False
-        if not self._is_learned_prompt_position(self._prompt.node):
+        if not self._is_learned_prompt_position(self._prompt_state.node):
             return False
 
         skip_probability = self.LEARNED_MOVE_SKIP_PROBABILITY * (0.5 ** skip_index)
@@ -1095,11 +1110,11 @@ class RepetitionEngine():
         Skip the current prompt by auto-playing its expected response, then
         advance once to the next opponent move selection.
         """
-        if self._prompt.node is None:
+        if self._prompt_state.node is None:
             raise RuntimeError("Cannot skip a prompt without an active node")
-        if self._prompt.off_file:
+        if self._prompt_state.off_file:
             raise RuntimeError("Cannot skip a learned prompt while off-file")
-        if self._prompt.node_index is not None:
+        if self._prompt_state.node_index is not None:
             raise RuntimeError("Learned-prompt skipping is only supported for locally generated prompts")
 
         expected_node = self._current_expected_node()
@@ -1107,17 +1122,17 @@ class RepetitionEngine():
             self.finish_prompt()
             return
 
-        self._prompt.node = expected_node
-        self._current_hints = None
+        self._prompt_state.node = expected_node
 
-        next_node, selection_debug = self._choose_move(self._prompt.node, maybe_off_book=True)
+        next_node, selection_debug = self._choose_move(self._prompt_state.node, maybe_off_book=True)
         if next_node is False:
-            self._prompt.message = selection_debug
+            self._prompt_state.message = selection_debug
             self.finish_prompt()
             return
 
-        self._prompt.node = next_node
-        self._prompt.message = selection_debug
+        self._prompt_state.node = next_node
+        self._prompt_state.message = selection_debug
+        self._activate_prompt_state()
 
     def _skip_learned_prompt_positions(self) -> None:
         """
@@ -1128,67 +1143,73 @@ class RepetitionEngine():
         while self._should_skip_current_prompt_position(skip_index):
             skip_index += 1
             self._advance_past_current_prompt_position()
-            if self._is_finished or self._prompt.off_file:
+            if self._is_finished or self._prompt_state.off_file:
                 return
 
     def _advance_line(self) -> None:
         """
-        Assuming self._prompt.node is set for them to move,
+        Assuming self._prompt_state.node is set for them to move,
         choose a move for them to continue along the line (or off-file) and
-        update self._prompt accordingly.
+        update self._prompt_state accordingly.
         If the line cannot be continued, updates the state to "prompt finished".
         """
-        if self._prompt.node is None:
+        if self._prompt_state.node is None:
             raise RuntimeError("Cannot advance a prompt without an active node")
-        if self._prompt.off_file:
+        if self._prompt_state.off_file:
             raise RuntimeError("Cannot advance the file line while on an off-file prompt")
 
-        if self._prompt.node_index is not None:
-            if self._prompt.node.turn() != self._session.options.side:
-                next_node, selection_debug = self._maybe_choose_off_file_prompt(self._prompt.node)
+        if self._prompt_state.node_index is not None:
+            if self._prompt_state.node.turn() != self._session.options.side:
+                next_node, selection_debug = self._maybe_choose_off_file_prompt(self._prompt_state.node)
                 if next_node is not None:
-                    self._prompt.node = next_node
-                    self._prompt.message = selection_debug
+                    self._prompt_state.node = next_node
+                    self._prompt_state.message = selection_debug
+                    self._activate_prompt_state()
                     return
 
             try:
-                child_index = self._prompt.node_index+1
+                child_index = self._prompt_state.node_index+1
                 next_node = self._child_for_move(
-                    self._prompt.node,
-                    self._prompt.prechosen_path[child_index],
+                    self._prompt_state.node,
+                    self._prompt_state.prechosen_path[child_index],
                 )
                 if next_node is None:
-                    self._prompt.off_file = True
-                    next_node = self._add_temporary_node(self._prompt.node, self._prompt.prechosen_path[child_index])
+                    self._prompt_state.off_file = True
+                    next_node = self._add_temporary_node(self._prompt_state.node, self._prompt_state.prechosen_path[child_index])
                 else:
-                    self._prompt.node_index += 1
+                    self._prompt_state.node_index += 1
 
-                self._prompt.node = next_node
+                self._prompt_state.node = next_node
+                self._activate_prompt_state()
                 return
             except IndexError:
-                self._prompt.node_index = None
+                self._prompt_state.node_index = None
 
-        parent = self._prompt.node
+        parent = self._prompt_state.node
         next_node, selection_debug = self._choose_move(parent, maybe_off_book=True)
 
         if next_node is False:
-            self._prompt.message = selection_debug
+            self._prompt_state.message = selection_debug
             self.finish_prompt()
             return
 
-        self._prompt.node = next_node
-        self._prompt.message = selection_debug
-        if self._prompt.off_file:
+        self._prompt_state.node = next_node
+        self._prompt_state.message = selection_debug
+        if self._prompt_state.off_file:
+            self._activate_prompt_state()
             return
         self._skip_learned_prompt_positions()
-        if self._is_finished or self._prompt.off_file:
+        if self._is_finished or self._prompt_state.off_file:
+            if self._prompt_state.off_file:
+                self._activate_prompt_state()
             return
 
-        message = f"Correct: {node_san(self._prompt.node)}. Continue along the line."
-        if self._prompt.message:
-            self._prompt.message = f"{message} {self._prompt.message}"
+        message = f"Correct: {node_san(self._prompt_state.node)}. Continue along the line."
+        if self._prompt_state.message:
+            self._prompt_state.message = f"{message} {self._prompt_state.message}"
         else:
-            self._prompt.message = message
+            self._prompt_state.message = message
+        self._activate_prompt_state()
 
 
     def _choose_start_ply_offset(self) -> int:
@@ -1236,12 +1257,13 @@ class RepetitionEngine():
         # make sure we are anchored at their move
         assert anchor.turn() == self._session.options.side
 
-        self._prompt.prechosen_path = chosen_path
-        self._prompt.node = anchor
-        self._prompt.anchor_node = anchor
-        self._prompt.node_index = index
-        msg = f"Complete prompt: {self._prompt.prechosen_path}" if DEBUG_MODE else ""
-        self._prompt.message = msg
+        self._prompt_state.prechosen_path = chosen_path
+        self._prompt_state.node = anchor
+        self._prompt_state.anchor_node = anchor
+        self._prompt_state.node_index = index
+        msg = f"Complete prompt: {self._prompt_state.prechosen_path}" if DEBUG_MODE else ""
+        self._prompt_state.message = msg
+        self._activate_prompt_state()
         return True
 
     def _try_choose_prompt(self, node: Optional[Node] = None, complete: bool = False) -> bool:
@@ -1254,15 +1276,15 @@ class RepetitionEngine():
 
     def _choose_prompt_locally(self, node: Optional[Node] = None) -> bool:
         """Simulate walking through a randomly chosen line. 
-        Results in populating self._prompt.
+        Results in populating self._prompt_state.
         Returns False if the walk along a line failed."""
         node = node or self._root
 
         selection_debug = ""
-        self._prompt.off_file = False
+        self._prompt_state.off_file = False
         line_length = self._choose_start_ply_offset()
 
-        self._prompt.anchor_node = node
+        self._prompt_state.anchor_node = node
 
         # we'll do line_length or line_length-1 steps total
         for step in range(line_length - 2):
@@ -1271,7 +1293,7 @@ class RepetitionEngine():
                 return False
             node = next_node
             # if step == self._session.options.start_ply:
-            #     self._prompt.anchor_node = node # TODO
+            #     self._prompt_state.anchor_node = node # TODO
 
 
         if node.turn() == self._session.options.side:
@@ -1286,13 +1308,14 @@ class RepetitionEngine():
         if next_node is False:
             return False
         
-        self._prompt.node = next_node
-        self._prompt.message = selection_debug
+        self._prompt_state.node = next_node
+        self._prompt_state.message = selection_debug
 
         self._skip_learned_prompt_positions()
         if self._is_finished:
             return False
         self._set_prompt_start()
+        self._activate_prompt_state()
         return True
 
     def _expected_damage_for_prompt_path(
@@ -1341,7 +1364,7 @@ class RepetitionEngine():
     ) -> tuple[Node | bool, str]:
         """
         Chooses a move randomly to simulate a step along a line. 
-        Determines changes in self._prompt.off_file.
+        Determines changes in self._prompt_state.off_file.
         Returns the resulting node and a debug string.
 
         If a choice could not be made, returns (False, ...).
@@ -1376,7 +1399,7 @@ class RepetitionEngine():
             off_book_selection = self._select_off_book_move(parent, use_engine=use_engine)
             if off_book_selection.move is not None:
                 child = self._add_temporary_node(parent, off_book_selection.move)
-                self._prompt.off_file = True
+                self._prompt_state.off_file = True
                 return child, off_book_selection.message
             if off_book_selection.blacklist_exhausted:
                 return False, off_book_selection.message
@@ -1663,15 +1686,15 @@ class RepetitionEngine():
         return prefix == path[:len(prefix)]
 
     def _debug_prompt_path(self) -> tuple[UCI, ...] | None:
-        if self._spec_id != "new" or self._prompt.prechosen_path is None:
+        if self._spec_id != "new" or self._prompt_state.prechosen_path is None:
             return None
-        return tuple(self._prompt.prechosen_path)
+        return tuple(self._prompt_state.prechosen_path)
 
     def _sorted_weighted_moves_for(
         self,
         parent: Node,
-    ) -> list[tuple[UCI, float, MoveMemoryState, str, Optional[Node]]]:
-        entries: list[tuple[UCI, float, MoveMemoryState, str, Optional[Node]]] = []
+    ) -> list[tuple[UCI, float, MemoryModel, str, Optional[Node]]]:
+        entries: list[tuple[UCI, float, MemoryModel, str, Optional[Node]]] = []
         for move_uci, entry in self._get_moves_for_(parent).items():
             try:
                 san = node_san(parent, move_uci)
@@ -1681,7 +1704,7 @@ class RepetitionEngine():
                 child = self._child_for_move(parent, move_uci)
             except RuntimeError:
                 child = None
-            entries.append((move_uci, entry["weight"], entry["memory"], san, child))
+            entries.append((move_uci, entry["weight"], self._move_model(parent, move_uci), san, child))
         entries.sort(key=lambda item: (-item[1], item[3], item[0]))
         return entries
 
@@ -1701,7 +1724,7 @@ class RepetitionEngine():
             move_weights = self._get_moves_for_(parent)
             move_entry = move_weights.get(move_uci)
             weight = None if move_entry is None else move_entry["weight"]
-            memory_state = None if move_entry is None else move_entry["memory"]
+            move_model = None if move_entry is None else self._move_model(parent, move_uci)
             try:
                 child = self._child_for_move(parent, move_uci)
             except RuntimeError:
@@ -1715,7 +1738,7 @@ class RepetitionEngine():
                     parent,
                     move_uci,
                     weight,
-                    memory_state,
+                    move_model,
                     san,
                     child,
                     (*path, move_uci),
@@ -1731,13 +1754,13 @@ class RepetitionEngine():
             return []
 
         children: list[dict[str, Any]] = []
-        for move_uci, weight, memory_state, san, child in self._sorted_weighted_moves_for(parent):
+        for move_uci, weight, move_model, san, child in self._sorted_weighted_moves_for(parent):
             children.append(
                 self._build_debug_move_node(
                     parent,
                     move_uci,
                     weight,
-                    memory_state,
+                    move_model,
                     san,
                     child,
                     (*path, move_uci),
@@ -1755,7 +1778,7 @@ class RepetitionEngine():
         parent: Node,
         move_uci: UCI,
         weight: Optional[float],
-        memory_state: Optional[MoveMemoryState],
+        move_model: Optional[MemoryModel],
         san: str,
         child: Optional[Node],
         path: tuple[UCI, ...],
@@ -1770,11 +1793,9 @@ class RepetitionEngine():
         move_number = board.fullmove_number
         color = "white" if parent.turn() == chess.WHITE else "black"
         performance = None
-        if memory_state is not None:
-            performance = memory_state.debug_payload(
-                now=time.time(),
-                default_probability=self.DEFAULT_RIGHT_PROBABILITY,
-            )
+        if move_model is not None:
+            performance = move_model.debug_payload()
+            performance["predictSuccess"] = self._move_predict_success(parent, move_uci)
         children: list[dict[str, Any]] = []
         if child is not None:
             children = self._build_debug_children(
@@ -1842,11 +1863,11 @@ class RepetitionEngine():
         }
 
     def debug_guess_tree_payload(self) -> dict[str, Any]:
-        anchor_path_list = self._relative_move_path_for_node(self._prompt.anchor_node) if self._prompt.anchor_node is not None else None
-        current_path_list = self._relative_move_path_for_node(self._prompt.node) if self._prompt.node is not None else None
+        anchor_path_list = self._relative_move_path_for_node(self._prompt_state.anchor_node) if self._prompt_state.anchor_node is not None else None
+        current_path_list = self._relative_move_path_for_node(self._prompt_state.node) if self._prompt_state.node is not None else None
         prompt_path = self._debug_prompt_path()
         if anchor_path_list is None or current_path_list is None:
-            root = self._prompt.anchor_node or self._prompt.node or self._root
+            root = self._prompt_state.anchor_node or self._prompt_state.node or self._root
             return self._build_debug_tree_payload(
                 root=root,
                 root_label="Active prompt position",
@@ -1880,7 +1901,7 @@ class RepetitionEngine():
         else:
             prefix_path = tuple(relative_path)
             current_path = tuple(relative_path)
-            anchor_path_list = self._relative_move_path_for_node(self._prompt.anchor_node) if self._prompt.anchor_node is not None else None
+            anchor_path_list = self._relative_move_path_for_node(self._prompt_state.anchor_node) if self._prompt_state.anchor_node is not None else None
             if anchor_path_list is not None:
                 anchor_path = tuple(anchor_path_list)
 
@@ -1901,6 +1922,8 @@ class PromptState:
     anchor_node: Node
     prechosen_path: tuple[str] | None = None
     node_index: int | None = None # None means we are not following the prechosen path
+    prompt_time: float | None = None
+    hints: Hints | None = None
 
     def __bool__(self):
         return self.node is not None
@@ -2132,7 +2155,13 @@ class AppController:
 
     def _probs_cache_name(self) -> str:
         return default_repertoire_cache_path(base=os.path.join("cache", "sr_probs"), options=self._session.options)
-      
+
+    def _performance_cache_name(self) -> str:
+        return default_repertoire_cache_path(base=os.path.join("cache", "sr_performance"), options=self._session.options)
+
+    def _model_cache_name(self) -> str:
+        return default_repertoire_cache_path(base=os.path.join("cache", "sr_models"), options=self._session.options)
+
     def _log_cache_name(self) -> str:
         return default_repertoire_cache_path(base=os.path.join("cache", "log"), options=self._session.options)
 
@@ -2246,7 +2275,7 @@ class AppController:
                 options,
                 default_cache_path=lambda: default_repertoire_cache_path(options),
             )
-            self._orientation = "white" if options.play_white else "black"
+            self.board_orientation = "white" if options.play_white else "black"
             
             self._log.load_from_file(self._log_cache_name())
             self._session.cache.autosave_interval = 600
@@ -2255,6 +2284,8 @@ class AppController:
                 self._session.starting_node,
                 self._cfg.start_range,
                 self._probs_cache_name(),
+                self._performance_cache_name(),
+                self._model_cache_name(),
                 self._cfg.non_file_move_frequency,
                 self._cfg.local_generation
             )
@@ -2273,7 +2304,8 @@ class AppController:
                 self._session.save_cache()
             except Exception as exc:
                 sys.stderr.write(f"Failed to save cache: {exc}\n")
-            self._session.close()
+            if self._session is not None: 
+                self._session.close()
 
 
     def start_next_prompt(self) -> None:
@@ -2289,7 +2321,7 @@ class AppController:
         self._mode = "guess"
         self._hub.set_from_node(
             prompt.node,
-            orientation=self._orientation,
+            orientation=self.board_orientation,
             message=prompt.message,
             allow_moves=True,
             **kwargs
@@ -2638,10 +2670,10 @@ class AppController:
                 raise RuntimeError("Guess mode requires an active prompt node")
 
             rendered_message = f"{prompt.message} {message}".strip() if prompt.message else message
-            circles = self._rep_engine._current_hints.circles if self._rep_engine._current_hints is not None else None
+            circles = self._rep_engine._prompt_state.hints.circles if self._rep_engine._prompt_state.hints is not None else None
             self._hub.set_from_node(
                 prompt.node,
-                orientation=self._orientation,
+                orientation=self.board_orientation,
                 message=rendered_message,
                 allow_moves=True,
                 circles=circles,
@@ -2654,7 +2686,7 @@ class AppController:
             node = node_at_path(self._session.game, list(self._review_path), self._session.variations)
             self._hub.set_from_node(
                 node,
-                orientation=self._orientation,
+                orientation=self.board_orientation,
                 message=message,
                 allow_moves=False,
             )
@@ -2666,7 +2698,7 @@ class AppController:
             raise RuntimeError("Board state does not contain a current FEN")
         self._hub.set_fen(
             current_fen,
-            orientation=self._orientation,
+            orientation=self.board_orientation,
             message=message,
             allow_moves=False,
         )
@@ -2770,7 +2802,7 @@ class AppController:
         stats_task = self._prepare_review_db_stats(node)
         self._hub.set_from_node(
             node,
-            orientation=self._orientation,
+            orientation=self.board_orientation,
             message="Browsing variations",
             allow_moves=False,
         )
@@ -2813,7 +2845,7 @@ class AppController:
         self._search_move_payload = None
         self._hub.set_fen(
             position_fen,
-            orientation=self._orientation,
+            orientation=self.board_orientation,
             message=message,
             allow_moves=False,
         )
@@ -2858,7 +2890,7 @@ class AppController:
             "fen": exported.fen,
             "pgn": exported.pgn,
             "initialPly": exported.initial_ply,
-            "orientation": self._orientation,
+            "orientation": self.board_orientation,
             "tree": tree,
             "currentPath": self._review_path,
             "viewRootPath": list(self._review_view_root_path),
@@ -2869,7 +2901,7 @@ class AppController:
 
         self._hub.set_from_node(
             node,
-            orientation=self._orientation,
+            orientation=self.board_orientation,
             message=message,
             allow_moves=False,
         )
