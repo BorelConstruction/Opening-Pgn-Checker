@@ -7,7 +7,6 @@ from typing import Any
 
 
 SECONDS_PER_DAY = 24.0 * 60.0 * 60.0
-INITIAL_ELAPSED_SECONDS = SECONDS_PER_DAY
 DELAY_BEFORE_GUESSED_MEANS_REMEMBERS = 60.0
 
 
@@ -38,8 +37,10 @@ class MemoryModel(ABC):
         """Estimate recall probability after the given elapsed time."""
 
     @abstractmethod
-    def update(self, elapsed_seconds: float, remembered: bool) -> None:
-        """Update model parameters from a recall outcome."""
+    def update(self, remembered: bool, elapsed_seconds: float | None = None) -> None:
+        """Update model parameters from a recall outcome.
+        elapsed_seconds time since the last update. None if there isn't one.
+        """
 
     @abstractmethod
     def to_json(self) -> dict[str, Any]:
@@ -63,23 +64,24 @@ class NaiveMemoryModel(MemoryModel):
     """
 
     FAILURE_SCALE = 0.5
+    DEFAULT_SUCCESS_PROBABILITY = 0.5
 
     a: float = math.log(2.0) / SECONDS_PER_DAY
+    once_remembered: bool = False
 
     @property
     def model_type(self) -> str:
         return "naive_exponential"
 
     def predict_success(self, elapsed_seconds: float) -> float:
-        if elapsed_seconds < 0.0:
-            raise ValueError("Elapsed time must be non-negative")
+        if not self.once_remembered:
+            return self.DEFAULT_SUCCESS_PROBABILITY
         return math.exp(-self.a * elapsed_seconds)
 
-    def update(self, elapsed_seconds: float, remembered: bool) -> None:
-        if elapsed_seconds < 0.0:
-            raise ValueError("Elapsed time must be non-negative")
+    def update(self, remembered: bool, elapsed_seconds: float | None = None) -> None:
         if remembered:
-            self.a += elapsed_seconds
+            self.once_remembered = True
+            self.a += (elapsed_seconds or 0.0)
             return
         self.a *= self.FAILURE_SCALE
 

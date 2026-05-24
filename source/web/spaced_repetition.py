@@ -33,7 +33,6 @@ from .pgn_export import export_pgn_subtree
 from .variation_tree import node_at_path, path_from_root, build_variation_tree
 from .scheduler_protocol import *
 from .memory_model import (
-    INITIAL_ELAPSED_SECONDS,
     DELAY_BEFORE_GUESSED_MEANS_REMEMBERS,
     MemoryModel,
     NaiveMemoryModel,
@@ -51,15 +50,12 @@ SEARCH_MOVE_BOOST_MIN_SIMILARITY = 0.8
 
 class MoveEntryData(TypedDict):
     weight: float
+    past_performance: list[PerformanceRecord]
 
 
 class PositionMoveData(TypedDict):
     moves: dict[UCI, MoveEntryData] | None
     blacklist: list[UCI]
-
-
-class PositionPerformanceData(TypedDict):
-    moves: dict[UCI, list[PerformanceRecord]] | None
 
 
 class PositionModelData(TypedDict):
@@ -71,6 +67,9 @@ class MoveCorrectness(Enum):
     INCORRECT = 2
     ALTERNATIVE = 3
     UNDEF = 4
+
+    def __bool__(self) -> bool:
+        return self == MoveCorrectness.CORRECT
 
 @dataclass
 class MoveGrade():
@@ -95,46 +94,23 @@ class AttemptsForMove:
         self.hint_used = True
 
 
-def performance_records_from_raw_attempt_history(
+def perf_success_from_attempt_history(
     attempts: AttemptsForMove,
-    previous_records: Iterable[PerformanceRecord],
-) -> list[PerformanceRecord]:
-    records: list[PerformanceRecord] = []
-    if attempts.hint_used:
-        records.append(PerformanceRecord(False, attempts.prompt_time))
-
-    for grade in attempts.grades:
-        success = performance_record_success_from_raw_attempt_history(
-            grade=grade,
-            attempt_time=attempts.prompt_time,
-            previous_records=[*previous_records, *records],
-        )
-        if success is None:
-            continue
-        records.append(PerformanceRecord(success, attempts.prompt_time))
-    return records
-
-
-def performance_record_success_from_raw_attempt_history(
-    *,
-    grade: MoveGrade,
-    attempt_time: float,
-    previous_records: Iterable[PerformanceRecord],
+    previous_records: list[PerformanceRecord],
 ) -> bool | None:
-    if grade.correctness == MoveCorrectness.INCORRECT:
+    """Convert raw attempt data into a boolean interpretation of
+    success/failure of recall. None means could not be determined.
+    """
+    if attempts.hint_used:
         return False
-    if grade.correctness != MoveCorrectness.CORRECT:
-        return None
-
-    last_unsuccess_time: float | None = None
-    for record in previous_records:
-        if not record.success:
-            last_unsuccess_time = record.attempt_time
-
-    if last_unsuccess_time is None:
-        return True
-    return attempt_time - last_unsuccess_time > DELAY_BEFORE_GUESSED_MEANS_REMEMBERS
-
+    if MoveCorrectness.INCORRECT in (grade.correctness for grade in attempts.grades):
+        return False
+    
+    if all(grade.correctness for grade in attempts.grades):
+        if not previous_records:
+            return True
+        last_unsuccess_time = previous_records[-1].attempt_time # note we assume it's sorted
+        return attempts.prompt_time - last_unsuccess_time > DELAY_BEFORE_GUESSED_MEANS_REMEMBERS
 
 
 @dataclass(frozen=True)
@@ -160,12 +136,14 @@ class RepetitionEngine():
     Prompts are generated move by move. A move may be randomnly chosen from a file,
     or picked by a chess engine.
 
-        Keeps the result of generating in self._prompt_state and stores prompt-local
-        grades grouped by tested move.
+    Keeps the result of generating in self._prompt_state and stores prompt-local
+    grades grouped by tested move.
+
+    "prompt" is a sequence of moves starting from self._root.
+    "performance" is what feeds into memory models -- right/wrong + time for every move.
+    "attempts" is broader: has eval diff, hint history etc.
     """
-    DEFAULT_RIGHT_PROBABILITY = 0.5
     LEARNED_RIGHT_THRESHOLD = 0.85
-    LOCAL_UNLEARNED_RIGHT_THRESHOLD = 0.9
     LEARNED_MOVE_SKIP_PROBABILITY = 0.90
     MAX_PROMPT_SELECTION_ATTEMPTS = 100
     MAX_OFF_BOOK_BLACKLIST_ATTEMPTS = 3
@@ -176,8 +154,7 @@ class RepetitionEngine():
         session: RepertoireSession,
         root: Node,
         start_range: int,
-        probs_cache_name: str,
-        performance_cache_name: str,
+        pos_drill_cache_name: str,
         model_cache_name: str,
         non_file_freq: float,
         local_generation: bool,
@@ -199,27 +176,19 @@ class RepetitionEngine():
 
         self._pos_drill_data = CacheDict(
             lambda position_fen: PositionMoveData(moves=None, blacklist=[]),
-            item_to_json=self._moveprobs_item_to_json,
-            item_from_json=self._moveprobs_item_from_json,
+            item_to_json=self._pos_drill_item_to_json,
+            item_from_json=self._pos_drill_item_from_json,
             auto_save=False,
         )
-        self._pos_drill_data.load_from_file(probs_cache_name)
+        self._pos_drill_data.load_from_file(pos_drill_cache_name)
 
-        self._move_performance_data = CacheDict(
-            lambda position_fen: PositionPerformanceData(moves=None),
-            item_to_json=self._performance_item_to_json,
-            item_from_json=self._performance_item_from_json,
-            auto_save=False,
-        )
-        self._move_performance_data.load_from_file(performance_cache_name)
-
-        self._move_model_data = CacheDict(
+        self._movemodel_data = CacheDict(
             lambda position_fen: PositionModelData(moves=None),
             item_to_json=self._model_item_to_json,
             item_from_json=self._model_item_from_json,
             auto_save=False,
         )
-        self._move_model_data.load_from_file(model_cache_name)
+        self._movemodel_data.load_from_file(model_cache_name)
 
         self._session.fill_the_TT(self._session.game)
         self._prompt_performance: list[AttemptsForMove] = []
@@ -331,8 +300,7 @@ class RepetitionEngine():
         self._is_finished = True
         self._commit_prompt_performance(gave_up=gave_up)
         self._pos_drill_data.serialize()
-        self._move_performance_data.serialize()
-        self._move_model_data.serialize()
+        self._movemodel_data.serialize()
 
     def sync_move_weights_with_pgn(self) -> WeightSyncSummary:
         positions_checked = 0
@@ -351,7 +319,7 @@ class RepetitionEngine():
             stale_moves = [uci for uci in move_weights if uci not in current_moves]
             for uci in stale_moves:
                 del move_weights[uci]
-                self._drop_cached_memory(position_fen, uci)
+                self._drop_cached_model(position_fen, uci)
             moves_removed += len(stale_moves)
 
             retained_weights = dict(move_weights)
@@ -359,12 +327,14 @@ class RepetitionEngine():
             if missing_moves:
                 added_weight = self._added_move_weight(position_fen, retained_weights)
                 for uci in missing_moves:
-                    move_weights[uci] = MoveEntryData(weight=added_weight)
+                    move_weights[uci] = MoveEntryData(
+                        weight=added_weight,
+                        past_performance=[],
+                    )
                 moves_added += len(missing_moves)
 
         self._pos_drill_data.serialize()
-        self._move_performance_data.serialize()
-        self._move_model_data.serialize()
+        self._movemodel_data.serialize()
         self._refresh_prompt_dicts()
         return WeightSyncSummary(
             positions_checked=positions_checked,
@@ -535,7 +505,7 @@ class RepetitionEngine():
         self._prompt_state.prompt_time = time.time()
         self._prompt_state.hints = None
 
-    def _moveprobs_item_to_json(
+    def _pos_drill_item_to_json(
         self,
         item: tuple[str, PositionMoveData],
     ) -> dict[str, Any]:
@@ -546,6 +516,10 @@ class RepetitionEngine():
             serialized_moves = {
                 move_uci: {
                     "weight": entry["weight"],
+                    "past_performance": [
+                        record.to_json()
+                        for record in entry["past_performance"]
+                    ],
                 }
                 for move_uci, entry in raw_moves.items()
             }
@@ -555,14 +529,14 @@ class RepetitionEngine():
             "blacklist": list(position_data["blacklist"]),
         }
 
-    def _moveprobs_item_from_json(
+    def _pos_drill_item_from_json(
         self,
         payload: Any,
     ) -> tuple[str, PositionMoveData]:
         if isinstance(payload, str):
             payload = json.loads(payload)
         if not isinstance(payload, dict):
-            raise TypeError("Move-weight cache payload must be a dict")
+            raise TypeError("Move cache payload must be a dict")
 
         position_fen = payload["fen"]
         if "moves" not in payload:
@@ -586,8 +560,21 @@ class RepetitionEngine():
                 raw_weight = raw_entry.get("weight")
                 if raw_weight is None:
                     raise KeyError(f"Missing move weight for {uci!r} from position {position_fen!r}")
+                if "past_performance" not in raw_entry:
+                    raise KeyError(
+                        f"Missing move performance history for {uci!r} from position {position_fen!r}"
+                    )
+                raw_past_performance = raw_entry["past_performance"]
+                if not isinstance(raw_past_performance, list):
+                    raise TypeError(
+                        f"Move performance history for {uci!r} from position {position_fen!r} must be a list"
+                    )
                 move_probs[uci] = MoveEntryData(
                     weight=float(raw_weight),
+                    past_performance=[
+                        PerformanceRecord.from_json(record)
+                        for record in raw_past_performance
+                    ],
                 )
                 if raw_entry.get("blacklisted", False) and uci not in blacklist:
                     blacklist.append(uci)
@@ -595,45 +582,6 @@ class RepetitionEngine():
                 raise TypeError(f"Move entry for {uci!r} from position {position_fen!r} must be a dict")
 
         return position_fen, PositionMoveData(moves=move_probs, blacklist=blacklist)
-
-    def _performance_item_to_json(
-        self,
-        item: tuple[str, PositionPerformanceData],
-    ) -> dict[str, Any]:
-        position_fen, position_data = item
-        raw_moves = position_data["moves"]
-        serialized_moves = None
-        if raw_moves is not None:
-            serialized_moves = {
-                move_uci: [record.to_json() for record in records]
-                for move_uci, records in raw_moves.items()
-            }
-        return {
-            "fen": position_fen,
-            "moves": serialized_moves,
-        }
-
-    def _performance_item_from_json(
-        self,
-        payload: Any,
-    ) -> tuple[str, PositionPerformanceData]:
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-        if not isinstance(payload, dict):
-            raise TypeError("Performance cache payload must be a dict")
-
-        position_fen = payload["fen"]
-        raw_moves = payload["moves"]
-        if raw_moves is None:
-            return position_fen, PositionPerformanceData(moves=None)
-        if not isinstance(raw_moves, dict):
-            raise TypeError(f"Performance payload for position {position_fen!r} must be a dict or null")
-
-        moves = {
-            move_uci: [PerformanceRecord.from_json(record) for record in records]
-            for move_uci, records in raw_moves.items()
-        }
-        return position_fen, PositionPerformanceData(moves=moves)
 
     def _model_item_to_json(
         self,
@@ -674,16 +622,19 @@ class RepetitionEngine():
         }
         return position_fen, PositionModelData(moves=moves)
 
-    def _new_move_model(self) -> MemoryModel:
+    def _new_movemodel(self) -> MemoryModel:
         return NaiveMemoryModel()
 
     def _get_moves_for_(self, parent: Node, blacklist_included: bool = False) -> dict[UCI, MoveEntryData]:
         position_data = self._pos_drill_data[fen(parent)]
         if position_data["moves"] is None:
             position_data["moves"] = {
-                    move_uci: MoveEntryData(weight=float(freq))
-                    for move_uci, freq in self._get_moves_and_freqs(parent).items()
-                }
+                move_uci: MoveEntryData(
+                    weight=float(freq),
+                    past_performance=[],
+                )
+                for move_uci, freq in self._get_moves_and_freqs(parent).items()
+            }
             
         return {m:p for m, p in position_data["moves"].items() if blacklist_included or m not in position_data["blacklist"]}
 
@@ -695,10 +646,8 @@ class RepetitionEngine():
             return False
         parent = prompt_node.parent
         move_uci = prompt_node.move.uci()
-        try:
-            return self._move_predict_success(parent, move_uci) > self.LEARNED_RIGHT_THRESHOLD
-        except KeyError:
-            return False
+        return self._move_predict_success(parent, move_uci) > self.LEARNED_RIGHT_THRESHOLD
+
 
     def _is_blacklisted_move(self, position: BoardLike, uci: UCI) -> bool:
         position_data = self._pos_drill_data.get(fen(position))
@@ -864,58 +813,40 @@ class RepetitionEngine():
             children.extend(prompt_children(node))
         return children
 
-    def _move_entry(self, parent: BoardLike, move_uci: UCI) -> MoveEntryData:
-        moves = self._get_moves_for_(parent, blacklist_included=True)
+    def _move_entry_by_key(self, position_fen: str, move_uci: UCI) -> MoveEntryData:
+        moves = self._pos_drill_data[position_fen]["moves"]
+        if moves is None:
+            raise KeyError(f"Missing move data for position {position_fen!r}")
         if move_uci not in moves:
-            raise KeyError(f"Missing move data for {move_uci!r} from position {fen(parent)!r}")
+            raise KeyError(f"Missing move data for {move_uci!r} from position {position_fen!r}")
         return moves[move_uci]
 
-    def _performance_history_for_key(self, position_fen: str, move_uci: UCI) -> list[PerformanceRecord]:
-        position_data = self._move_performance_data[position_fen]
-        if position_data["moves"] is None:
-            position_data["moves"] = {}
-        return position_data["moves"].setdefault(move_uci, [])
-
-    def _performance_history_by_key(self, position_fen: str, move_uci: UCI) -> list[PerformanceRecord]:
-        position_data = self._move_performance_data[position_fen]
-        if position_data["moves"] is None:
-            return []
-        return position_data["moves"].get(move_uci, [])
+    def _move_entry(self, parent: BoardLike, move_uci: UCI) -> MoveEntryData:
+        position_fen = fen(parent)
+        return self._move_entry_by_key(position_fen, move_uci)
 
     def _performance_history(self, parent: BoardLike, move_uci: UCI) -> list[PerformanceRecord]:
-        return self._performance_history_by_key(fen(parent), move_uci)
+        return self._move_entry(parent, move_uci)["past_performance"]
 
-    def _move_model_for_key(self, position_fen: str, move_uci: UCI) -> MemoryModel:
-        position_data = self._move_model_data[position_fen]
+    def _movemodel(self, parent: BoardLike, move_uci: UCI) -> MemoryModel:
+        position_fen = fen(parent)
+        position_data = self._movemodel_data[position_fen]
         if position_data["moves"] is None:
             position_data["moves"] = {}
-        return position_data["moves"].setdefault(move_uci, self._new_move_model())
+        return position_data["moves"].setdefault(move_uci, self._new_movemodel())
 
-    def _move_model_by_key(self, position_fen: str, move_uci: UCI) -> MemoryModel:
-        position_data = self._move_model_data[position_fen]
-        if position_data["moves"] is None:
-            return self._new_move_model()
-        return position_data["moves"].get(move_uci, self._new_move_model())
-
-    def _move_model(self, parent: BoardLike, move_uci: UCI) -> MemoryModel:
-        return self._move_model_by_key(fen(parent), move_uci)
-
-    def _drop_cached_memory(self, position_fen: str, move_uci: UCI) -> None:
-        history_data = self._move_performance_data[position_fen]
-        if history_data["moves"] is not None:
-            history_data["moves"].pop(move_uci, None)
-
-        model_data = self._move_model_data[position_fen]
+    def _drop_cached_model(self, position_fen: str, move_uci: UCI) -> None:
+        model_data = self._movemodel_data[position_fen]
         if model_data["moves"] is not None:
             model_data["moves"].pop(move_uci, None)
 
     def _move_predict_success(self, parent: BoardLike, move_uci: UCI) -> float:
         history = self._performance_history(parent, move_uci)
         if not history:
-            return self.DEFAULT_RIGHT_PROBABILITY
-
-        elapsed_seconds = max(0.0, time.time() - history[-1].attempt_time)
-        return self._move_model(parent, move_uci).predict_success(elapsed_seconds)
+            elapsed_seconds = None
+        else:
+            elapsed_seconds = time.time() - history[-1].attempt_time
+        return self._movemodel(parent, move_uci).predict_success(elapsed_seconds)
 
     def _move_wrong_probability(self, parent: BoardLike, move_uci: UCI) -> float:
         return 1.0 - self._move_predict_success(parent, move_uci)
@@ -940,8 +871,6 @@ class RepetitionEngine():
             if attempts.tested_fen == position_fen and attempts.tested_move_uci == move_uci:
                 return attempts
 
-        if self._prompt_state.prompt_time is None:
-            raise RuntimeError("PromptState.prompt_time must be initialized before saving prompt performance")
         attempts = AttemptsForMove(
             tested_fen=position_fen,
             tested_move_uci=move_uci,
@@ -972,39 +901,31 @@ class RepetitionEngine():
         attempts.add_hint()
 
     def _commit_prompt_performance(self, *, gave_up: bool) -> None:
-        records_by_move: dict[tuple[str, UCI], list[PerformanceRecord]] = defaultdict(list)
+        records_by_move: dict[tuple[str, UCI], PerformanceRecord] = {}
 
+        # update performance history
         for attempts in self._prompt_performance:
-            key = (attempts.tested_fen, attempts.tested_move_uci)
-            pending_records = records_by_move[key]
-            history = self._performance_history_by_key(attempts.tested_fen, attempts.tested_move_uci)
-            pending_records.extend(
-                performance_records_from_raw_attempt_history(
-                    attempts,
-                    [*history, *pending_records],
-                )
-            )
+            history = self._performance_history(attempts.tested_fen, attempts.tested_move_uci)
+            success = perf_success_from_attempt_history(attempts, history)
+            if success is not None:
+                key = (attempts.tested_fen, attempts.tested_move_uci)
+                records_by_move[key] = PerformanceRecord(success, attempts.prompt_time)
 
         if gave_up:
             tested_move = self._current_tested_move()
-            if tested_move is not None:
-                parent, move_uci = tested_move
-                if self._prompt_state.prompt_time is None:
-                    raise RuntimeError("PromptState.prompt_time must be initialized before finishing a prompt")
-                records_by_move[(fen(parent), move_uci)].append(
-                    PerformanceRecord(False, self._prompt_state.prompt_time)
-                )
+            parent, move_uci = tested_move
+            records_by_move[(fen(parent), move_uci)] = PerformanceRecord(False, self._prompt_state.prompt_time)
 
-        for (position_fen, move_uci), new_records in records_by_move.items():
-            history = self._performance_history_for_key(position_fen, move_uci)
-            model = self._move_model_for_key(position_fen, move_uci)
-            for record in new_records:
-                if history:
-                    elapsed_seconds = max(0.0, record.attempt_time - history[-1].attempt_time)
-                else:
-                    elapsed_seconds = INITIAL_ELAPSED_SECONDS
-                model.update(elapsed_seconds, record.success)
-                history.append(record)
+        # update models
+        for (position_fen, move_uci), new_record in records_by_move.items():
+            history = self._performance_history(position_fen, move_uci)
+            model = self._movemodel(position_fen, move_uci)
+            if history:
+                elapsed_seconds = new_record.attempt_time - history[-1].attempt_time
+            else:
+                elapsed_seconds = None
+            model.update(new_record.success, elapsed_seconds)
+            history.append(new_record)
 
     def _prompt_hints_match_current_prompt(self, expected_uci: UCI) -> bool:
         if self._prompt_state.hints is None or self._prompt_state.node is None:
@@ -1413,8 +1334,7 @@ class RepetitionEngine():
         weights_dict = {}
         for move_uci, entry in eligible_moves.items():
             predicted_success = self._move_predict_success(parent, move_uci)
-            if predicted_success < self.LOCAL_UNLEARNED_RIGHT_THRESHOLD:
-                weights_dict[move_uci] = (1.0 - predicted_success) * entry["weight"]
+            weights_dict[move_uci] = (1.0 - predicted_success) * entry["weight"]
 
         sys.stderr.write(f"Choosing move... selection_weights: {[(k, round(v, 3)) for k, v in weights_dict.items()]}\n")
         choice = self._rng_choice(weights_dict)
@@ -1704,7 +1624,7 @@ class RepetitionEngine():
                 child = self._child_for_move(parent, move_uci)
             except RuntimeError:
                 child = None
-            entries.append((move_uci, entry["weight"], self._move_model(parent, move_uci), san, child))
+            entries.append((move_uci, entry["weight"], self._movemodel(parent, move_uci), san, child))
         entries.sort(key=lambda item: (-item[1], item[3], item[0]))
         return entries
 
@@ -1724,7 +1644,7 @@ class RepetitionEngine():
             move_weights = self._get_moves_for_(parent)
             move_entry = move_weights.get(move_uci)
             weight = None if move_entry is None else move_entry["weight"]
-            move_model = None if move_entry is None else self._move_model(parent, move_uci)
+            move_model = None if move_entry is None else self._movemodel(parent, move_uci)
             try:
                 child = self._child_for_move(parent, move_uci)
             except RuntimeError:
@@ -2153,14 +2073,11 @@ class AppController:
         self._review_db_stats_request_id = 0
 
 
-    def _probs_cache_name(self) -> str:
-        return default_repertoire_cache_path(base=os.path.join("cache", "sr_probs"), options=self._session.options)
-
-    def _performance_cache_name(self) -> str:
-        return default_repertoire_cache_path(base=os.path.join("cache", "sr_performance"), options=self._session.options)
+    def _pos_drill_cache_name(self) -> str:
+        return default_repertoire_cache_path(base=os.path.join("cache", "sr_pos_drill"), options=self._session.options)
 
     def _model_cache_name(self) -> str:
-        return default_repertoire_cache_path(base=os.path.join("cache", "sr_models"), options=self._session.options)
+        return default_repertoire_cache_path(base=os.path.join("cache", "sr_models_v2"), options=self._session.options)
 
     def _log_cache_name(self) -> str:
         return default_repertoire_cache_path(base=os.path.join("cache", "log"), options=self._session.options)
@@ -2283,8 +2200,7 @@ class AppController:
                 self._session,
                 self._session.starting_node,
                 self._cfg.start_range,
-                self._probs_cache_name(),
-                self._performance_cache_name(),
+                self._pos_drill_cache_name(),
                 self._model_cache_name(),
                 self._cfg.non_file_move_frequency,
                 self._cfg.local_generation
