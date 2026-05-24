@@ -459,6 +459,12 @@ class RepetitionEngine():
         )
 
     def start_prompt(self, spec_id: SpecId) -> PromptState:
+        if DEBUG_MODE:
+            seed = random.SystemRandom().randint(0, 2**32 - 1)
+            self._rng.seed(seed)
+            # self._rng.seed(1157999786) # paste the latest seed to reproduce behavior
+            sys.stderr.write(f"RNG seed: {seed}\n")
+
         self._reset_prompt_state()
 
         if spec_id == "new":
