@@ -37,7 +37,6 @@ from .memory_model import (
     MemoryModel,
     NaiveMemoryModel,
     PerformanceRecord,
-    memory_model_from_json,
 )
 
 # TODO: add transpotitioning moves to the move list?
@@ -623,7 +622,7 @@ class RepetitionEngine():
             raise TypeError(f"Model payload for position {position_fen!r} must be a dict or null")
 
         moves = {
-            move_uci: memory_model_from_json(model_payload)
+            move_uci: MemoryModel.from_json(model_payload)
             for move_uci, model_payload in raw_moves.items()
         }
         return position_fen, PositionModelData(moves=moves)
@@ -848,11 +847,7 @@ class RepetitionEngine():
 
     def _move_predict_success(self, parent: BoardLike, move_uci: UCI) -> float:
         history = self._performance_history(parent, move_uci)
-        if not history:
-            elapsed_seconds = None
-        else:
-            elapsed_seconds = time.time() - history[-1].attempt_time
-        return self._movemodel(parent, move_uci).predict_success(elapsed_seconds)
+        return self._movemodel(parent, move_uci).predict_success(history)
 
     def _move_wrong_probability(self, parent: BoardLike, move_uci: UCI) -> float:
         return 1.0 - self._move_predict_success(parent, move_uci)
@@ -926,11 +921,7 @@ class RepetitionEngine():
         for (position_fen, move_uci), new_record in records_by_move.items():
             history = self._performance_history(position_fen, move_uci)
             model = self._movemodel(position_fen, move_uci)
-            if history:
-                elapsed_seconds = new_record.attempt_time - history[-1].attempt_time
-            else:
-                elapsed_seconds = None
-            model.update(new_record.success, elapsed_seconds)
+            model.update(new_record.success, history)
             history.append(new_record)
 
     def _prompt_hints_match_current_prompt(self, expected_uci: UCI) -> bool:
@@ -1037,13 +1028,6 @@ class RepetitionEngine():
         Skip the current prompt by auto-playing its expected response, then
         advance once to the next opponent move selection.
         """
-        if self._prompt_state.node is None:
-            raise RuntimeError("Cannot skip a prompt without an active node")
-        if self._prompt_state.off_file:
-            raise RuntimeError("Cannot skip a learned prompt while off-file")
-        if self._prompt_state.node_index is not None:
-            raise RuntimeError("Learned-prompt skipping is only supported for locally generated prompts")
-
         expected_node = self._current_expected_node()
         if expected_node is None:
             self.finish_prompt()
@@ -1475,7 +1459,7 @@ class RepetitionEngine():
         """
         Return the dict UCI -> weights for each move of the board of 'node' present in 'variations'. A weight 
         is the amount of move occurrences in the DB. (TODO: add masters' moves with higher weight)
-        plus one. Plus one ensures 1) we give every move a chance; 2) we won't divide by 0 when normalizing.
+        plus one. ("Plus one" ensures 1) we give every move a chance; 2) we won't divide by 0 when normalizing.)
         """
         if node.turn() == self._session.options.side:
             # TODO: we may want to assign higher weights to file's main line
@@ -1511,13 +1495,15 @@ class RepetitionEngine():
             weights[uci] = float(count)
         return weights
 
-    def boost_search_move(
+    def boost_move_weight(
         self,
         root: Node,
         results: list[dict[str, Any]],
         move_uci: UCI,
         target_position: Any,
     ) -> int:
+        """Make a move more likely to appear in a prompt."""
+        # TODO: revisit this when the move choice model is settled.
         updated = 0
         boosted_positions: set[str] = set()
         for result in results:
@@ -2083,7 +2069,7 @@ class AppController:
         return default_repertoire_cache_path(base=os.path.join("cache", "sr_pos_drill"), options=self._session.options)
 
     def _model_cache_name(self) -> str:
-        return default_repertoire_cache_path(base=os.path.join("cache", "sr_models_v2"), options=self._session.options)
+        return default_repertoire_cache_path(base=os.path.join("cache", "sr_models"), options=self._session.options)
 
     def _log_cache_name(self) -> str:
         return default_repertoire_cache_path(base=os.path.join("cache", "log"), options=self._session.options)

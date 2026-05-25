@@ -774,12 +774,12 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
 
     const parts = [];
     if (Number.isFinite(performance.predictSuccess)) {
-      parts.push(`p=${performance.predictSuccess.toFixed(1)}`);
+      parts.push(`p=${performance.predictSuccess.toFixed(2)}`);
     }
     if (Number.isFinite(performance.a)) {
-      parts.push(`a=${performance.a.toExponential(2)}`);
+      parts.push(`a=${performance.a.toExponential(1)}`);
     }
-    return parts.join(" | ");
+    return parts.join("\n");
   }
 
   const DEBUG_SVG_NS = "http://www.w3.org/2000/svg";
