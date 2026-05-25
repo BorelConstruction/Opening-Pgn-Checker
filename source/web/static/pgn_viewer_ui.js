@@ -17,6 +17,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srGuessGiveUpBtn = document.getElementById("srGuessGiveUp");
   const srGuessFinishBtn = document.getElementById("srGuessFinish");
   const srGuessFinishNewBtn = document.getElementById("srGuessFinishNew");
+  const srGuessSkipBtn = document.getElementById("srGuessSkip");
   const srGuessBlacklistBtn = document.getElementById("srGuessBlacklist");
   const treeContainer = document.getElementById("variation-tree");
   const reviewNextMovesPanel = document.getElementById("reviewNextMovesPanel");
@@ -38,10 +39,12 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const historyTitle = document.getElementById("historyTitle");
   const historyResults = document.getElementById("historyResults");
   const historyCloseBtn = document.getElementById("historyClose");
+  const srToast = document.getElementById("srToast");
 
   const state = {
     active: false,
     mode: "idle", // idle | guess | review
+    currentSpecId: null,
     review: null,
     debugTree: null,
     searchMove: null,
@@ -55,6 +58,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     requestedPath: null,
     queuedPath: null,
   };
+
+  let toastTimer = null;
+  let toastHideTimer = null;
 
   function clonePath(path) {
     return Array.isArray(path) ? [...path] : [];
@@ -318,6 +324,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     const active = !!state.active;
     const isGuess = active && state.mode === "guess";
     const isReview = active && state.mode === "review";
+    const canSkipGuess = isGuess && state.currentSpecId === "new";
     srNewBtn.disabled = !active;
     srHistoryBtn.disabled = !active;
     srHintBtn.disabled = !isGuess;
@@ -327,8 +334,40 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srGuessGiveUpBtn.disabled = !isGuess;
     srGuessFinishBtn.disabled = !isGuess;
     srGuessFinishNewBtn.disabled = !isGuess;
+    srGuessSkipBtn.disabled = !canSkipGuess;
     srGuessBlacklistBtn.disabled = !isGuess;
     refreshAnalyzeLichessLink();
+  }
+
+  function hideSkipToast() {
+    if (toastTimer !== null) {
+      clearTimeout(toastTimer);
+      toastTimer = null;
+    }
+    if (toastHideTimer !== null) {
+      clearTimeout(toastHideTimer);
+      toastHideTimer = null;
+    }
+    srToast.classList.remove("visible");
+    srToast.hidden = true;
+  }
+
+  function showSkipToast() {
+    hideSkipToast();
+    srToast.textContent = "Will be skipping this move from now on";
+    srToast.hidden = false;
+    // Wait one frame before toggling visibility so the CSS transition runs reliably.
+    requestAnimationFrame(() => {
+      srToast.classList.add("visible");
+    });
+    toastTimer = setTimeout(() => {
+      srToast.classList.remove("visible");
+      toastHideTimer = setTimeout(() => {
+        srToast.hidden = true;
+        toastHideTimer = null;
+      }, 220);
+      toastTimer = null;
+    }, 2000);
   }
 
   function closeSearchMoveOverlay() {
@@ -1143,6 +1182,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   function applySrState(sr) {
     state.active = !!sr.active;
     state.mode = sr.mode || "idle";
+    state.currentSpecId = typeof sr.currentSpecId === "string" ? sr.currentSpecId : null;
     state.review = sr.review || null;
     state.debugTree = sr.debugTree || null;
     state.searchMove = sr.searchMove || null;
@@ -1230,6 +1270,11 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   srGuessGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
   srGuessFinishBtn.addEventListener("click", () => send({ type: "sr_finish_prompt" }));
   srGuessFinishNewBtn.addEventListener("click", () => send({ type: "sr_finish_prompt_new" }));
+  srGuessSkipBtn.addEventListener("click", () => {
+    if (srGuessSkipBtn.disabled) return;
+    showSkipToast();
+    send({ type: "sr_skip_move" });
+  });
   srGuessBlacklistBtn.addEventListener("click", () => send({ type: "sr_blacklist_prompt" }));
   srSearchMoveBtn.addEventListener("click", () => {
     state.searchMoveDismissed = false;

@@ -713,6 +713,28 @@ button:disabled,
   white-space: pre-line;
 }
 
+.sr-toast {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-10px);
+  z-index: 50;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.94);
+  border: 1px solid rgba(148, 163, 184, 0.38);
+  color: #f8fafc;
+  box-shadow: 0 10px 30px rgba(2, 6, 23, 0.35);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.sr-toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
 .logpanel .rowhead {
   grid-template-columns: 1fr auto;
   margin-bottom: 8px;

@@ -55,6 +55,7 @@ class MoveEntryData(TypedDict):
 class PositionMoveData(TypedDict):
     moves: dict[UCI, MoveEntryData] | None
     blacklist: list[UCI]
+    leads_to_skip: list[UCI]
 
 
 class PositionModelData(TypedDict):
@@ -174,7 +175,7 @@ class RepetitionEngine():
         self.start_range = start_range
 
         self._pos_drill_data = CacheDict(
-            lambda position_fen: PositionMoveData(moves=None, blacklist=[]),
+            lambda position_fen: PositionMoveData(moves=None, blacklist=[], leads_to_skip=[]),
             item_to_json=self._pos_drill_item_to_json,
             item_from_json=self._pos_drill_item_from_json,
             auto_save=False,
@@ -310,10 +311,13 @@ class RepetitionEngine():
 
         for position_fen, position_data in list(self._pos_drill_data.items()):
             positions_checked += 1
+            current_moves = self._pgn_move_ucis_for_position(position_fen)
+            position_data["leads_to_skip"] = [
+                uci for uci in position_data["leads_to_skip"] if uci in current_moves
+            ]
             move_weights = position_data["moves"]
             if move_weights is None:
                 continue
-            current_moves = self._pgn_move_ucis_for_position(position_fen)
 
             stale_moves = [uci for uci in move_weights if uci not in current_moves]
             for uci in stale_moves:
@@ -532,6 +536,7 @@ class RepetitionEngine():
             "fen": position_fen,
             "moves": serialized_moves,
             "blacklist": list(position_data["blacklist"]),
+            "leads_to_skip": list(position_data["leads_to_skip"]),
         }
 
     def _pos_drill_item_from_json(
@@ -548,15 +553,24 @@ class RepetitionEngine():
             raise KeyError(f"Missing moves payload for position {position_fen!r}")
         raw_pos_drill_data = payload["moves"]
         raw_blacklist = payload.get("blacklist", [])
+        raw_leads_to_skip = payload.get("leads_to_skip", [])
 
         move_probs: dict[UCI, MoveEntryData] = {}
         blacklist: list[UCI] = []
+        leads_to_skip: list[UCI] = []
         for raw_uci in raw_blacklist:
             if raw_uci not in blacklist:
                 blacklist.append(raw_uci)
+        for raw_uci in raw_leads_to_skip:
+            if raw_uci not in leads_to_skip:
+                leads_to_skip.append(raw_uci)
 
         if raw_pos_drill_data is None:
-            return position_fen, PositionMoveData(moves=None, blacklist=blacklist)
+            return position_fen, PositionMoveData(
+                moves=None,
+                blacklist=blacklist,
+                leads_to_skip=leads_to_skip,
+            )
         if not isinstance(raw_pos_drill_data, dict):
             raise TypeError(f"Moves payload for position {position_fen!r} must be a dict or null")
 
@@ -586,7 +600,11 @@ class RepetitionEngine():
             else:
                 raise TypeError(f"Move entry for {uci!r} from position {position_fen!r} must be a dict")
 
-        return position_fen, PositionMoveData(moves=move_probs, blacklist=blacklist)
+        return position_fen, PositionMoveData(
+            moves=move_probs,
+            blacklist=blacklist,
+            leads_to_skip=leads_to_skip,
+        )
 
     def _model_item_to_json(
         self,
@@ -646,6 +664,9 @@ class RepetitionEngine():
     def _blacklist_for(self, position: BoardLike) -> list[UCI]:
         return self._pos_drill_data[fen(position)]["blacklist"]
 
+    def _leads_to_skip_for(self, position: BoardLike) -> list[UCI]:
+        return self._pos_drill_data[fen(position)]["leads_to_skip"]
+
     def _is_learned_prompt_position(self, prompt_node: Node) -> bool:
         if prompt_node.parent is None or prompt_node.move is None:
             return False
@@ -665,11 +686,42 @@ class RepetitionEngine():
         if uci not in blacklist:
             blacklist.append(uci)
 
+    def _mark_move_to_skip(self, parent: Node, uci: UCI) -> None:
+        leads_to_skip = self._leads_to_skip_for(parent)
+        if uci not in leads_to_skip:
+            leads_to_skip.append(uci)
+
+    def _is_move_marked_to_skip(self, position: BoardLike, uci: UCI) -> bool:
+        position_data = self._pos_drill_data.get(fen(position))
+        if position_data is None:
+            return False
+        return uci in position_data["leads_to_skip"]
+
     def blacklist_current_move(self) -> UCI:
         blacklisted_uci = self._prompt_state.node.move.uci()
         self._blacklist_move(self._prompt_state.node.parent, blacklisted_uci)
         self.finish_prompt()
         return blacklisted_uci
+
+    def skip_current_move(self) -> None:
+        if self._spec_id != "new":
+            raise RuntimeError("Skipping moves is only available for new prompts")
+
+        prompt_node = self._prompt_state.node
+        if prompt_node is None or prompt_node.parent is None or prompt_node.move is None:
+            raise RuntimeError("Cannot skip without an active prompt move")
+
+        if self._prompt_state.off_file:
+            self._blacklist_move(prompt_node.parent, prompt_node.move.uci())
+            if not self._has_file_continuation(prompt_node.parent):
+                self.finish_prompt()
+                return
+            self._resume_from_off_file_prompt()
+            self._advance_line()
+            return
+
+        self._mark_move_to_skip(prompt_node.parent, prompt_node.move.uci())
+        self._skip_learned_prompt_positions()
 
     def _remove_temporary_node(self, node: Node) -> None:
         try:
@@ -1013,11 +1065,18 @@ class RepetitionEngine():
         return self._session.q_eval_move(position, move).eval
 
     def _should_skip_current_prompt_position(self, skip_index: int) -> bool:
-        if self._prompt_state.node is None or self._prompt_state.off_file:
+        prompt_node = self._prompt_state.node
+        if prompt_node is None or self._prompt_state.off_file:
+            return False
+        if self._spec_id != "new":
             return False
         if self._current_expected_node() is None:
             return False
-        if not self._is_learned_prompt_position(self._prompt_state.node):
+        if prompt_node.parent is None or prompt_node.move is None:
+            return False
+        if self._is_move_marked_to_skip(prompt_node.parent, prompt_node.move.uci()):
+            return True
+        if not self._is_learned_prompt_position(prompt_node):
             return False
 
         skip_probability = self.LEARNED_MOVE_SKIP_PROBABILITY * (0.5 ** skip_index)
@@ -2167,6 +2226,7 @@ class AppController:
         state = {
             "active": self.active,
             "mode": self._mode,
+            "currentSpecId": self._rep_engine.current_spec_id() if self.active else None,
             "review": self._review_payload if self.active and self._mode == "review" else None,
             "searchMove": self._search_move_payload if self.active and self._mode == "review" else None,
             "debugTree": self._debug_tree_payload(),
@@ -2676,6 +2736,17 @@ class AppController:
             node=prompt.node,
             message=f"Blacklisted {blacklisted_uci}. Browse the tree or click New.",
         )
+
+    def skip_current_move(self) -> None:
+        if self._mode != "guess":
+            return
+
+        self._rep_engine.skip_current_move()
+        if self._rep_engine.is_finished():
+            self._finalize_finished_prompt()
+            self.start_next_prompt()
+            return
+        self.show_prompt()
 
     def _reveal_prompt_in_review(self) -> None:
         if self._mode != "guess":

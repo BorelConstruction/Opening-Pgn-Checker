@@ -64,6 +64,7 @@
             <button id="srGuessGiveUp" type="button" title="Spaced repetition: reveal the line and browse variations">Give Up</button>
             <button id="srGuessFinish" type="button" title="Spaced repetition: reveal the line, browse variations, and mark that no further learning is needed">Finish and Browse</button>
             <button id="srGuessFinishNew" type="button" title="Spaced repetition: mark the line finished and immediately start a new prompt">Finish and Start New</button>
+            <button id="srGuessSkip" type="button" title="Spaced repetition: skip this move from now on and advance">Skip this move</button>
             <button id="srGuessBlacklist" type="button" title="Spaced repetition: reveal the line, browse variations, and blacklist the current move from future prompts">Don't Show This Move</button>
           </div>
           <div id="variation-tree" class="variation-tree"></div>
@@ -124,6 +125,8 @@
         <div id="historyResults" class="history-results"></div>
       </div>
     </div>
+
+    <div id="srToast" class="sr-toast" aria-live="polite" hidden></div>
 
     <script type="module" src="/static/board.js"></script>
   </body>
