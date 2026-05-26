@@ -370,10 +370,11 @@ class PgnSession:
     def init_client(self):
         token = getattr(self.options, "_token", None)
         if token:
-            lichessClient = berserk.Client(session=berserk.TokenSession(token))
+            client = berserk.Client(session=berserk.TokenSession(token))
+            client.opening_explorer._r.base_url = "https://explorer.lichess.org/lichess"
         else:
-            lichessClient = berserk.Client()
-        self.opening_explorer = lichessClient.opening_explorer
+            client = berserk.Client()
+        self.opening_explorer = client.opening_explorer
 
     def variations(self, position: BoardLike, use_TT: bool = False) ->  list[Node]:
         '''Node.variations consistent with our mainline preferences.

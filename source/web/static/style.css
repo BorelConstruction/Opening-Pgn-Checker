@@ -134,6 +134,13 @@ button:disabled,
 .guess-actions {
   display: grid;
   gap: 10px;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+}
+
+.guess-actions-group {
+  display: grid;
+  gap: 10px;
 }
 
 .guess-actions button {
@@ -141,8 +148,18 @@ button:disabled,
   text-align: left;
 }
 
+.guess-actions-secondary {
+  min-width: 240px;
+}
+
 .guess-actions[hidden] {
   display: none;
+}
+
+@media (max-width: 760px) {
+  .guess-actions {
+    grid-template-columns: 1fr;
+  }
 }
 
 .review-db-stats-panel[hidden] {

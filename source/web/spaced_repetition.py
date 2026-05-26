@@ -704,13 +704,8 @@ class RepetitionEngine():
         return blacklisted_uci
 
     def skip_current_move(self) -> None:
-        if self._spec_id != "new":
-            raise RuntimeError("Skipping moves is only available for new prompts")
-
         prompt_node = self._prompt_state.node
-        if prompt_node is None or prompt_node.parent is None or prompt_node.move is None:
-            raise RuntimeError("Cannot skip without an active prompt move")
-
+        
         if self._prompt_state.off_file:
             self._blacklist_move(prompt_node.parent, prompt_node.move.uci())
             if not self._has_file_continuation(prompt_node.parent):
@@ -1068,7 +1063,7 @@ class RepetitionEngine():
         prompt_node = self._prompt_state.node
         if prompt_node is None or self._prompt_state.off_file:
             return False
-        if self._spec_id != "new":
+        if self._spec_id == "history":
             return False
         if self._current_expected_node() is None:
             return False
@@ -2738,6 +2733,12 @@ class AppController:
         )
 
     def skip_current_move(self) -> None:
+        """Skips the current move user has to enter (main line) now and from now on.
+
+        The idea is save the user from having to enter the moves that are too obvious
+        or file-specific (i.e. file has only one of many acceptable move orders).
+        
+        Is disabled in history review. Off-file moves are just blacklisted."""
         if self._mode != "guess":
             return
 

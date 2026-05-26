@@ -61,11 +61,15 @@
 
         <div class="panel tree-panel" id="treePanel">
           <div id="guessActions" class="guess-actions" hidden>
-            <button id="srGuessGiveUp" type="button" title="Spaced repetition: reveal the line and browse variations">Give Up</button>
-            <button id="srGuessFinish" type="button" title="Spaced repetition: reveal the line, browse variations, and mark that no further learning is needed">Finish and Browse</button>
-            <button id="srGuessFinishNew" type="button" title="Spaced repetition: mark the line finished and immediately start a new prompt">Finish and Start New</button>
-            <button id="srGuessSkip" type="button" title="Spaced repetition: skip this move from now on and advance">Skip this move</button>
-            <button id="srGuessBlacklist" type="button" title="Spaced repetition: reveal the line, browse variations, and blacklist the current move from future prompts">Don't Show This Move</button>
+            <div class="guess-actions-group guess-actions-main">
+              <button id="srGuessGiveUp" type="button" title="Spaced repetition: reveal the line and browse variations">Give Up</button>
+              <button id="srGuessFinish" type="button" title="Spaced repetition: reveal the line, browse variations, and mark that no further learning is needed">Finish and Browse</button>
+              <button id="srGuessFinishNew" type="button" title="Spaced repetition: mark the line finished and immediately start a new prompt">Finish and Start New</button>
+            </div>
+            <div class="guess-actions-group guess-actions-secondary">
+              <button id="srGuessSkip" type="button" title="Spaced repetition: skip this move from now on and advance">Skip this move</button>
+              <button id="srGuessBlacklist" type="button" title="Spaced repetition: reveal the line, browse variations, and blacklist the current move from future prompts">Don't Show This Move</button>
+            </div>
           </div>
           <div id="variation-tree" class="variation-tree"></div>
           <div id="reviewNextMovesPanel" class="review-next-moves-panel" hidden>

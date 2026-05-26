@@ -117,13 +117,15 @@ class NaiveMemoryModel(MemoryModel):
     b: float = SECONDS_PER_DAY
     once_remembered: bool = False
 
+    @staticmethod
+    def _latest_success(past_performance: list[PerformanceRecord]) -> PerformanceRecord | None:
+        return next((record for record in reversed(past_performance) if record.success), None)
+
     def predict_success(self, past_performance: list[PerformanceRecord]) -> float:
-        if not self.once_remembered:
-            return self.DEFAULT_SUCCESS_PROBABILITY
-        previous_success = next((record for record in past_performance[::-1] if record.success), None)
-        if not previous_success:
-            # note that should not happen when self.once_remembered, but that's an implicit
-            # assumption, so we guard against this just in case.
+        # Derive remembered state from history so deserialized models still render
+        # the evaluated probability instead of falling back to the default 0.5.
+        previous_success = self._latest_success(past_performance)
+        if previous_success is None:
             return self.DEFAULT_SUCCESS_PROBABILITY
         elapsed_seconds = time.time() - previous_success.attempt_time
         return (self.b/(self.b+elapsed_seconds))
@@ -131,7 +133,7 @@ class NaiveMemoryModel(MemoryModel):
     def update(self, remembered: bool, past_performance: list[PerformanceRecord]) -> None:
         elapsed_seconds = 0
         if remembered:
-            previous_success = next((record for record in past_performance[::-1] if record.success), None)
+            previous_success = self._latest_success(past_performance)
             if previous_success:
                 elapsed_seconds = time.time() - previous_success.attempt_time
             self.once_remembered = True
