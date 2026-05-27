@@ -675,12 +675,6 @@ class RepetitionEngine():
         return self._move_predict_success(parent, move_uci) > self.LEARNED_RIGHT_THRESHOLD
 
 
-    def _is_blacklisted_move(self, position: BoardLike, uci: UCI) -> bool:
-        position_data = self._pos_drill_data.get(fen(position))
-        if position_data is None:
-            return False
-        return uci in position_data["blacklist"]
-
     def _blacklist_move(self, parent: Node, uci: UCI) -> None:
         blacklist = self._blacklist_for(parent)
         if uci not in blacklist:
@@ -767,6 +761,7 @@ class RepetitionEngine():
         off_book_selection = self._select_off_book_move(parent, use_engine=False)
         if off_book_selection.move is None:
             return None, ""
+        self._last_off_book_move = (off_book_selection.move.uci(), fen(parent)) # to avoid repetitions
 
         child = self._add_temporary_node(parent, off_book_selection.move)
         self._prompt_state.off_file = True
@@ -1440,7 +1435,7 @@ class RepetitionEngine():
 
             for line in engine_lines:
                 move = line.move
-                if self._is_blacklisted_move(position, move.uci()):
+                if not self._off_book_move_is_fine(position, move.uci()):
                     continue
 
                 debug_msg = f"engine-suggested off-book move {move}"
@@ -1460,14 +1455,14 @@ class RepetitionEngine():
 
         exclude = set(n.move.uci() for n in self._prompt_variations(position, include_temporary=True))
         # we included temporary nodes to avoid prompting with e.g. same off-file twice in a row
-        exclude.update(self._blacklist_for(position))
+        wont_work = lambda uci: (uci in exclude or not self._off_book_move_is_fine(position, uci))
 
         # Filter candidates: frequency >= 5%, score_rate <= 75%
         candidates: list[tuple[chess.Move, float]] = []
         for uci, weight in move_weights.items():
             position_board = to_board(position)
 
-            if uci in exclude:
+            if wont_work(uci):
                 continue
 
             if self._session.move_freq(position_board, uci) < 0.05:
@@ -1488,6 +1483,15 @@ class RepetitionEngine():
             candidates.append((chess.Move.from_uci(uci), weight))
 
         return candidates
+
+    def _off_book_move_is_fine(self, position: BoardLike, move_uci: UCI) -> bool:
+        """Initial screening for an off-book move."""
+        if move_uci in self._blacklist_for(position):
+            return False
+        if (move_uci, fen(position)) == getattr(self, "_last_off_book_move", None):
+            return False
+        return True
+        
     
     def _get_moves_and_freqs(self, node: Node) -> dict[str, float]:
         """
