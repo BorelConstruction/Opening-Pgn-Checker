@@ -106,11 +106,11 @@ def perf_success_from_attempt_history(
     if MoveCorrectness.INCORRECT in (grade.correctness for grade in attempts.grades):
         return False
     
-    if all(grade.correctness for grade in attempts.grades):
-        if not previous_records:
-            return True
-        last_unsuccess_time = previous_records[-1].attempt_time # note we assume it's sorted
-        return attempts.prompt_time - last_unsuccess_time > DELAY_BEFORE_GUESSED_MEANS_REMEMBERS
+    previous_failures = [record for record in previous_records if not record.success]
+    if not previous_failures:
+        return True
+    last_unsuccess_time = previous_failures[-1].attempt_time # note we assume it's sorted
+    return attempts.prompt_time - last_unsuccess_time > DELAY_BEFORE_GUESSED_MEANS_REMEMBERS
 
 
 @dataclass(frozen=True)
@@ -465,7 +465,7 @@ class RepetitionEngine():
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
             self._rng.seed(seed)
-            # self._rng.seed(1157999786) # paste the latest seed to reproduce behavior
+            self._rng.seed(516543160) # paste the latest seed to reproduce behavior
             sys.stderr.write(f"RNG seed: {seed}\n")
 
         self._reset_prompt_state()
@@ -761,7 +761,6 @@ class RepetitionEngine():
         off_book_selection = self._select_off_book_move(parent, use_engine=False)
         if off_book_selection.move is None:
             return None, ""
-        self._last_off_book_move = (off_book_selection.move.uci(), fen(parent)) # to avoid repetitions
 
         child = self._add_temporary_node(parent, off_book_selection.move)
         self._prompt_state.off_file = True
@@ -1069,7 +1068,7 @@ class RepetitionEngine():
         if not self._is_learned_prompt_position(prompt_node):
             return False
 
-        skip_probability = self.LEARNED_MOVE_SKIP_PROBABILITY * (0.5 ** skip_index)
+        skip_probability = self.LEARNED_MOVE_SKIP_PROBABILITY * (0.4 ** skip_index)
         return self._rng.random() < skip_probability
 
     def _advance_past_current_prompt_position(self) -> None:
@@ -1405,12 +1404,13 @@ class RepetitionEngine():
         *,
         use_engine: bool,
     ) -> OffBookSelection:        
-        db_selection = self._choose_db_off_book_move(position)
-        if db_selection.move is not None or db_selection.blacklist_exhausted:
-            return db_selection
-        if not use_engine:
-            return db_selection
-        return self._choose_engine_off_book_move(position)
+        selection = self._choose_db_off_book_move(position)
+        if selection.move is None:
+            if use_engine:
+                selection = self._choose_engine_off_book_move(position)
+        if selection.move is not None:
+            self._last_off_book_move = (selection.move.uci(), fen(position))
+        return selection
 
     def _choose_db_off_book_move(self, position: BoardLike) -> OffBookSelection:
         candidates = self._off_book_db_candidates(position)

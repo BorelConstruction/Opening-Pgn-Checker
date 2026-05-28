@@ -8,8 +8,8 @@ import time
 from typing import Any, ClassVar, TypeVar
 
 
-SECONDS_PER_DAY = 24.0 * 60.0 * 60.0
-DELAY_BEFORE_GUESSED_MEANS_REMEMBERS = 60.0
+SECONDS_PER_DAY = 86400
+DELAY_BEFORE_GUESSED_MEANS_REMEMBERS = 120.0
 MemoryModelT = TypeVar("MemoryModelT", bound="MemoryModel")
 
 
@@ -115,35 +115,49 @@ class NaiveMemoryModel(MemoryModel):
     MODEL_TYPE: ClassVar[str] = "naive_exponential"
 
     b: float = SECONDS_PER_DAY
-    once_remembered: bool = False
+    remembers: bool = False
 
     @staticmethod
     def _latest_success(past_performance: list[PerformanceRecord]) -> PerformanceRecord | None:
         return next((record for record in reversed(past_performance) if record.success), None)
 
+    @staticmethod
+    def _prob_for_Bernoulli(past_performance: list[PerformanceRecord]) -> float:
+        total_attempts = len(past_performance)
+        successes = sum(1 for record in past_performance if record.success)
+        return successor_rule(successes, total_attempts)
+
     def predict_success(self, past_performance: list[PerformanceRecord]) -> float:
         # Derive remembered state from history so deserialized models still render
-        # the evaluated probability instead of falling back to the default 0.5.
+        # the evaluated probability instead of falling back to an uninformed default.
+        baseline_probability = self._prob_for_Bernoulli(past_performance)
         previous_success = self._latest_success(past_performance)
         if previous_success is None:
-            return self.DEFAULT_SUCCESS_PROBABILITY
+            return baseline_probability
         elapsed_seconds = time.time() - previous_success.attempt_time
-        return (self.b/(self.b+elapsed_seconds))
+        return max(baseline_probability, self.b / (self.b + elapsed_seconds))
 
-    def update(self, remembered: bool, past_performance: list[PerformanceRecord]) -> None:
+    def update(self, success: bool, past_performance: list[PerformanceRecord]) -> None:
         elapsed_seconds = 0
-        if remembered:
+        if success:
             previous_success = self._latest_success(past_performance)
             if previous_success:
                 elapsed_seconds = time.time() - previous_success.attempt_time
-            self.once_remembered = True
+            self.remembers = True
             self.b += elapsed_seconds
             return
         self.b *= self.FAILURE_SCALE
+        if sum(1 for a in past_performance[-3:] if not a.success) > 2:
+            self.b *= SECONDS_PER_DAY
+            self.remembers = False
 
     def to_payload(self) -> dict[str, Any]:
-        return {"b": self.b}
+        return {"b": self.b, "remembers": self.remembers}
 
     @classmethod
     def from_payload(cls: type[MemoryModelT], payload: dict[str, Any]) -> MemoryModelT:
-        return cls(b=float(payload["b"]))
+        return cls(b=float(payload["b"]), remembers=bool(payload["remembers"]))
+
+def successor_rule(successes, total):
+    """Successor rule: P(success) = (successes + 1) / (total + 2)"""
+    return (successes + 1) / (total + 2)
