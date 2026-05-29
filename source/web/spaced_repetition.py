@@ -465,7 +465,7 @@ class RepetitionEngine():
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
             self._rng.seed(seed)
-            self._rng.seed(516543160) # paste the latest seed to reproduce behavior
+            # self._rng.seed(516543160) # paste the latest seed to reproduce behavior
             sys.stderr.write(f"RNG seed: {seed}\n")
 
         self._reset_prompt_state()
@@ -692,9 +692,31 @@ class RepetitionEngine():
         return uci in position_data["leads_to_skip"]
 
     def blacklist_current_move(self) -> UCI:
-        blacklisted_uci = self._prompt_state.node.move.uci()
-        self._blacklist_move(self._prompt_state.node.parent, blacklisted_uci)
-        self.finish_prompt()
+        prompt_node = self._prompt_state.node
+        if prompt_node is None or prompt_node.parent is None or prompt_node.move is None:
+            raise RuntimeError("Cannot blacklist without an active prompt move")
+
+        parent = prompt_node.parent
+        blacklisted_uci = prompt_node.move.uci()
+        should_reset_anchor = prompt_node is self._prompt_state.anchor_node
+
+        if self._is_temporary_node(prompt_node):
+            self._remove_temporary_node(prompt_node)
+
+        self._blacklist_move(parent, blacklisted_uci)
+        self._prompt_state.node = parent
+        self._prompt_state.off_file = False
+        self._prompt_state.prechosen_path = None
+        self._prompt_state.node_index = None
+        self._prompt_state.hints = None
+
+        self._advance_line(announce_correct=False)
+        if not self._is_finished and should_reset_anchor:
+            self._set_prompt_start()
+
+        self._prompt_state.message = (
+            f"Blacklisted {blacklisted_uci}. {self._prompt_state.message}"
+        ).strip()
         return blacklisted_uci
 
     def skip_current_move(self) -> None:
@@ -721,8 +743,6 @@ class RepetitionEngine():
 
     def _resume_from_off_file_prompt(self) -> None:
         temporary_node = self._prompt_state.node
-        if temporary_node is None or temporary_node.parent is None:
-            raise RuntimeError("Off-file prompt has no parent to resume from")
         if not self._prompt_state.off_file:
             raise RuntimeError("Cannot resume when the prompt is not off-file")
 
@@ -1105,7 +1125,7 @@ class RepetitionEngine():
             if self._is_finished or self._prompt_state.off_file:
                 return
 
-    def _advance_line(self) -> None:
+    def _advance_line(self, *, announce_correct: bool = True) -> None:
         """
         Assuming self._prompt_state.node is set for them to move,
         choose a move for them to continue along the line (or off-file) and
@@ -1161,6 +1181,10 @@ class RepetitionEngine():
         if self._is_finished or self._prompt_state.off_file:
             if self._prompt_state.off_file:
                 self._activate_prompt_state()
+            return
+
+        if not announce_correct:
+            self._activate_prompt_state()
             return
 
         message = f"Correct: {node_san(self._prompt_state.node)}. Continue along the line."
@@ -1262,7 +1286,6 @@ class RepetitionEngine():
             node = next_node
 
         # Final step: land on the next file move for the opponent.
-        assert node.turn() != self._session.options.side, f"Prompt selection should end on our turn {line_length}" # TODO: remove this after a while
         next_node, selection_debug = self._choose_move(node, maybe_off_book=False)
         if next_node is False:
             return False
@@ -2728,13 +2751,14 @@ class AppController:
         if self._mode != "guess":
             return
 
-        blacklisted_uci = self._rep_engine.blacklist_current_move()
-        self._finalize_finished_prompt()
-        prompt = self._rep_controller.get_prompt_view()
-        self._enter_review_mode(
-            node=prompt.node,
-            message=f"Blacklisted {blacklisted_uci}. Browse the tree or click New.",
-        )
+        self._rep_engine.blacklist_current_move()
+        if self._rep_engine.is_finished():
+            self._finalize_finished_prompt()
+            prompt = self._rep_controller.get_prompt_view()
+            self._enter_review_mode(node=prompt.node, message=prompt.message)
+            return
+
+        self.show_prompt()
 
     def skip_current_move(self) -> None:
         """Skips the current move user has to enter (main line) now and from now on.
