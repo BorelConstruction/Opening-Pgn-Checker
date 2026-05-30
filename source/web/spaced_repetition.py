@@ -693,8 +693,6 @@ class RepetitionEngine():
 
     def blacklist_current_move(self) -> UCI:
         prompt_node = self._prompt_state.node
-        if prompt_node is None or prompt_node.parent is None or prompt_node.move is None:
-            raise RuntimeError("Cannot blacklist without an active prompt move")
 
         parent = prompt_node.parent
         blacklisted_uci = prompt_node.move.uci()
@@ -710,7 +708,6 @@ class RepetitionEngine():
         self._prompt_state.node_index = None
         self._prompt_state.hints = None
 
-        self._advance_line(announce_correct=False)
         if not self._is_finished and should_reset_anchor:
             self._set_prompt_start()
 
@@ -900,6 +897,12 @@ class RepetitionEngine():
         if position_data["moves"] is None:
             position_data["moves"] = {}
         return position_data["moves"].setdefault(move_uci, self._new_movemodel())
+
+    def _existing_movemodel(self, parent: BoardLike, move_uci: UCI) -> MemoryModel | None:
+        position_data = self._movemodel_data.get(fen(parent))
+        if position_data is None or position_data["moves"] is None:
+            return None
+        return position_data["moves"].get(move_uci)
 
     def _drop_cached_model(self, position_fen: str, move_uci: UCI) -> None:
         model_data = self._movemodel_data[position_fen]
@@ -1125,15 +1128,13 @@ class RepetitionEngine():
             if self._is_finished or self._prompt_state.off_file:
                 return
 
-    def _advance_line(self, *, announce_correct: bool = True) -> None:
+    def _advance_line(self) -> None:
         """
         Assuming self._prompt_state.node is set for them to move,
         choose a move for them to continue along the line (or off-file) and
         update self._prompt_state accordingly.
         If the line cannot be continued, updates the state to "prompt finished".
         """
-        if self._prompt_state.node is None:
-            raise RuntimeError("Cannot advance a prompt without an active node")
         if self._prompt_state.off_file:
             raise RuntimeError("Cannot advance the file line while on an off-file prompt")
 
@@ -1181,10 +1182,6 @@ class RepetitionEngine():
         if self._is_finished or self._prompt_state.off_file:
             if self._prompt_state.off_file:
                 self._activate_prompt_state()
-            return
-
-        if not announce_correct:
-            self._activate_prompt_state()
             return
 
         message = f"Correct: {node_san(self._prompt_state.node)}. Continue along the line."
@@ -1686,8 +1683,8 @@ class RepetitionEngine():
     def _sorted_weighted_moves_for(
         self,
         parent: Node,
-    ) -> list[tuple[UCI, float, MemoryModel, str, Optional[Node]]]:
-        entries: list[tuple[UCI, float, MemoryModel, str, Optional[Node]]] = []
+    ) -> list[tuple[UCI, float, MemoryModel | None, str, Optional[Node]]]:
+        entries: list[tuple[UCI, float, MemoryModel | None, str, Optional[Node]]] = []
         for move_uci, entry in self._get_moves_for_(parent).items():
             try:
                 san = node_san(parent, move_uci)
@@ -1697,7 +1694,7 @@ class RepetitionEngine():
                 child = self._child_for_move(parent, move_uci)
             except RuntimeError:
                 child = None
-            entries.append((move_uci, entry["weight"], self._movemodel(parent, move_uci), san, child))
+            entries.append((move_uci, entry["weight"], self._existing_movemodel(parent, move_uci), san, child))
         entries.sort(key=lambda item: (-item[1], item[3], item[0]))
         return entries
 
@@ -1717,7 +1714,7 @@ class RepetitionEngine():
             move_weights = self._get_moves_for_(parent)
             move_entry = move_weights.get(move_uci)
             weight = None if move_entry is None else move_entry["weight"]
-            move_model = None if move_entry is None else self._movemodel(parent, move_uci)
+            move_model = None if move_entry is None else self._existing_movemodel(parent, move_uci)
             try:
                 child = self._child_for_move(parent, move_uci)
             except RuntimeError:
@@ -1787,8 +1784,10 @@ class RepetitionEngine():
         color = "white" if parent.turn() == chess.WHITE else "black"
         performance = None
         if move_model is not None:
-            performance = move_model.debug_payload()
-            performance["predictSuccess"] = self._move_predict_success(parent, move_uci)
+            history = self._performance_history(parent, move_uci)
+            if history:
+                performance = move_model.debug_payload()
+                performance["predictSuccess"] = move_model.predict_success(history)
         children: list[dict[str, Any]] = []
         if child is not None:
             children = self._build_debug_children(

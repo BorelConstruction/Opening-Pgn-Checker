@@ -22,14 +22,6 @@
         <button id="srHint" title="Spaced repetition: get a hint">Hint</button>
         <button id="srStudyFromHere" title="Spaced repetition: use the current review position as the study start">Study from here</button>
         <button id="srSearchMove" title="Spaced repetition: search occurrences of the last move">Search move</button>
-        <a
-          id="srAnalyzeLichess"
-          class="button-link"
-          href="#"
-          target="_blank"
-          rel="noopener noreferrer"
-          title="Spaced repetition: analyze the current board position on Lichess"
-        >Analyze on Lichess</a>
         <span class="controls-spacer" aria-hidden="true"></span>
         <button
           id="srUpdateWeights"
@@ -47,6 +39,14 @@
           <div class="review-db-stats-panel-head">
             <div class="review-db-stats-title">Database stats</div>
             <div id="reviewDbStatsSummary" class="review-db-stats-summary"></div>
+            <a
+              id="srAnalyzeLichess"
+              class="button-link"
+              href="#"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Spaced repetition: analyze the current board position on Lichess"
+            >Analyze on Lichess</a>
           </div>
           <div id="reviewDbStatsList" class="review-db-stats-list"></div>
         </div>
@@ -62,13 +62,13 @@
         <div class="panel tree-panel" id="treePanel">
           <div id="guessActions" class="guess-actions" hidden>
             <div class="guess-actions-group guess-actions-main">
-              <button id="srGuessGiveUp" type="button" title="Spaced repetition: reveal the line and browse variations">Give Up</button>
-              <button id="srGuessFinish" type="button" title="Spaced repetition: reveal the line, browse variations, and mark that no further learning is needed">Finish and Browse</button>
-              <button id="srGuessFinishNew" type="button" title="Spaced repetition: mark the line finished and immediately start a new prompt">Finish and Start New</button>
+              <button id="srGuessGiveUp" type="button" title="Reveal the line and browse variations">Give Up</button>
+              <button id="srGuessFinish" type="button" title="Reveal the line, browse variations, and mark that no further learning is needed">Finish and Browse</button>
+              <button id="srGuessFinishNew" type="button" title="Mark the line finished and immediately start a new prompt">Finish and Start New</button>
             </div>
             <div class="guess-actions-group guess-actions-secondary">
-              <button id="srGuessSkip" type="button" title="Spaced repetition: skip this move from now on and advance">Skip this move</button>
-              <button id="srGuessBlacklist" type="button" title="Spaced repetition: reveal the line, browse variations, and blacklist the current move from future prompts">Don't Show This Move</button>
+              <button id="srGuessSkip" type="button" title="Skip this move from now on and advance">Skip this move</button>
+              <button id="srGuessBlacklist" type="button" title="Blacklist the current move and continue the prompt">Don't Show This Move</button>
             </div>
           </div>
           <div id="variation-tree" class="variation-tree"></div>
