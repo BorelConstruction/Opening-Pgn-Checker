@@ -19,6 +19,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srGuessFinishNewBtn = document.getElementById("srGuessFinishNew");
   const srGuessSkipBtn = document.getElementById("srGuessSkip");
   const srGuessBlacklistBtn = document.getElementById("srGuessBlacklist");
+  const srGuessBlacklistLineBtn = document.getElementById("srGuessBlacklistLine");
   const treeContainer = document.getElementById("variation-tree");
   const reviewNextMovesPanel = document.getElementById("reviewNextMovesPanel");
   const reviewNextMovesList = document.getElementById("reviewNextMovesList");
@@ -336,6 +337,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srGuessFinishNewBtn.disabled = !isGuess;
     srGuessSkipBtn.disabled = !canSkipGuess;
     srGuessBlacklistBtn.disabled = !isGuess;
+    srGuessBlacklistLineBtn.disabled = !isGuess;
     refreshAnalyzeLichessLink();
   }
 
@@ -1276,6 +1278,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     send({ type: "sr_skip_move" });
   });
   srGuessBlacklistBtn.addEventListener("click", () => send({ type: "sr_blacklist_prompt" }));
+  srGuessBlacklistLineBtn.addEventListener("click", () => send({ type: "sr_blacklist_line_prompt" }));
   srSearchMoveBtn.addEventListener("click", () => {
     state.searchMoveDismissed = false;
     renderSearchMove();

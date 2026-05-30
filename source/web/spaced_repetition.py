@@ -695,6 +695,7 @@ class RepetitionEngine():
         prompt_node = self._prompt_state.node
 
         parent = prompt_node.parent
+
         blacklisted_uci = prompt_node.move.uci()
         should_reset_anchor = prompt_node is self._prompt_state.anchor_node
 
@@ -711,8 +712,23 @@ class RepetitionEngine():
         if not self._is_finished and should_reset_anchor:
             self._set_prompt_start()
 
+        if not self._is_finished:
+            self._advance_line()
+
         self._prompt_state.message = (
             f"Blacklisted {blacklisted_uci}. {self._prompt_state.message}"
+        ).strip()
+        return blacklisted_uci
+
+    def blacklist_current_line(self) -> UCI:
+        prompt_start_node = self._prompt_state.anchor_node
+        if prompt_start_node.parent is None or prompt_start_node.move is None:
+            raise RuntimeError("Cannot blacklist the first move of a root prompt")
+
+        blacklisted_uci = prompt_start_node.move.uci()
+        self._blacklist_move(prompt_start_node.parent, blacklisted_uci)
+        self._prompt_state.message = (
+            f"Blacklisted line starting with {blacklisted_uci}. {self._prompt_state.message}"
         ).strip()
         return blacklisted_uci
 
@@ -2758,6 +2774,15 @@ class AppController:
             return
 
         self.show_prompt()
+
+    def blacklist_current_line(self) -> None:
+        if self._mode != "guess":
+            return
+
+        self._rep_engine.blacklist_current_line()
+        self._rep_engine.finish_prompt()
+        self._finalize_finished_prompt()
+        self._reveal_prompt_in_review()
 
     def skip_current_move(self) -> None:
         """Skips the current move user has to enter (main line) now and from now on.
