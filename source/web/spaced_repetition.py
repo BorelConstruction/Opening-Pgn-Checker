@@ -201,8 +201,6 @@ class RepetitionEngine():
         self._prompt_performance: list[AttemptsForMove] = []
         self._temporary_nodes: list[Node] = []
 
-        self._refresh_prompt_dicts()
-
     def summarize(self) -> Feedback:
         grades = [grade for attempts in self._prompt_performance for grade in attempts.grades]
         if not grades:
@@ -472,7 +470,7 @@ class RepetitionEngine():
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
             self._rng.seed(seed)
-            # self._rng.seed(516543160) # paste the latest seed to reproduce behavior
+            self._rng.seed(1881877048) # paste the latest seed to reproduce behavior
             sys.stderr.write(f"RNG seed: {seed}\n")
 
         self._reset_prompt_state()
@@ -1418,12 +1416,12 @@ class RepetitionEngine():
         """
         off_book = off_book or (maybe_off_book and self._rng.random() < self.non_file_move_freq)
 
-        children = self._prompt_variations(parent)
         if parent.turn() == self._session.options.side:
+            children = self._prompt_variations(parent)
             if not children:
                 return False, ""
             if not self._session.options.check_alternatives: # a tiny optimization
-                return children[0], ""
+                return children[0], ""    
             choice = self._rng_choice(children)
             message = ""
             if DEBUG_MODE:
@@ -1431,14 +1429,8 @@ class RepetitionEngine():
             return choice, message
 
         move_weights = self._get_moves_for_(parent)
-        blacklisted_moves = set(self._blacklist_for(parent))
-        eligible_moves = {
-            uci: entry
-            for uci, entry in move_weights.items()
-            if uci not in blacklisted_moves
-        }
 
-        if not children or not eligible_moves: # TODO: transp
+        if not move_weights:
             # if there are no moves for them, we can try anyway
             off_book = True
             use_engine = True
@@ -1456,12 +1448,10 @@ class RepetitionEngine():
                 return False, off_book_selection.message
             # Fall through to normal logic
 
-        if not eligible_moves:
+        if not move_weights:
             return False, ""
 
-        weights_dict = {}
-        for move_uci, entry in eligible_moves.items():
-            weights_dict[move_uci] = self._expected_damage_of_move(parent, move_uci)
+        weights_dict = {uci: self._expected_damage_of_move(parent, uci) for uci in move_weights}
 
         sys.stderr.write(f"Choosing move... selection_weights: {[(k, round(v, 3)) for k, v in weights_dict.items()]}\n")
         choice = self._rng_choice(weights_dict)
@@ -2759,9 +2749,6 @@ class AppController:
         self._broadcast_ui_state(include_history=False)
 
     def unmark_move(self, mark: str, position_fen: str, move_uci: UCI) -> None:
-        if self._mode != "review":
-            raise RuntimeError("Marked moves can only be changed in review mode")
-
         mark_kind: MarkKind
         if mark == "blacklist":
             mark_kind = "blacklist"
@@ -2776,8 +2763,6 @@ class AppController:
     def show_search_move_more_often(self) -> None:
         if self._search_move_payload is None:
             raise RuntimeError("Search move payload is not initialized")
-        if self._search_move_payload.get("kind", "searchMove") != "searchMove":
-            raise RuntimeError("Only search move results can be boosted")
         if not self._search_move_payload.get("canBoost", False):
             raise RuntimeError("Search move results were already boosted")
 
