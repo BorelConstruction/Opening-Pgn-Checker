@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, Iterable, Optional, TypeVar, TypedDict, Union
+from typing import Any, Iterable, Literal, Optional, TypeVar, TypedDict, Union
 
 import chess
 import chess.pgn
@@ -42,6 +42,7 @@ from .memory_model import (
 # TODO: add transpotitioning moves to the move list?
 
 K = TypeVar("K")
+MarkKind = Literal["blacklist", "skip"]
 
 SEARCH_MOVE_BOOST_FACTOR = 2.0
 SEARCH_MOVE_BOOST_MIN_SIMILARITY = 0.8
@@ -60,6 +61,12 @@ class PositionMoveData(TypedDict):
 
 class PositionModelData(TypedDict):
     moves: dict[UCI, MemoryModel] | None
+
+
+class MarkedMoveData(TypedDict):
+    mark: MarkKind
+    fen: str
+    uci: UCI
 
 
 class MoveCorrectness(Enum):
@@ -685,6 +692,49 @@ class RepetitionEngine():
         if uci not in leads_to_skip:
             leads_to_skip.append(uci)
 
+    def marked_moves(self) -> list[MarkedMoveData]:
+        marked: list[MarkedMoveData] = []
+        for position_fen, position_data in self._pos_drill_data.items():
+            marked.extend(
+                MarkedMoveData(mark="blacklist", fen=position_fen, uci=uci)
+                for uci in position_data["blacklist"]
+            )
+            marked.extend(
+                MarkedMoveData(mark="skip", fen=position_fen, uci=uci)
+                for uci in position_data["leads_to_skip"]
+            )
+        marked.sort(key=lambda item: (item["mark"], item["fen"], item["uci"]))
+        return marked
+
+    def file_nodes_for_marked_move(self, position_fen: str, move_uci: UCI) -> list[Node]:
+        nodes: list[Node] = []
+        for parent in self._tt_nodes_for_position(position_fen):
+            for child in self._non_temporary_children(parent):
+                if child.move is not None and child.move.uci() == move_uci:
+                    nodes.append(child)
+        return nodes
+
+    def unmark_move(self, mark: MarkKind, position_fen: str, move_uci: UCI) -> None:
+        position_data = self._pos_drill_data.get(position_fen)
+        if position_data is None:
+            raise KeyError(f"Unknown marked move position {position_fen!r}")
+
+        if mark == "blacklist":
+            mark_list = position_data["blacklist"]
+        elif mark == "skip":
+            mark_list = position_data["leads_to_skip"]
+        else:
+            raise ValueError(f"Unsupported move mark: {mark!r}")
+
+        try:
+            mark_list.remove(move_uci)
+        except ValueError as exc:
+            raise KeyError(f"Move {move_uci!r} is not marked as {mark!r}") from exc
+
+        if mark == "blacklist":
+            self._refresh_prompt_dicts()
+        self._pos_drill_data.serialize()
+
     def _is_move_marked_to_skip(self, position: BoardLike, uci: UCI) -> bool:
         position_data = self._pos_drill_data.get(fen(position))
         if position_data is None:
@@ -721,6 +771,8 @@ class RepetitionEngine():
         return blacklisted_uci
 
     def blacklist_current_line(self) -> UCI:
+        """Blacklists the first move of the current prompt line.
+        (Note that technically the current position may still appear, but via a different line.)"""
         prompt_start_node = self._prompt_state.anchor_node
         if prompt_start_node.parent is None or prompt_start_node.move is None:
             raise RuntimeError("Cannot blacklist the first move of a root prompt")
@@ -728,7 +780,7 @@ class RepetitionEngine():
         blacklisted_uci = prompt_start_node.move.uci()
         self._blacklist_move(prompt_start_node.parent, blacklisted_uci)
         self._prompt_state.message = (
-            f"Blacklisted line starting with {blacklisted_uci}. {self._prompt_state.message}"
+            f"Blacklisted the line starting with {blacklisted_uci}. {self._prompt_state.message}"
         ).strip()
         return blacklisted_uci
 
@@ -929,8 +981,6 @@ class RepetitionEngine():
         history = self._performance_history(parent, move_uci)
         return self._movemodel(parent, move_uci).predict_success(history)
 
-    def _move_wrong_probability(self, parent: BoardLike, move_uci: UCI) -> float:
-        return 1.0 - self._move_predict_success(parent, move_uci)
 
     def _current_tested_move(self) -> Optional[tuple[Node, UCI]]:
         """Return the opponent move entry that produced the current prompt."""
@@ -1233,7 +1283,8 @@ class RepetitionEngine():
         ]
         scored_prompt_keys = [item for item in scored_prompt_keys if item[1] >= 0.0]
         scored_prompt_keys.sort(key=lambda item: item[1], reverse=True)
-        preferred_prompt_keys = [prompt_key for prompt_key, _ in scored_prompt_keys[:6]]
+        candidate_amount = len(scored_prompt_keys) // 5
+        preferred_prompt_keys = [prompt_key for prompt_key, _ in scored_prompt_keys[:candidate_amount]]
 
         if not preferred_prompt_keys:
             return False
@@ -1334,20 +1385,21 @@ class RepetitionEngine():
         move_probability = 1.0
         expected_damage = 0.0
         for move_uci in prompt_path[anchor_offset:]:
-            try:
-                if node.turn() != self._session.options.side:
-                    move_probability *= self._get_moves_for_(node)[move_uci]["weight"]
-                    expected_damage += self._move_wrong_probability(node, move_uci) * move_probability
-            except KeyError:
-                return -1.0
-            try:
-                node = self._child_for_move(node, move_uci)
-                if node is None:
-                    return -1.0
-            except RuntimeError:
-                return -1.0
+            if node.turn() != self._session.options.side:
+                move_probability *= self._get_moves_for_(node)[move_uci]["weight"]
+                expected_damage += (1-self._move_predict_success(node, move_uci)) * move_probability
+            node = self._child_for_move(node, move_uci)
 
         return expected_damage
+
+    def _expected_damage_of_move(self, position: BoardLike, uci: UCI):
+        """How damaging it is not to know the reply to a move.
+        Intended for determining learning priority.
+        Currently equals (chance to get the move)*(chance to get it wrong).
+        Ideally should also incorporate (damage from getting it wrong)."""
+        move_probability = self._get_moves_for_(position)[uci]["weight"]
+        return (1-self._move_predict_success(position, uci)) * move_probability
+
 
     def _choose_move(
         self,
@@ -1370,6 +1422,8 @@ class RepetitionEngine():
         if parent.turn() == self._session.options.side:
             if not children:
                 return False, ""
+            if not self._session.options.check_alternatives: # a tiny optimization
+                return children[0], ""
             choice = self._rng_choice(children)
             message = ""
             if DEBUG_MODE:
@@ -1407,8 +1461,7 @@ class RepetitionEngine():
 
         weights_dict = {}
         for move_uci, entry in eligible_moves.items():
-            predicted_success = self._move_predict_success(parent, move_uci)
-            weights_dict[move_uci] = (1.0 - predicted_success) * entry["weight"]
+            weights_dict[move_uci] = self._expected_damage_of_move(parent, move_uci)
 
         sys.stderr.write(f"Choosing move... selection_weights: {[(k, round(v, 3)) for k, v in weights_dict.items()]}\n")
         choice = self._rng_choice(weights_dict)
@@ -2548,7 +2601,57 @@ class AppController:
         self._session.traverse(self._session.game, visit=visit)
 
 
-    def search_nodes_by_move(self):
+    def _safe_node_san(self, node: Optional[Node] = None) -> str:
+        if node is None:
+            return ""
+        if DEBUG_MODE:
+            return node_san(node)
+        try:
+            return node_san(node)
+        except Exception:
+            move = getattr(node, "move", None)
+            return move.uci() if move is not None else ""
+
+    def _first_review_child(self, node: Node) -> Optional[Node]:
+        children = [
+            child
+            for child in self._session.variations(node)
+            if child.ply() <= self._session.options.end_ply
+        ]
+        return children[0] if children else None
+
+    def _review_move_result(
+        self,
+        node: Node,
+        *,
+        target_node: Optional[Node] = None,
+        query_prev_uci: Optional[UCI] = None,
+        query_next_uci: Optional[UCI] = None,
+    ) -> dict[str, Any]:
+        path = path_from_root(self._session.game, node, self._session.variations)
+        parent = node.parent
+        prev_uci = parent.move.uci() if parent is not None and parent.move is not None else None
+
+        next_node = self._first_review_child(node)
+        next_uci = next_node.move.uci() if next_node is not None and next_node.move is not None else None
+
+        result: dict[str, Any] = {
+            "path": list(path),
+            "prev": self._safe_node_san(parent),
+            "move": self._safe_node_san(node),
+            "next": self._safe_node_san(next_node),
+        }
+        if query_prev_uci is not None:
+            result["matchPrev"] = bool(prev_uci and prev_uci == query_prev_uci)
+        if query_next_uci is not None:
+            result["matchNext"] = bool(next_uci and next_uci == query_next_uci)
+        if target_node is not None:
+            similarity = compare_positions(target_node.board(), node)
+            result["distance"] = round(similarity.distance, 4)
+            result["similarity"] = round(similarity.similarity, 4)
+        return result
+
+    def search_nodes_by_move(self) -> None:
         """
         Search for nodes with the same move as in the current review position
         and display the results.
@@ -2574,22 +2677,10 @@ class AppController:
             return
         query_move_uci = query_move.uci()
 
-        def safe_san(n: Optional[Node] = None) -> str:
-            if DEBUG_MODE:
-                return node_san(n) if n else ""
-            try:
-                return node_san(n)
-            except Exception:
-                try:
-                    return n.move.uci()
-                except Exception:
-                    return ""
-
         query_parent = query_node.parent
-        query_prev_uci = query_parent.move.uci() if query_parent.move is not None else None
-        query_children = [c for c in self._session.variations(query_node) if c.ply() <= end_ply]
-        query_next = query_children[0] if query_children else None
-        query_next_uci = query_next.move.uci() if query_next else None
+        query_prev_uci = query_parent.move.uci() if query_parent is not None and query_parent.move is not None else None
+        query_next = self._first_review_child(query_node)
+        query_next_uci = query_next.move.uci() if query_next is not None and query_next.move is not None else None
 
         tp = TraversalPolicy(start_ply=1, end_ply=end_ply, get_children=self._session.variations)
         results: list[dict[str, Any]] = []
@@ -2597,50 +2688,96 @@ class AppController:
             if node.move != query_move:
                 continue
 
-            path = path_from_root(root, node, self._session.variations)
-
-            parent = node.parent
-            prev_uci = parent.move.uci() if getattr(parent, "move", None) is not None else None
-
-            children = [c for c in self._session.variations(node) if c.ply() <= end_ply]
-            next_node = children[0] if children else None
-            next_uci = next_node.move.uci() if next_node else None
-            similarity = compare_positions(query_node.board(), node)
-
             results.append(
-                {
-                    "path": list(path),
-                    "prev": safe_san(parent),
-                    "move": safe_san(node),
-                    "next": safe_san(next_node),
-                    "matchPrev": bool(query_prev_uci and prev_uci and prev_uci == query_prev_uci),
-                    "matchNext": bool(query_next_uci and next_uci and next_uci == query_next_uci),
-                    "distance": round(similarity.distance, 4),
-                    "similarity": round(similarity.similarity, 4),
-                }
+                self._review_move_result(
+                    node,
+                    target_node=query_node,
+                    query_prev_uci=query_prev_uci,
+                    query_next_uci=query_next_uci,
+                )
             )
 
         results.sort(
             key=lambda item: (-item["similarity"], item["distance"], item["path"])
         )
 
+        query = self._review_move_result(query_node, target_node=query_node)
+        query["uci"] = query_move_uci
         self._search_move_payload = {
-            "query": {
-                "path": list(review_path),
-                "uci": query_move_uci,
-                "move": safe_san(query_node),
-                "prev": safe_san(query_parent),
-                "next": safe_san(query_next),
-                "distance": 0.0,
-                "similarity": 1.0,
-            },
+            "kind": "searchMove",
+            "query": query,
             "results": results,
             "count": len(results),
             "canBoost": True,
         }
-        self._broadcast_ui_state()
+        self._broadcast_ui_state(include_history=False)
+
+    def _marked_move_results(self) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        seen: set[tuple[MarkKind, str, UCI, tuple[int, ...]]] = set()
+
+        for marked in self._rep_engine.marked_moves():
+            for node in self._rep_engine.file_nodes_for_marked_move(marked["fen"], marked["uci"]):
+                if node.ply() > self._session.options.end_ply:
+                    continue
+                try:
+                    result = self._review_move_result(node)
+                except ValueError:
+                    continue
+
+                path = result.get("path")
+                if not isinstance(path, list) or not all(isinstance(i, int) for i in path):
+                    raise TypeError("Marked move result path must be a list of integers")
+
+                key = (marked["mark"], marked["fen"], marked["uci"], tuple(path))
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                result.update(marked)
+                results.append(result)
+
+        mark_order: dict[MarkKind, int] = {"blacklist": 0, "skip": 1}
+        results.sort(key=lambda item: (mark_order[item["mark"]], item["path"]))
+        return results
+
+    def show_marked_moves(self) -> None:
+        if self._mode != "review":
+            return
+
+        results = self._marked_move_results()
+        self._search_move_payload = {
+            "kind": "markedMoves",
+            "query": {
+                "title": "Marked moves",
+            },
+            "results": results,
+            "count": len(results),
+            "canBoost": False,
+            "emptyMessage": "No skipped or blacklisted moves in the current repertoire.",
+        }
+        self._broadcast_ui_state(include_history=False)
+
+    def unmark_move(self, mark: str, position_fen: str, move_uci: UCI) -> None:
+        if self._mode != "review":
+            raise RuntimeError("Marked moves can only be changed in review mode")
+
+        mark_kind: MarkKind
+        if mark == "blacklist":
+            mark_kind = "blacklist"
+        elif mark == "skip":
+            mark_kind = "skip"
+        else:
+            raise ValueError(f"Unsupported move mark: {mark!r}")
+
+        self._rep_engine.unmark_move(mark_kind, position_fen, move_uci)
+        self.show_marked_moves()
 
     def show_search_move_more_often(self) -> None:
+        if self._search_move_payload is None:
+            raise RuntimeError("Search move payload is not initialized")
+        if self._search_move_payload.get("kind", "searchMove") != "searchMove":
+            raise RuntimeError("Only search move results can be boosted")
         if not self._search_move_payload.get("canBoost", False):
             raise RuntimeError("Search move results were already boosted")
 
@@ -2658,7 +2795,7 @@ class AppController:
         target_node = node_at_path(self._session.game, query_path, self._session.variations)
         self._rep_engine.boost_search_move(self._session.game, results, move_uci, target_node)
         self._search_move_payload["canBoost"] = False
-        self._broadcast_ui_state()
+        self._broadcast_ui_state(include_history=False)
 
     def _format_weight_sync_message(self, summary: WeightSyncSummary) -> str:
         added_label = "move" if summary.moves_added == 1 else "moves"

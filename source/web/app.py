@@ -260,6 +260,30 @@ async def ws(ws: WebSocket) -> None:
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
+            elif msg_type == "sr_marked_moves":
+                try:
+                    sr_controller.show_marked_moves()
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
+            elif msg_type == "sr_unmark_move":
+                mark = msg.get("mark")
+                position_fen = msg.get("fen")
+                uci = msg.get("uci")
+                if mark not in ("blacklist", "skip"):
+                    await ws.send_json({"type": "error", "message": "mark must be blacklist or skip"})
+                    continue
+                if not isinstance(position_fen, str) or not position_fen.strip():
+                    await ws.send_json({"type": "error", "message": "fen must be a non-empty string"})
+                    continue
+                if not isinstance(uci, str) or not uci.strip():
+                    await ws.send_json({"type": "error", "message": "uci must be a non-empty string"})
+                    continue
+                try:
+                    sr_controller.unmark_move(mark, position_fen.strip(), uci.strip())
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
             elif msg_type == "sr_search_move_show_more_often":
                 try:
                     sr_controller.show_search_move_more_often()

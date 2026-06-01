@@ -469,6 +469,26 @@ button:disabled,
   color: var(--text);
 }
 
+.search-mark {
+  flex: 0 0 auto;
+  min-width: 8.5ch;
+  color: var(--accent);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.search-mark.skip {
+  color: #fde68a;
+}
+
+.search-action {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .search-similarity {
   margin-left: auto;
   color: var(--accent);

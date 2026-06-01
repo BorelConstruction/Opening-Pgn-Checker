@@ -9,6 +9,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srHintBtn = document.getElementById("srHint");
   const srStudyFromHereBtn = document.getElementById("srStudyFromHere");
   const srSearchMoveBtn = document.getElementById("srSearchMove");
+  const srMarkedMovesBtn = document.getElementById("srMarkedMoves");
   const srUpdateWeightsBtn = document.getElementById("srUpdateWeights");
   const srAnalyzeLichessLink = document.getElementById("srAnalyzeLichess");
 
@@ -331,6 +332,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srHintBtn.disabled = !isGuess;
     srStudyFromHereBtn.disabled = !isReview;
     srSearchMoveBtn.disabled = !isReview;
+    srMarkedMovesBtn.disabled = !isReview;
     srUpdateWeightsBtn.disabled = !active;
     srGuessGiveUpBtn.disabled = !isGuess;
     srGuessFinishBtn.disabled = !isGuess;
@@ -377,25 +379,47 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     searchMoveOverlay.hidden = true;
   }
 
+  function markedMoveLabel(mark) {
+    if (mark === "blacklist") return "Blacklisted";
+    if (mark === "skip") return "Skipped";
+    return "Marked";
+  }
+
+  function markedMoveActionLabel(mark) {
+    if (mark === "blacklist") return "Unblacklist";
+    if (mark === "skip") return "Stop skipping";
+    return "Remove mark";
+  }
+
   function renderSearchMove() {
     const hasSearch = isReviewMode() && state.searchMove && Array.isArray(state.searchMove.results);
     if (!hasSearch) {
       searchMoveOverlay.hidden = true;
       state.searchMoveDismissed = false;
       searchMoveTitle.textContent = "Search move";
+      searchMoveBoostBtn.hidden = false;
       searchMoveBoostBtn.disabled = true;
       searchMoveResults.innerHTML = "";
       return;
     }
 
+    const kind = typeof state.searchMove.kind === "string" ? state.searchMove.kind : "searchMove";
+    const isMarkedMoves = kind === "markedMoves";
     const results = state.searchMove.results || [];
     const query = state.searchMove.query || {};
     const canBoost = state.searchMove.canBoost !== false;
     const queryMove = typeof query.move === "string" ? query.move : "";
     const count = typeof state.searchMove.count === "number" ? state.searchMove.count : results.length;
 
-    searchMoveTitle.textContent = queryMove ? `Search move: ${queryMove} (${count})` : `Search move (${count})`;
-    searchMoveBoostBtn.disabled = !canBoost;
+    if (isMarkedMoves) {
+      searchMoveTitle.textContent = `Marked moves (${count})`;
+      searchMoveBoostBtn.hidden = true;
+      searchMoveBoostBtn.disabled = true;
+    } else {
+      searchMoveTitle.textContent = queryMove ? `Search move: ${queryMove} (${count})` : `Search move (${count})`;
+      searchMoveBoostBtn.hidden = false;
+      searchMoveBoostBtn.disabled = !canBoost;
+    }
     searchMoveResults.innerHTML = "";
 
     const currentPath = state.review && Array.isArray(state.review.currentPath) ? state.review.currentPath : [];
@@ -403,7 +427,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     if (!results.length) {
       const empty = document.createElement("div");
       empty.className = "search-empty";
-      empty.textContent = "No occurrences found";
+      empty.textContent = typeof state.searchMove.emptyMessage === "string"
+        ? state.searchMove.emptyMessage
+        : "No occurrences found";
       searchMoveResults.appendChild(empty);
       searchMoveOverlay.hidden = state.searchMoveDismissed;
       return;
@@ -420,10 +446,18 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
         queueReviewNavigation(path);
       });
 
-      const startDots = document.createElement("span");
-      startDots.className = "search-ellipsis";
-      startDots.textContent = "…";
-      div.appendChild(startDots);
+      if (isMarkedMoves) {
+        const mark = item.mark === "blacklist" || item.mark === "skip" ? item.mark : "";
+        const markSpan = document.createElement("span");
+        markSpan.className = `search-mark ${mark}`;
+        markSpan.textContent = markedMoveLabel(mark);
+        div.appendChild(markSpan);
+      } else {
+        const startDots = document.createElement("span");
+        startDots.className = "search-ellipsis";
+        startDots.textContent = "…";
+        div.appendChild(startDots);
+      }
 
       const prevSpan = document.createElement("span");
       const prevText = typeof item.prev === "string" && item.prev.trim() ? item.prev : "start";
@@ -442,17 +476,38 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       nextSpan.textContent = nextText;
       div.appendChild(nextSpan);
 
-      const similaritySpan = document.createElement("span");
-      similaritySpan.className = "search-similarity";
-      const similarity = typeof item.similarity === "number" ? item.similarity : 0;
-      const distance = typeof item.distance === "number" ? item.distance : 0;
-      similaritySpan.textContent = `${Math.round(similarity * 100)}% d=${distance.toFixed(2)}`;
-      div.appendChild(similaritySpan);
+      if (isMarkedMoves) {
+        const action = document.createElement("button");
+        action.type = "button";
+        action.className = "search-action";
+        action.textContent = markedMoveActionLabel(item.mark);
+        const canUnmark = item.mark === "blacklist" || item.mark === "skip";
+        action.disabled = !canUnmark || typeof item.fen !== "string" || typeof item.uci !== "string";
+        action.addEventListener("click", (event) => {
+          event.stopPropagation();
+          if (action.disabled) return;
+          action.disabled = true;
+          send({
+            type: "sr_unmark_move",
+            mark: item.mark,
+            fen: item.fen,
+            uci: item.uci,
+          });
+        });
+        div.appendChild(action);
+      } else {
+        const similaritySpan = document.createElement("span");
+        similaritySpan.className = "search-similarity";
+        const similarity = typeof item.similarity === "number" ? item.similarity : 0;
+        const distance = typeof item.distance === "number" ? item.distance : 0;
+        similaritySpan.textContent = `${Math.round(similarity * 100)}% d=${distance.toFixed(2)}`;
+        div.appendChild(similaritySpan);
 
-      const endDots = document.createElement("span");
-      endDots.className = "search-ellipsis";
-      endDots.textContent = "…";
-      div.appendChild(endDots);
+        const endDots = document.createElement("span");
+        endDots.className = "search-ellipsis";
+        endDots.textContent = "…";
+        div.appendChild(endDots);
+      }
 
       searchMoveResults.appendChild(div);
     }
@@ -1283,6 +1338,11 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     state.searchMoveDismissed = false;
     renderSearchMove();
     send({ type: "sr_search_move" });
+  });
+  srMarkedMovesBtn.addEventListener("click", () => {
+    state.searchMoveDismissed = false;
+    renderSearchMove();
+    send({ type: "sr_marked_moves" });
   });
 
   refreshButtons();
