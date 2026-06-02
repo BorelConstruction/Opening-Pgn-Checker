@@ -160,6 +160,30 @@ button:disabled,
   display: none;
 }
 
+.review-tree-options[hidden] {
+  display: none;
+}
+
+.review-tree-options {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 28px;
+}
+
+.review-alt-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+.review-alt-toggle input {
+  accent-color: var(--accent);
+}
+
 @media (max-width: 760px) {
   .guess-actions {
     grid-template-columns: 1fr;

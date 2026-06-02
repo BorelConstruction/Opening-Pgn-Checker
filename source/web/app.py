@@ -266,6 +266,16 @@ async def ws(ws: WebSocket) -> None:
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
+            elif msg_type == "sr_review_show_alternatives":
+                enabled = msg.get("enabled")
+                if not isinstance(enabled, bool):
+                    await ws.send_json({"type": "error", "message": "enabled must be a boolean"})
+                    continue
+                try:
+                    sr_controller.set_review_show_alternatives(enabled)
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
             elif msg_type == "sr_unmark_move":
                 mark = msg.get("mark")
                 position_fen = msg.get("fen")

@@ -21,6 +21,8 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srGuessSkipBtn = document.getElementById("srGuessSkip");
   const srGuessBlacklistBtn = document.getElementById("srGuessBlacklist");
   const srGuessBlacklistLineBtn = document.getElementById("srGuessBlacklistLine");
+  const reviewTreeOptions = document.getElementById("reviewTreeOptions");
+  const srShowAlternativesInput = document.getElementById("srShowAlternatives");
   const treeContainer = document.getElementById("variation-tree");
   const reviewNextMovesPanel = document.getElementById("reviewNextMovesPanel");
   const reviewNextMovesList = document.getElementById("reviewNextMovesList");
@@ -48,6 +50,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     mode: "idle", // idle | guess | review
     currentSpecId: null,
     review: null,
+    reviewShowsAlternatives: false,
     debugTree: null,
     searchMove: null,
     searchMoveDismissed: false,
@@ -340,7 +343,15 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srGuessSkipBtn.disabled = !canSkipGuess;
     srGuessBlacklistBtn.disabled = !isGuess;
     srGuessBlacklistLineBtn.disabled = !isGuess;
+    srShowAlternativesInput.disabled = !isReview;
     refreshAnalyzeLichessLink();
+  }
+
+  function refreshReviewTreeOptions() {
+    const isReview = isReviewMode();
+    reviewTreeOptions.hidden = !isReview;
+    srShowAlternativesInput.checked = !!state.reviewShowsAlternatives;
+    srShowAlternativesInput.disabled = !isReview;
   }
 
   function hideSkipToast() {
@@ -827,6 +838,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       treePanel.classList.remove("review-mode");
       treePanel.style.display = "block";
       guessActions.hidden = false;
+      reviewTreeOptions.hidden = true;
       treeContainer.innerHTML = "";
       clearReviewNextMoves();
       return;
@@ -836,6 +848,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       treePanel.classList.add("review-mode");
       treePanel.style.display = "flex";
       guessActions.hidden = true;
+      refreshReviewTreeOptions();
       treeContainer.innerHTML = "";
       const tree = state.review.tree;
       const globalCurrentPath = Array.isArray(state.review.currentPath) ? state.review.currentPath : [];
@@ -851,6 +864,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     treePanel.classList.remove("review-mode");
     treePanel.style.display = "none";
     guessActions.hidden = true;
+    reviewTreeOptions.hidden = true;
     treeContainer.innerHTML = "";
     clearReviewNextMoves();
   }
@@ -1241,6 +1255,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     state.mode = sr.mode || "idle";
     state.currentSpecId = typeof sr.currentSpecId === "string" ? sr.currentSpecId : null;
     state.review = sr.review || null;
+    state.reviewShowsAlternatives = !!sr.reviewShowsAlternatives;
     state.debugTree = sr.debugTree || null;
     state.searchMove = sr.searchMove || null;
     state.startRange = Number.isInteger(sr.startRange) ? sr.startRange : null;
@@ -1254,6 +1269,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     resetReviewNavigation();
 
     refreshButtons();
+    refreshReviewTreeOptions();
     renderReviewTree();
     renderDebugWeightTree();
     renderReviewComment();
@@ -1280,6 +1296,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     }
 
     refreshButtons();
+    refreshReviewTreeOptions();
     renderReviewTree();
     renderDebugWeightTree();
     renderReviewComment();
@@ -1334,6 +1351,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   });
   srGuessBlacklistBtn.addEventListener("click", () => send({ type: "sr_blacklist_prompt" }));
   srGuessBlacklistLineBtn.addEventListener("click", () => send({ type: "sr_blacklist_line_prompt" }));
+  srShowAlternativesInput.addEventListener("change", () => {
+    send({ type: "sr_review_show_alternatives", enabled: srShowAlternativesInput.checked });
+  });
   srSearchMoveBtn.addEventListener("click", () => {
     state.searchMoveDismissed = false;
     renderSearchMove();

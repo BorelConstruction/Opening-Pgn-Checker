@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, Iterable, Literal, Optional, TypeVar, TypedDict, Union
+from typing import Any, Callable, Iterable, Literal, Optional, TypeVar, TypedDict, Union
 
 import chess
 import chess.pgn
@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 
 from source.core.caching import CacheDict
 from source.core.position_similarity import compare_positions
-from source.core.traversal import TraversalPolicy, iter_nodes
+from source.core.traversal import TraversalPolicy, iter_nodes, mainline_children
 from source.web.board.contracts import Circle
 from source.web.board.session import UCI
 from source.web.scheduler_implem import NaiveScheduler
@@ -117,7 +117,9 @@ def perf_success_from_attempt_history(
     if not previous_failures:
         return True
     last_unsuccess_time = previous_failures[-1].attempt_time # note we assume it's sorted
-    return attempts.prompt_time - last_unsuccess_time > DELAY_BEFORE_GUESSED_MEANS_REMEMBERS
+    if attempts.prompt_time - last_unsuccess_time > DELAY_BEFORE_GUESSED_MEANS_REMEMBERS:
+        return True
+    return None
 
 
 @dataclass(frozen=True)
@@ -197,7 +199,16 @@ class RepetitionEngine():
         )
         self._movemodel_data.load_from_file(model_cache_name)
 
+        # when we fill the TT, we want the whole PGN to be present, as in practice
+        # PGNs sometimes contain relevant parts that techincally start with an "alternative" move
+        # ("for how to play against 10...Re8, see line after 7.0-0")
+        # Later, we use prompt_children as the truth source of relevant children, which avoid querying with alternatives
+        # Ugly but PGNs are used messy ways, I don't see a better design
+        old_check_alernatives = self._session.options.check_alternatives
+        self._session.options.check_alternatives = True
         self._session.fill_the_TT(self._session.game)
+        self._session.options.check_alternatives = old_check_alernatives
+
         self._prompt_performance: list[AttemptsForMove] = []
 
     def summarize(self) -> Feedback:
@@ -488,7 +499,7 @@ class RepetitionEngine():
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
             self._rng.seed(seed)
-            # self._rng.seed(2264128507) # paste the latest seed to reproduce behavior
+            # self._rng.seed(1197964856) # paste the latest seed to reproduce behavior
             sys.stderr.write(f"RNG seed: {seed}\n")
 
         self._reset_prompt_state()
@@ -1083,10 +1094,12 @@ class RepetitionEngine():
             return MoveGrade(MoveCorrectness.CORRECT)
         if not self._session.options.check_alternatives: # TODO: this is currently leaky. We use the knowledge of
             # how expected_uci is constructed. Need some alternative_moves and a design that ensures their accord
-            chosen_alternative_node = next(
-                (c for c in self._session.variations(self._prompt_state.node, use_TT=True) if c.move.uci() == uci),
-                None,
-            )
+            chosen_alternative_node = None
+            for n in self._session.cache[fen(prpt_data.node)].TTed:
+                for c in n.variations:
+                    if c.move.uci() == uci:
+                        chosen_alternative_node = c
+                        break
             if chosen_alternative_node is not None:
                 return MoveGrade(
                     MoveCorrectness.ALTERNATIVE,
@@ -1641,9 +1654,12 @@ class RepetitionEngine():
         results: list[dict[str, Any]],
         move_uci: UCI,
         target_position: Any,
+        *,
+        get_children: Callable[[Node], list[Node]] | None = None,
     ) -> int:
         """Make a move more likely to appear in a prompt."""
         # TODO: revisit this when the move choice model is settled.
+        children_for = get_children or self._session.variations
         updated = 0
         boosted_positions: set[str] = set()
         for result in results:
@@ -1651,7 +1667,7 @@ class RepetitionEngine():
             if not isinstance(path, list) or not all(isinstance(i, int) for i in path):
                 raise TypeError("Search move result path must be a list of integers")
 
-            node = node_at_path(root, path, self._session.variations)
+            node = node_at_path(root, path, children_for)
             if compare_positions(target_position, node).similarity < SEARCH_MOVE_BOOST_MIN_SIMILARITY:
                 continue
 
@@ -2200,13 +2216,58 @@ class AppController:
 
         self._log = PromptLog()
 
+        self._review_payload: Optional[dict[str, Any]] = None
+        self._review_path: Optional[list[int]] = None
         self._review_base_root_path: list[int] = []
         self._review_view_root_path: list[int] = []
+        self._review_show_alternatives = False
         self._search_move_payload: Optional[dict[str, Any]] = None
         self._review_db_stats_lock = threading.Lock()
         self._review_db_stats_pending: Optional[ReviewDbStatsTask] = None
         self._review_db_stats_inflight = False
         self._review_db_stats_request_id = 0
+
+    def _review_children_for(self, show_alternatives: bool, node: Node) -> list[Node]:
+        if show_alternatives:
+            return list(node.variations)
+
+        return mainline_children((self._session.options.side,))(node)
+
+    def _review_children(self, node: Node) -> list[Node]:
+        return self._review_children_for(self._review_show_alternatives, node)
+
+    def _review_node_at_path(
+        self,
+        path: list[int],
+        *,
+        show_alternatives: Optional[bool] = None,
+    ) -> Node:
+        if show_alternatives is None:
+            get_children = self._review_children
+        else:
+            get_children = lambda node: self._review_children_for(show_alternatives, node)
+        return node_at_path(self._session.game, path, get_children)
+
+    def _review_path_from_root(self, node: Node) -> list[int]:
+        return path_from_root(self._session.game, node, self._review_children)
+
+    def _visible_review_node(self, node: Node) -> Node:
+        cur = node
+        while True:
+            try:
+                self._review_path_from_root(cur)
+                return cur
+            except ValueError:
+                parent = getattr(cur, "parent", None)
+                if parent is None:
+                    return self._session.game
+                cur = parent
+
+    def _review_base_path(self) -> list[int]:
+        try:
+            return self._review_path_from_root(self._session.starting_node)
+        except ValueError:
+            return []
 
 
     def _pos_drill_cache_name(self) -> str:
@@ -2218,13 +2279,22 @@ class AppController:
     def _log_cache_name(self) -> str:
         return default_repertoire_cache_path(base=os.path.join("cache", "log"), options=self._session.options)
 
-    def _history_child_for_san(self, node: Node, san: str) -> Optional[tuple[int, Node]]:
-        for variation_index, child in enumerate(self._session.variations(node)):
+    def _history_child_for_san(
+        self,
+        node: Node,
+        san: str,
+        get_children: Callable[[Node], list[Node]],
+    ) -> Optional[tuple[int, Node]]:
+        for variation_index, child in enumerate(get_children(node)):
             if node_san(child) == san:
                 return variation_index, child
         return None
 
-    def _history_moves(self, prompt_id: PromptLineId) -> list[dict[str, Any]]:
+    def _history_moves(
+        self,
+        prompt_id: PromptLineId,
+        get_children: Callable[[Node], list[Node]],
+    ) -> list[dict[str, Any]]:
         board = self._session.game.board()
         node: Optional[Node] = self._session.game
         path: Optional[list[int]] = []
@@ -2236,7 +2306,7 @@ class AppController:
             color = "white" if board.turn == chess.WHITE else "black"
             board.push_san(san)
             if node is not None:
-                child = self._history_child_for_san(node, san)
+                child = self._history_child_for_san(node, san, get_children)
                 if child is None:
                     node = None
                     path = None
@@ -2257,7 +2327,11 @@ class AppController:
 
         return moves
 
-    def _history_moves_payload(self, prompt_id: PromptLineId) -> list[dict[str, Any]]:
+    def _history_moves_payload(
+        self,
+        prompt_id: PromptLineId,
+        get_children: Callable[[Node], list[Node]],
+    ) -> list[dict[str, Any]]:
         return [
             {
                 "san": move["san"],
@@ -2266,21 +2340,26 @@ class AppController:
                 "path": move["path"],
                 "fen": None if move["path"] is not None else move["fen"],
             }
-            for move in self._history_moves(prompt_id)
+            for move in self._history_moves(prompt_id, get_children)
         ]
 
-    def _history_entry_payload(self, entry: PromptLogEntry) -> dict[str, Any]:
+    def _history_entry_payload(
+        self,
+        entry: PromptLogEntry,
+        get_children: Callable[[Node], list[Node]],
+    ) -> dict[str, Any]:
         return {
             "specId": entry.spec_id,
             "promptId": entry.prompt_id.to_json(),
             "promptTime": entry.prompt_time,
             "performance": entry.performance,
-            "moves": self._history_moves_payload(entry.prompt_id),
+            "moves": self._history_moves_payload(entry.prompt_id, get_children),
         }
 
     def _history_payload(self) -> dict[str, Any]:
+        get_children = self._review_children if self._mode == "review" else self._session.variations
         entries = [
-            self._history_entry_payload(entry)
+            self._history_entry_payload(entry, get_children)
             for entry in reversed(self._log.entries)
         ]
         return {
@@ -2298,7 +2377,7 @@ class AppController:
             if self._mode == "review":
                 if self._review_path is None:
                     raise RuntimeError("Review mode requires an active review path")
-                node = node_at_path(self._session.game, list(self._review_path), self._session.variations)
+                node = self._review_node_at_path(list(self._review_path))
                 return self._rep_engine.debug_review_tree_payload(node)
         except Exception as exc:
             return {
@@ -2313,6 +2392,7 @@ class AppController:
             "mode": self._mode,
             "currentSpecId": self._rep_engine.current_spec_id() if self.active else None,
             "review": self._review_payload if self.active and self._mode == "review" else None,
+            "reviewShowsAlternatives": self._review_show_alternatives,
             "searchMove": self._search_move_payload if self.active and self._mode == "review" else None,
             "debugTree": self._debug_tree_payload(),
         }
@@ -2325,6 +2405,7 @@ class AppController:
     def start(self, options: SpacedRepetitionOptions, session: Optional[RepertoireSession] = None) -> None:
         try:
             self._cfg = options
+            self._review_show_alternatives = bool(options.check_alternatives)
             self._session = session or RepertoireSession(
                 options,
                 default_cache_path=lambda: default_repertoire_cache_path(options),
@@ -2624,7 +2705,7 @@ class AppController:
     def _first_review_child(self, node: Node) -> Optional[Node]:
         children = [
             child
-            for child in self._session.variations(node)
+            for child in self._review_children(node)
             if child.ply() <= self._session.options.end_ply
         ]
         return children[0] if children else None
@@ -2637,7 +2718,7 @@ class AppController:
         query_prev_uci: Optional[UCI] = None,
         query_next_uci: Optional[UCI] = None,
     ) -> dict[str, Any]:
-        path = path_from_root(self._session.game, node, self._session.variations)
+        path = self._review_path_from_root(node)
         parent = node.parent
         prev_uci = parent.move.uci() if parent is not None and parent.move is not None else None
 
@@ -2677,7 +2758,7 @@ class AppController:
         end_ply = self._session.options.end_ply
 
         try:
-            query_node = node_at_path(root, list(review_path), self._session.variations)
+            query_node = self._review_node_at_path(list(review_path))
         except Exception:
             return
 
@@ -2691,7 +2772,7 @@ class AppController:
         query_next = self._first_review_child(query_node)
         query_next_uci = query_next.move.uci() if query_next is not None and query_next.move is not None else None
 
-        tp = TraversalPolicy(start_ply=1, end_ply=end_ply, get_children=self._session.variations)
+        tp = TraversalPolicy(start_ply=1, end_ply=end_ply, get_children=self._review_children)
         results: list[dict[str, Any]] = []
         for node in iter_nodes(root, tp):
             if node.move != query_move:
@@ -2796,8 +2877,14 @@ class AppController:
         if not isinstance(results, list):
             raise TypeError("Search move results must be a list")
 
-        target_node = node_at_path(self._session.game, query_path, self._session.variations)
-        self._rep_engine.boost_search_move(self._session.game, results, move_uci, target_node)
+        target_node = self._review_node_at_path(query_path)
+        self._rep_engine.boost_move_weight(
+            self._session.game,
+            results,
+            move_uci,
+            target_node,
+            get_children=self._review_children,
+        )
         self._search_move_payload["canBoost"] = False
         self._broadcast_ui_state(include_history=False)
 
@@ -2839,7 +2926,7 @@ class AppController:
         if self._mode == "review":
             if self._review_path is None:
                 raise RuntimeError("Review mode requires a current review path")
-            node = node_at_path(self._session.game, list(self._review_path), self._session.variations)
+            node = self._review_node_at_path(list(self._review_path))
             self._hub.set_from_node(
                 node,
                 orientation=self.board_orientation,
@@ -2978,8 +3065,7 @@ class AppController:
         if self._review_payload is None:
             raise RuntimeError("Review payload is not initialized")
 
-        root = self._session.game
-        node = node_at_path(root, path, self._session.variations)
+        node = self._review_node_at_path(path)
 
         self._review_path = list(path)
         self._review_payload["currentPath"] = list(path)
@@ -3000,7 +3086,7 @@ class AppController:
         if self._mode != "review":
             raise RuntimeError("Study root can only be changed in review mode")
 
-        node = node_at_path(self._session.game, list(self._review_path), self._session.variations)
+        node = self._review_node_at_path(list(self._review_path))
         position_fen = fen(node)
         save_settings(
             replace(self._cfg, starting_fen=position_fen, start_range=start_range),
@@ -3051,6 +3137,36 @@ class AppController:
             raise ValueError("History navigation requires either a path or a FEN")
         self._show_history_board(position_fen, message)
 
+    def set_review_show_alternatives(self, enabled: bool) -> None:
+        if self._review_show_alternatives == enabled:
+            self._broadcast_ui_state(include_history=False)
+            return
+
+        current_node: Optional[Node] = None
+        if self.active and self._mode == "review":
+            if self._review_path is None:
+                raise RuntimeError("Review mode requires a current review path")
+            current_node = self._review_node_at_path(
+                list(self._review_path),
+                show_alternatives=self._review_show_alternatives,
+            )
+
+        self._review_show_alternatives = enabled
+
+        if current_node is None:
+            self._broadcast_ui_state(include_history=False)
+            return
+
+        review_node = current_node if enabled else self._visible_review_node(current_node)
+        if enabled:
+            message = "Showing alternatives."
+        elif review_node is current_node:
+            message = "Hiding alternatives."
+        else:
+            message = "Hiding alternatives. Moved to the nearest visible position."
+
+        self._enter_review_mode(node=review_node, message=message)
+
     def _enter_review_mode(
         self,
         node: chess.pgn.GameNode,
@@ -3061,8 +3177,15 @@ class AppController:
         self._mode = "review"
         self._search_move_payload = None
         end_ply = self._session.options.end_ply
-        self._review_path = path_from_root(self._session.game, node, self._session.variations)
-        self._review_base_root_path = path_from_root(self._session.game, self._session.starting_node, self._session.variations)
+        try:
+            self._review_path = self._review_path_from_root(node)
+        except ValueError:
+            if self._review_show_alternatives:
+                raise
+            self._review_show_alternatives = True
+            self._review_path = self._review_path_from_root(node)
+
+        self._review_base_root_path = self._review_base_path()
         self._review_view_root_path = list(self._review_base_root_path)
         self._review_view_root_path = self._review_view_root_path_for(self._review_path)
         exported = export_pgn_subtree(
@@ -3070,8 +3193,9 @@ class AppController:
             self._session.game,
             end_ply=end_ply,
             prefer_mainline_path=self._review_path,
+            get_children=self._review_children,
         )
-        tree = build_variation_tree(self._session.variations, self._session.game, end_ply=end_ply)
+        tree = build_variation_tree(self._review_children, self._session.game, end_ply=end_ply)
         self._review_payload = {
             "fen": exported.fen,
             "pgn": exported.pgn,
@@ -3099,10 +3223,3 @@ class AppController:
     def _close_session(self) -> None:
         self._session.close()
         self._session = None
-
-def normalize_freqs(freqs: dict[Any, float]) -> None:
-    total = sum(freqs.values())
-    if total <= 0.0:
-        return
-    for k in freqs:
-        freqs[k] /= total

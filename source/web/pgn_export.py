@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Optional
 
 import chess
 import chess.pgn
@@ -23,12 +23,13 @@ def export_pgn_subtree(
     end_ply: int,
     include_comments: bool = True,
     prefer_mainline_path: list[int] | None = None,
+    get_children: Callable[[chess.pgn.GameNode], list[chess.pgn.GameNode]] | None = None,
 ) -> ExportedPgn:
     """
     Export the PGN subtree rooted at 'root' as a standalone PGN string.
 
     The returned PGN starts from 'root.board()' (returned as 'fen'), and includes
-    all variations selected by 'session.variations(...)'.
+    all variations selected by 'get_children' or 'session.variations(...)'.
     """
 
     start_board = root.board()
@@ -40,6 +41,7 @@ def export_pgn_subtree(
     work_board = start_board.copy(stack=False)
 
     preferred_ply = 0
+    children_for = get_children or session.variations
 
     def copy_children(
         src: chess.pgn.GameNode,
@@ -51,7 +53,14 @@ def export_pgn_subtree(
     ) -> None:
         nonlocal preferred_ply
 
-        children: list[tuple[int, chess.pgn.GameNode]] = list(enumerate(session.variations(src)))
+        if src.ply() >= end_ply:
+            return
+
+        children: list[tuple[int, chess.pgn.GameNode]] = [
+            (idx, child)
+            for idx, child in enumerate(children_for(src))
+            if child.ply() <= end_ply
+        ]
         preferred_idx: int | None = None
         if on_preferred_line and prefer_mainline_path is not None and depth < len(prefer_mainline_path):
             preferred_idx = prefer_mainline_path[depth]
