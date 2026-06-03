@@ -246,7 +246,7 @@ class RepetitionEngine():
 
     def make_prompt_dict(
         self,
-        node: Node,
+        root: Node,
         prompt_length: int,
     ) -> dict[tuple[UCI, ...], float]:
         if self._session.options.check_alternatives:
@@ -258,33 +258,27 @@ class RepetitionEngine():
         def visit(n: Node):
             nonlocal path_from_root
             
-            try:
+            if n is not root:
                 path_from_root.append(n.move.uci())
-                if len(path_from_root) > prompt_length:
-                    return
-                # prompt_dict[tuple(path_from_root)] = prompt_dict[tuple(path_from_root[:-1])]
-            except Exception:
-                pass
-            if n.turn() == self._session.options.side:
+            if len(path_from_root) > prompt_length:
                 return
-            children_uci_weights = self._get_moves_for_(n)
-            for child in self._session.variations(n):
-                if child.move.uci() not in children_uci_weights:
-                    continue
-                path_from_root.append(child.move.uci())
-                path_weight = prompt_dict[tuple(path_from_root[:-2])][0]
-                prompt_dict[tuple(path_from_root)] = (
-                    path_weight * children_uci_weights[child.move.uci()]["weight"],
-                    path_weight * self._expected_damage_of_move(n, child.move.uci()),
-                )
-                path_from_root.pop()
-                
+            
+            if n.turn() == self._session.options.side:
+                children_uci_weights = self._get_moves_for_(n.parent)
+                if n.move.uci() in children_uci_weights:
+                    path_weight = prompt_dict[tuple(path_from_root[:-2])][0]
+                    damage_before = prompt_dict[tuple(path_from_root[:-2])][1]
+                    prompt_dict[tuple(path_from_root)] = (
+                        path_weight * children_uci_weights[n.move.uci()]["weight"],
+                        damage_before + path_weight * self._expected_damage_of_move(n.parent, n.move.uci()),
+                    )
+
         def post(n, p, v):
             nonlocal path_from_root
             if path_from_root:
                 path_from_root.pop()
         
-        self._session.traverse(node, visit=visit, post=post, get_children=self._session.variations)
+        self._session.traverse(root, visit=visit, post=post, get_children=self._session.variations)
         return prompt_dict
 
     def get_hint_circles(self) -> list[Circle]:
@@ -497,7 +491,7 @@ class RepetitionEngine():
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
             self._rng.seed(seed)
-            # self._rng.seed(1518188716) # paste the latest seed to reproduce behavior
+            self._rng.seed(3940997354) # paste the latest seed to reproduce behavior
             sys.stderr.write(f"RNG seed: {seed}\n")
 
         self._reset_prompt_state()
@@ -926,10 +920,9 @@ class RepetitionEngine():
 
         if self._prompt_state.node_index is not None and self._prompt_state.prechosen_path is not None:
             child_index = self._prompt_state.node_index + 1
-            if child_index >= len(self._prompt_state.prechosen_path):
-                return None
-            expected_uci = self._prompt_state.prechosen_path[child_index]
-            return self._child_for_move(self._prompt_state.node, expected_uci)
+            if child_index < len(self._prompt_state.prechosen_path):
+                expected_uci = self._prompt_state.prechosen_path[child_index]
+                return self._child_for_move(self._prompt_state.node, expected_uci)
 
         expected_moves = self._prompt_variations(self._prompt_state.node)
         if not expected_moves:
@@ -1225,8 +1218,6 @@ class RepetitionEngine():
         """
         if self._prompt_state.off_file:
             raise RuntimeError("Cannot advance the file line while on an off-file prompt")
-        if self._prompt_state.node is None:
-            raise RuntimeError("Cannot advance without an active prompt node")
 
         if self._prompt_state.node_index is not None:
             if self._prompt_state.node.turn() != self._session.options.side:
@@ -1289,8 +1280,8 @@ class RepetitionEngine():
     
     def _choose_prompt_globally(self) -> bool:
         # Length from the anchor to the final opponent move, in plies.
-        prpt_len = self._rng.randint(1, self.MAX_GLOBAL_PROMPT_LENGTH)
-        if prpt_len % 2 != 0:
+        prpt_len = self._rng.randint(2, self.MAX_GLOBAL_PROMPT_LENGTH)
+        if prpt_len % 2 == 0:
             prpt_len -= 1
 
         prompt_quality_dict = self.make_prompt_dict(self._root, prpt_len + self.start_range * 2)
@@ -1299,8 +1290,12 @@ class RepetitionEngine():
         # i is offset from root. So root ---i---> anchor ---prpt_len---> prompt end
         for i in range(0, self.start_range * 2, 2):
             for path in all_possible_paths:
+                if i > len(path):
+                    continue
+                total_damage = prompt_quality_dict[path][1]
+                start_damage_cutoff = prompt_quality_dict[path[:i-1]][1] if i > 0 else 0
                 choose_from[(path, i)] = \
-                prompt_quality_dict[path][1] - prompt_quality_dict[path[:i]][1]
+                total_damage - start_damage_cutoff
         possible_keys = [k for k in choose_from.keys() if len(k[0]) - k[1] == prpt_len]
         possible_keys.sort(key=lambda k: choose_from[k], reverse=True)
         candidate_amount = max(1, len(possible_keys) // 3)
@@ -1310,8 +1305,6 @@ class RepetitionEngine():
             return False
 
         chosen_path, offset = self._rng_choice(preferred_prompt_keys)
-        chosen_path = chosen_path[1:]
-        offset = max(offset - 1, 0) # the first move is always root's move
 
         anchor = self._root
         for j in range(offset+1):
