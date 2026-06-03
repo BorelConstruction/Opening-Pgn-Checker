@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, Callable, Iterable, Literal, Optional, TypeVar, TypedDict, Union
+from typing import Any, Callable, Iterable, Literal, Optional, TypeVar, TypedDict, Union, Dict, Tuple
 
 import chess
 import chess.pgn
@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 
 from source.core.caching import CacheDict
 from source.core.position_similarity import compare_positions
-from source.core.traversal import TraversalPolicy, iter_nodes, mainline_children
+from source.core.traversal import TraversalPolicy, iter_nodes, mainline_children, traverse as traverse_nodes
 from source.web.board.contracts import Circle
 from source.web.board.session import UCI
 from source.web.scheduler_implem import NaiveScheduler
@@ -178,10 +178,7 @@ class RepetitionEngine():
 
         self._prompt_state = PromptState(node=None, message="", anchor_node=None)
 
-        # starting point for prompt generation
-        self._root = root
-        # max of how far we move from the root, in MOVES
-        self.start_range = start_range
+        self.set_start(root=root, start_range=start_range)
 
         self._pos_drill_data = CacheDict(
             lambda position_fen: PositionMoveData(moves=None, blacklist=[], leads_to_skip=[]),
@@ -204,10 +201,10 @@ class RepetitionEngine():
         # ("for how to play against 10...Re8, see line after 7.0-0")
         # Later, we use prompt_children as the truth source of relevant children, which avoid querying with alternatives
         # Ugly but PGNs are used messy ways, I don't see a better design
-        old_check_alernatives = self._session.options.check_alternatives
+        old_check_alternatives = self._session.options.check_alternatives
         self._session.options.check_alternatives = True
         self._session.fill_the_TT(self._session.game)
-        self._session.options.check_alternatives = old_check_alernatives
+        self._session.options.check_alternatives = old_check_alternatives
 
         self._prompt_performance: list[AttemptsForMove] = []
 
@@ -247,18 +244,25 @@ class RepetitionEngine():
                 return best_move.uci()
         return None
 
-    def make_prompt_dict_global(self, node: Node | None = None) -> dict[tuple[str], float]:
+    def make_prompt_dict(
+        self,
+        node: Node,
+        prompt_length: int,
+    ) -> dict[tuple[UCI, ...], float]:
         if self._session.options.check_alternatives:
             raise ValueError("Global prompt choice if currently only available for mainline choices.")
 
-        prompt_dict_global = defaultdict(float)
-        prompt_dict_global[()] = 1.0
+        prompt_dict = {}
+        prompt_dict[()] = (1.0, 0.0)
         path_from_root = []
         def visit(n: Node):
             nonlocal path_from_root
+            
             try:
                 path_from_root.append(n.move.uci())
-                prompt_dict_global[tuple(path_from_root)] = prompt_dict_global[tuple(path_from_root[:-1])]
+                if len(path_from_root) > prompt_length:
+                    return
+                # prompt_dict[tuple(path_from_root)] = prompt_dict[tuple(path_from_root[:-1])]
             except Exception:
                 pass
             if n.turn() == self._session.options.side:
@@ -268,31 +272,20 @@ class RepetitionEngine():
                 if child.move.uci() not in children_uci_weights:
                     continue
                 path_from_root.append(child.move.uci())
-                prompt_dict_global[tuple(path_from_root)] = \
-                    prompt_dict_global[tuple(path_from_root[:-2])] * children_uci_weights[child.move.uci()]["weight"]
+                path_weight = prompt_dict[tuple(path_from_root[:-2])][0]
+                prompt_dict[tuple(path_from_root)] = (
+                    path_weight * children_uci_weights[child.move.uci()]["weight"],
+                    path_weight * self._expected_damage_of_move(n, child.move.uci()),
+                )
                 path_from_root.pop()
                 
         def post(n, p, v):
+            nonlocal path_from_root
             if path_from_root:
                 path_from_root.pop()
+        
         self._session.traverse(node, visit=visit, post=post, get_children=self._session.variations)
-        return prompt_dict_global
-
-    def make_prompt_dict_relative(self):
-        root_path = node_moves(self._root, san=False)
-        root_weight = self._prompt_dict_global[tuple(root_path)]
-
-        if root_weight < 10**-6:
-            return self.make_prompt_dict_global(self._root)
-    
-        l = len(root_path)
-        return {k[l:]: v / root_weight for k, v in self._prompt_dict_global.items() 
-                                      if k[:l] == tuple(root_path)}
-
-    def _refresh_prompt_dicts(self) -> None:
-        # TODO: lazy?
-        self._prompt_dict_global = self.make_prompt_dict_global()
-        self._prompt_dict_relative = self.make_prompt_dict_relative()
+        return prompt_dict
 
     def get_hint_circles(self) -> list[Circle]:
         if self._prompt_state.node is None:
@@ -356,7 +349,6 @@ class RepetitionEngine():
 
         self._pos_drill_data.serialize()
         self._movemodel_data.serialize()
-        self._refresh_prompt_dicts()
         return WeightSyncSummary(
             positions_checked=positions_checked,
             moves_added=moves_added,
@@ -389,10 +381,16 @@ class RepetitionEngine():
         return self._get_moves_for_(parent.parent)[parent.move.uci()]["weight"]
 
     def set_start(self, root: Optional[Node] = None, start_range: Optional[int] = None) -> None:
+        """ Set the starting point for prompt generation and
+            the max of how far we move from the root, in MOVES."""
         if root is not None:
-            if root != self._root:
-                self._prompt_dict_relative = None
-            self._root = root
+            if root.turn() == self._session.options.side:
+                try: 
+                    self._root = self._session.variations(root)[0]
+                except IndexError:
+                    raise RuntimeError("Cannot start from a leaf node")
+            else:
+                self._root = root
         if start_range is not None:
             self.start_range = start_range
 
@@ -499,7 +497,7 @@ class RepetitionEngine():
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
             self._rng.seed(seed)
-            # self._rng.seed(1197964856) # paste the latest seed to reproduce behavior
+            # self._rng.seed(1518188716) # paste the latest seed to reproduce behavior
             sys.stderr.write(f"RNG seed: {seed}\n")
 
         self._reset_prompt_state()
@@ -756,8 +754,6 @@ class RepetitionEngine():
         except ValueError as exc:
             raise KeyError(f"Move {move_uci!r} is not marked as {mark!r}") from exc
 
-        if mark == "blacklist":
-            self._refresh_prompt_dicts()
         self._pos_drill_data.serialize()
 
     def _is_move_marked_to_skip(self, position: BoardLike, uci: UCI) -> bool:
@@ -1292,43 +1288,36 @@ class RepetitionEngine():
         return self._rng.randint(0, 2*self.start_range)+1 # converted to plies
     
     def _choose_prompt_globally(self) -> bool:
-        self._prompt_dict_relative = self._prompt_dict_relative or self.make_prompt_dict_relative()
-
-        all_prompts = self._prompt_dict_relative
-        possible_prompt_keys = set()
-
         # Length from the anchor to the final opponent move, in plies.
         prpt_len = self._rng.randint(1, self.MAX_GLOBAL_PROMPT_LENGTH)
-        if prpt_len % 2 == 0:
+        if prpt_len % 2 != 0:
             prpt_len -= 1
-        # make sure we are anchored at our move
-        possible_start_index = int(self._root.turn() == self._session.options.side)
+
+        prompt_quality_dict = self.make_prompt_dict(self._root, prpt_len + self.start_range * 2)
+        choose_from : Dict[Tuple[Tuple[int, ...], int], float] = {}
+        all_possible_paths = list(prompt_quality_dict.keys())
         # i is offset from root. So root ---i---> anchor ---prpt_len---> prompt end
-        for i in range(possible_start_index, self.start_range*2+1, 2):
-            possible_prompt_keys.update([k[:i+prpt_len] for k in all_prompts.keys() if len(k) >= i+prpt_len])
-        scored_prompt_keys = [
-            (prompt_key, self._expected_damage_for_prompt_path(prompt_key, prpt_len))
-            for prompt_key in possible_prompt_keys
-        ]
-        scored_prompt_keys = [item for item in scored_prompt_keys if item[1] >= 0.0]
-        scored_prompt_keys.sort(key=lambda item: item[1], reverse=True)
-        candidate_amount = len(scored_prompt_keys) // 5
-        preferred_prompt_keys = [prompt_key for prompt_key, _ in scored_prompt_keys[:candidate_amount]]
+        for i in range(0, self.start_range * 2, 2):
+            for path in all_possible_paths:
+                choose_from[(path, i)] = \
+                prompt_quality_dict[path][1] - prompt_quality_dict[path[:i]][1]
+        possible_keys = [k for k in choose_from.keys() if len(k[0]) - k[1] == prpt_len]
+        possible_keys.sort(key=lambda k: choose_from[k], reverse=True)
+        candidate_amount = max(1, len(possible_keys) // 3)
+        preferred_prompt_keys = possible_keys[:candidate_amount]
 
         if not preferred_prompt_keys:
             return False
 
-        chosen_path = self._rng_choice(preferred_prompt_keys)
+        chosen_path, offset = self._rng_choice(preferred_prompt_keys)
+        chosen_path = chosen_path[1:]
+        offset = max(offset - 1, 0) # the first move is always root's move
 
-
-        # determine the anchor node and index for the prompt
-        offset = len(chosen_path) - prpt_len
         anchor = self._root
-        for j in range(offset):
+        for j in range(offset+1):
             anchor = self._child_for_move(anchor, chosen_path[j])
             if anchor is None:
                 raise RuntimeError(f"Missing file child for prompt path move {chosen_path[j]!r}")
-        index = offset - 1
         
         # make sure we are anchored at their move
         assert anchor.turn() == self._session.options.side
@@ -1336,7 +1325,7 @@ class RepetitionEngine():
         self._prompt_state.prechosen_path = chosen_path
         self._prompt_state.node = anchor
         self._prompt_state.anchor_node = anchor
-        self._prompt_state.node_index = index
+        self._prompt_state.node_index = offset
         msg = f"Complete prompt: {self._prompt_state.prechosen_path}" if DEBUG_MODE else ""
         self._prompt_state.message = msg
         self._activate_prompt_state()
@@ -1392,34 +1381,6 @@ class RepetitionEngine():
         self._set_prompt_start()
         self._activate_prompt_state()
         return True
-
-    def _expected_damage_for_prompt_path(
-        self,
-        prompt_path: tuple[UCI, ...],
-        prompt_length: int,
-    ) -> float:
-        anchor_offset = len(prompt_path) - prompt_length
-        node = self._root
-        try:
-            for move_uci in prompt_path[:anchor_offset]:
-                node = self._child_for_move(node, move_uci)
-                if node is None:
-                    return -1.0
-        except RuntimeError:
-            return -1.0
-
-        if node.turn() != self._session.options.side:
-            raise RuntimeError("Global prompt anchors must start on the side-to-move position")
-
-        move_probability = 1.0
-        expected_damage = 0.0
-        for move_uci in prompt_path[anchor_offset:]:
-            if node.turn() != self._session.options.side:
-                move_probability *= self._get_moves_for_(node)[move_uci]["weight"]
-                expected_damage += (1-self._move_predict_success(node, move_uci)) * move_probability
-            node = self._child_for_move(node, move_uci)
-
-        return expected_damage
 
     def _expected_damage_of_move(self, position: BoardLike, uci: UCI):
         """How damaging it is not to know the reply to a move.
@@ -1687,7 +1648,6 @@ class RepetitionEngine():
             move_weights[move_uci]["weight"] *= SEARCH_MOVE_BOOST_FACTOR
             updated += 1
 
-        self._refresh_prompt_dicts()
         self._pos_drill_data.serialize()
         return updated
 
