@@ -113,13 +113,7 @@ def perf_success_from_attempt_history(
     if MoveCorrectness.INCORRECT in (grade.correctness for grade in attempts.grades):
         return False
     
-    previous_failures = [record for record in previous_records if not record.success]
-    if not previous_failures:
-        return True
-    last_unsuccess_time = previous_failures[-1].attempt_time # note we assume it's sorted
-    if attempts.prompt_time - last_unsuccess_time > DELAY_BEFORE_GUESSED_MEANS_REMEMBERS:
-        return True
-    return None
+    return True
 
 
 @dataclass(frozen=True)
@@ -278,7 +272,8 @@ class RepetitionEngine():
             if path_from_root:
                 path_from_root.pop()
         
-        self._session.traverse(root, visit=visit, post=post, get_children=self._session.variations)
+        self._session.traverse(root, visit=visit, post=post,
+                               get_children=self._prompt_variations)
         return prompt_dict
 
     def get_hint_circles(self) -> list[Circle]:
@@ -491,7 +486,7 @@ class RepetitionEngine():
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
             self._rng.seed(seed)
-            self._rng.seed(3940997354) # paste the latest seed to reproduce behavior
+            # self._rng.seed(3234157211) # paste the latest seed to reproduce behavior
             sys.stderr.write(f"RNG seed: {seed}\n")
 
         self._reset_prompt_state()
@@ -930,6 +925,7 @@ class RepetitionEngine():
         return expected_moves[0]
 
     def _prompt_variations(self, position: BoardLike) -> list[Node]:
+        """The source of truth for the next moves to choose from."""
         if position.turn() == self._session.options.side:
             return self._session.variations(position, use_TT=False)
         # ^ we imagine that for us we don't want TT continuations
@@ -938,7 +934,8 @@ class RepetitionEngine():
         # on a move that happends elsewhere in the file.
 
         # Opponent move selection can still use TT
-        return self._session.variations(position, use_TT=True)
+        return [n for n in self._session.variations(position, use_TT=True)
+                if n.move.uci() not in self._blacklist_for(position)]
 
     def _move_entry_by_key(self, position_fen: str, move_uci: UCI) -> MoveEntryData:
         moves = self._pos_drill_data[position_fen]["moves"]

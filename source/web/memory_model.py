@@ -9,7 +9,8 @@ from typing import Any, ClassVar, TypeVar
 
 
 SECONDS_PER_DAY = 86400
-DELAY_BEFORE_GUESSED_MEANS_REMEMBERS = 120.0
+DELAY_BEFORE_GUESSED_MEANS_REMEMBERS = 120.0  # after how many seconds a correct recall should be considered
+# "remembering" rather than short-term recall/mechanical repetition
 MemoryModelT = TypeVar("MemoryModelT", bound="MemoryModel")
 
 
@@ -112,6 +113,7 @@ class NaiveMemoryModel(MemoryModel):
 
     FAILURE_SCALE = 0.5
     DEFAULT_SUCCESS_PROBABILITY = 0.5
+    SHORT_TERM_MEMORY_RECALL_PROB = 0.99
     MODEL_TYPE: ClassVar[str] = "naive_exponential"
 
     b: float = SECONDS_PER_DAY
@@ -126,11 +128,25 @@ class NaiveMemoryModel(MemoryModel):
         total_attempts = len(past_performance)
         successes = sum(1 for record in past_performance if record.success)
         return successor_rule(successes, total_attempts)
+    
+    def in_short_term_memory(self, past_performance: list[PerformanceRecord]) -> bool:
+        """Returns True if the model predicts that the item is still in short-term memory."""
+        if not past_performance:
+            return False
+        latest_attempt = past_performance[-1]
+        if not latest_attempt.success:
+            return False
+        elapsed_seconds = time.time() - latest_attempt.attempt_time
+        return elapsed_seconds < DELAY_BEFORE_GUESSED_MEANS_REMEMBERS
 
     def predict_success(self, past_performance: list[PerformanceRecord]) -> float:
+        if self.in_short_term_memory(past_performance):
+            return self.SHORT_TERM_MEMORY_RECALL_PROB
+        
         # Derive remembered state from history so deserialized models still render
         # the evaluated probability instead of falling back to an uninformed default.
         baseline_probability = self._prob_for_Bernoulli(past_performance)
+
         previous_success = self._latest_success(past_performance)
         if previous_success is None:
             return baseline_probability
@@ -138,8 +154,13 @@ class NaiveMemoryModel(MemoryModel):
         return max(baseline_probability, self.b / (self.b + elapsed_seconds))
 
     def update(self, success: bool, past_performance: list[PerformanceRecord]) -> None:
+        # "remembered" -- successful recall that is not just short-term memory.
+        # got weong 3 times in a row -> forgot, reset
         elapsed_seconds = 0
         if success:
+            if self.in_short_term_memory(past_performance):
+                return
+
             previous_success = self._latest_success(past_performance)
             if previous_success:
                 elapsed_seconds = time.time() - previous_success.attempt_time
@@ -148,7 +169,7 @@ class NaiveMemoryModel(MemoryModel):
             return
         self.b *= self.FAILURE_SCALE
         if sum(1 for a in past_performance[-3:] if not a.success) > 2:
-            self.b *= SECONDS_PER_DAY
+            self.b = SECONDS_PER_DAY
             self.remembers = False
 
     def to_payload(self) -> dict[str, Any]:
