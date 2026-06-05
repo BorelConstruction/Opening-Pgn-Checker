@@ -258,12 +258,12 @@ class RepetitionEngine():
                 return
             
             if n.turn() == self._session.options.side:
-                children_uci_weights = self._get_moves_for_(n.parent)
+                children_uci_weights = {n.move.uci() for n in self._prompt_variations(n.parent)}
                 if n.move.uci() in children_uci_weights:
                     path_weight = prompt_dict[tuple(path_from_root[:-2])][0]
                     damage_before = prompt_dict[tuple(path_from_root[:-2])][1]
                     prompt_dict[tuple(path_from_root)] = (
-                        path_weight * children_uci_weights[n.move.uci()]["weight"],
+                        path_weight * self._session.move_freq(n.parent, n.move.uci()),
                         damage_before + path_weight * self._expected_damage_of_move(n.parent, n.move.uci()),
                     )
 
@@ -1377,7 +1377,7 @@ class RepetitionEngine():
         Intended for determining learning priority.
         Currently equals (chance to get the move)*(chance to get it wrong).
         Ideally should also incorporate (damage from getting it wrong)."""
-        move_probability = self._get_moves_for_(position)[uci]["weight"]
+        move_probability = self._session.move_freq(position, uci)
         return (1-self._move_predict_success(position, uci)) * move_probability
 
 
