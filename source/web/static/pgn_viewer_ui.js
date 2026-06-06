@@ -864,22 +864,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     debugWeightTree.innerHTML = "";
   }
 
-  function formatDebugMetric(label, value) {
-    if (!Number.isFinite(value)) return `${label}=n/a`;
-    return `${label}=${value.toFixed(3)}`;
-  }
-
-  function formatDebugPerformance(performance) {
-    if (!performance || typeof performance !== "object") return "";
-
-    const parts = [];
-    if (Number.isFinite(performance.predictSuccess)) {
-      parts.push(`p=${performance.predictSuccess.toFixed(2)}`);
-    }
-    if (Number.isFinite(performance.a)) {
-      parts.push(`a=${performance.a.toExponential(1)}`);
-    }
-    return parts.join("\n");
+  function formatDebugMetric(value) {
+    if (!Number.isFinite(value)) return "n/a";
+    return value.toFixed(2);
   }
 
   const DEBUG_SVG_NS = "http://www.w3.org/2000/svg";
@@ -930,8 +917,10 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     if (node.isAnchor) parts.push("anchor");
     if (node.isCurrent) parts.push("current");
     if (node.onPromptPath) parts.push("prompt path");
-    const performanceLabel = formatDebugPerformance(node.performance);
-    if (performanceLabel) parts.push(performanceLabel);
+    if (node.showPriorityLabels) {
+      parts.push(formatDebugMetric(node.moveFreq));
+      parts.push(formatDebugMetric(node.recallProbability));
+    }
     return parts.join(" | ");
   }
 
@@ -943,9 +932,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
 
   function debugEdgeLabelMetrics(node) {
     const lines = [];
-    const performanceLabel = formatDebugPerformance(node.performance);
-    if (performanceLabel) {
-      lines.push(performanceLabel);
+    if (node.showPriorityLabels) {
+      lines.push(formatDebugMetric(node.moveFreq));
+      lines.push(formatDebugMetric(node.recallProbability));
     }
 
     if (!lines.length) {

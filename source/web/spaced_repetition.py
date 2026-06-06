@@ -408,8 +408,8 @@ class RepetitionEngine():
     def start_prompt(self, spec_id: SpecId) -> PromptState:
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
+            # seed = 1877424735 # paste the latest seed to reproduce behavior
             self._rng.seed(seed)
-            # self._rng.seed(3234157211) # paste the latest seed to reproduce behavior
             sys.stderr.write(f"RNG seed: {seed}\n")
 
         self._reset_prompt_state()
@@ -1042,7 +1042,7 @@ class RepetitionEngine():
     def _advance_past_current_prompt_position(self) -> None:
         """
         Skip the current prompt by auto-playing its expected response, then
-        advance once to the next opponent move selection.
+        advance along the normal line-selection path.
         """
         expected_node = self._current_expected_node()
         if expected_node is None:
@@ -1050,16 +1050,10 @@ class RepetitionEngine():
             return
 
         self._prompt_state.node = expected_node
+        if self._prompt_state.node_index is not None:
+            self._prompt_state.node_index += 1
 
-        next_node, selection_debug = self._choose_move(self._prompt_state.node, maybe_off_book=True)
-        if next_node is False:
-            self._prompt_state.message = selection_debug
-            self.finish_prompt()
-            return
-
-        self._prompt_state.node = next_node
-        self._prompt_state.message = selection_debug
-        self._activate_prompt_state()
+        self._advance_line()
 
     def _skip_learned_prompt_positions(self) -> None:
         """
@@ -1112,7 +1106,7 @@ class RepetitionEngine():
                 self._prompt_state.node_index = None
 
         parent = self._prompt_state.node
-        next_node, selection_debug = self._choose_move(parent, maybe_off_book=True)
+        next_node, selection_debug = self._choose_move_randomly(parent, maybe_off_book=True)
 
         if next_node is False:
             self._prompt_state.message = selection_debug
@@ -1185,6 +1179,10 @@ class RepetitionEngine():
         self._prompt_state.node_index = offset
         msg = f"Complete prompt: {self._prompt_state.prechosen_path}" if DEBUG_MODE else ""
         self._prompt_state.message = msg
+        self._skip_learned_prompt_positions()
+        if self._is_finished:
+            return False
+        self._set_prompt_start()
         self._activate_prompt_state()
         return True
 
@@ -1210,7 +1208,7 @@ class RepetitionEngine():
 
         # we'll do line_length or line_length-1 steps total
         for step in range(line_length - 2):
-            next_node, _ = self._choose_move(node, maybe_off_book=False)
+            next_node, _ = self._choose_move_randomly(node, maybe_off_book=False)
             if next_node is False:
                 return False
             node = next_node
@@ -1219,13 +1217,13 @@ class RepetitionEngine():
 
 
         if node.turn() == self._session.options.side:
-            next_node, _ = self._choose_move(node, maybe_off_book=False)
+            next_node, _ = self._choose_move_randomly(node, maybe_off_book=False)
             if next_node is False:
                 return False
             node = next_node
 
         # Final step: land on the next file move for the opponent.
-        next_node, selection_debug = self._choose_move(node, maybe_off_book=False)
+        next_node, selection_debug = self._choose_move_randomly(node, maybe_off_book=False)
         if next_node is False:
             return False
         
@@ -1247,8 +1245,7 @@ class RepetitionEngine():
         move_probability = self._session.move_freq(position, uci)
         return (1-self._move_predict_success(position, uci)) * move_probability
 
-
-    def _choose_move(
+    def _choose_move_randomly(
         self,
         parent: Node,
         *,
@@ -1501,8 +1498,8 @@ class RepetitionEngine():
             return None, None, 1.0
 
         move_freq = self._session.move_freq(parent, move_uci)
-        forget_probability = 1.0 - self._move_predict_success(parent, move_uci)
-        return move_freq, forget_probability, move_freq * forget_probability
+        recall_probability = self._move_predict_success(parent, move_uci)
+        return move_freq, recall_probability, move_freq * (1.0 - recall_probability)
 
     def _sorted_debug_moves_for(
         self,
@@ -1511,7 +1508,7 @@ class RepetitionEngine():
         entries: list[tuple[UCI, Optional[float], Optional[float], float, MemoryModel | None, str, Optional[Node]]] = []
         for child_node in self._prompt_variations(parent):
             move_uci = child_node.move.uci()
-            move_freq, forget_probability, selection_priority = self._debug_move_selection_metrics(parent, move_uci)
+            move_freq, recall_probability, selection_priority = self._debug_move_selection_metrics(parent, move_uci)
             try:
                 san = node_san(parent, move_uci)
             except Exception:
@@ -1523,7 +1520,7 @@ class RepetitionEngine():
             entries.append((
                 move_uci,
                 move_freq,
-                forget_probability,
+                recall_probability,
                 selection_priority,
                 self._existing_movemodel(parent, move_uci),
                 san,
@@ -1531,8 +1528,8 @@ class RepetitionEngine():
             ))
         entries.sort(key=lambda item: (-item[3], item[5], item[0]))
         return [
-            (move_uci, move_freq, forget_probability, move_model, san, child)
-            for move_uci, move_freq, forget_probability, _priority, move_model, san, child in entries
+            (move_uci, move_freq, recall_probability, move_model, san, child)
+            for move_uci, move_freq, recall_probability, _priority, move_model, san, child in entries
         ]
 
     def _build_debug_children(
@@ -1548,7 +1545,7 @@ class RepetitionEngine():
     ) -> list[dict[str, Any]]:
         if remaining_prefix:
             move_uci = remaining_prefix[0]
-            move_freq, forget_probability, _selection_priority = self._debug_move_selection_metrics(parent, move_uci)
+            move_freq, recall_probability, _selection_priority = self._debug_move_selection_metrics(parent, move_uci)
             move_model = self._existing_movemodel(parent, move_uci)
             try:
                 child = self._child_for_move(parent, move_uci)
@@ -1563,7 +1560,7 @@ class RepetitionEngine():
                     parent,
                     move_uci,
                     move_freq,
-                    forget_probability,
+                    recall_probability,
                     move_model,
                     san,
                     child,
@@ -1580,13 +1577,13 @@ class RepetitionEngine():
             return []
 
         children: list[dict[str, Any]] = []
-        for move_uci, move_freq, forget_probability, move_model, san, child in self._sorted_debug_moves_for(parent):
+        for move_uci, move_freq, recall_probability, move_model, san, child in self._sorted_debug_moves_for(parent):
             children.append(
                 self._build_debug_move_node(
                     parent,
                     move_uci,
                     move_freq,
-                    forget_probability,
+                    recall_probability,
                     move_model,
                     san,
                     child,
@@ -1605,7 +1602,7 @@ class RepetitionEngine():
         parent: Node,
         move_uci: UCI,
         move_freq: Optional[float],
-        forget_probability: Optional[float],
+        recall_probability: Optional[float],
         move_model: Optional[MemoryModel],
         san: str,
         child: Optional[Node],
@@ -1647,7 +1644,7 @@ class RepetitionEngine():
             "san": san,
             "uci": move_uci,
             "moveFreq": move_freq,
-            "forgetProbability": forget_probability,
+            "recallProbability": recall_probability,
             "showPriorityLabels": parent.turn() != self._session.options.side,
             "performance": performance,
             "children": children,

@@ -99,7 +99,7 @@ class RepertoireOptions(CoreOptions):
         metadata={
             "label": "End on Move",
             "min": 2,
-            "max": 80,
+            "max": 200,
             "ui_group": "analysis_move_range",
             "ui_group_order": 2,
         },
