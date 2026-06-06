@@ -10,7 +10,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srStudyFromHereBtn = document.getElementById("srStudyFromHere");
   const srSearchMoveBtn = document.getElementById("srSearchMove");
   const srMarkedMovesBtn = document.getElementById("srMarkedMoves");
-  const srUpdateWeightsBtn = document.getElementById("srUpdateWeights");
   const srAnalyzeLichessLink = document.getElementById("srAnalyzeLichess");
 
   const treePanel = document.getElementById("treePanel");
@@ -34,7 +33,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const searchMoveOverlay = document.getElementById("searchMoveOverlay");
   const searchMovePanel = document.getElementById("searchMovePanel");
   const searchMoveTitle = document.getElementById("searchMoveTitle");
-  const searchMoveBoostBtn = document.getElementById("searchMoveBoost");
   const searchMoveResults = document.getElementById("searchMoveResults");
   const searchMoveCloseBtn = document.getElementById("searchMoveClose");
 
@@ -336,7 +334,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srStudyFromHereBtn.disabled = !isReview;
     srSearchMoveBtn.disabled = !isReview;
     srMarkedMovesBtn.disabled = !isReview;
-    srUpdateWeightsBtn.disabled = !active;
     srGuessGiveUpBtn.disabled = !isGuess;
     srGuessFinishBtn.disabled = !isGuess;
     srGuessFinishNewBtn.disabled = !isGuess;
@@ -408,8 +405,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       searchMoveOverlay.hidden = true;
       state.searchMoveDismissed = false;
       searchMoveTitle.textContent = "Search move";
-      searchMoveBoostBtn.hidden = false;
-      searchMoveBoostBtn.disabled = true;
       searchMoveResults.innerHTML = "";
       return;
     }
@@ -418,18 +413,13 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     const isMarkedMoves = kind === "markedMoves";
     const results = state.searchMove.results || [];
     const query = state.searchMove.query || {};
-    const canBoost = state.searchMove.canBoost !== false;
     const queryMove = typeof query.move === "string" ? query.move : "";
     const count = typeof state.searchMove.count === "number" ? state.searchMove.count : results.length;
 
     if (isMarkedMoves) {
       searchMoveTitle.textContent = `Marked moves (${count})`;
-      searchMoveBoostBtn.hidden = true;
-      searchMoveBoostBtn.disabled = true;
     } else {
       searchMoveTitle.textContent = queryMove ? `Search move: ${queryMove} (${count})` : `Search move (${count})`;
-      searchMoveBoostBtn.hidden = false;
-      searchMoveBoostBtn.disabled = !canBoost;
     }
     searchMoveResults.innerHTML = "";
 
@@ -874,9 +864,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     debugWeightTree.innerHTML = "";
   }
 
-  function formatDebugWeight(value) {
-    if (!Number.isFinite(value)) return "w=n/a";
-    return `${value.toFixed(3)}`;
+  function formatDebugMetric(label, value) {
+    if (!Number.isFinite(value)) return `${label}=n/a`;
+    return `${label}=${value.toFixed(3)}`;
   }
 
   function formatDebugPerformance(performance) {
@@ -953,9 +943,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
 
   function debugEdgeLabelMetrics(node) {
     const lines = [];
-    if (node.showWeightLabel) {
-      lines.push(formatDebugWeight(node.weight));
-    }
     const performanceLabel = formatDebugPerformance(node.performance);
     if (performanceLabel) {
       lines.push(performanceLabel);
@@ -1174,7 +1161,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     }
 
     debugWeightPanel.hidden = false;
-    const debugTitle = typeof debug.title === "string" && debug.title ? debug.title : "Weight / performance visualizer";
+    const debugTitle = typeof debug.title === "string" && debug.title ? debug.title : "Selection / performance visualizer";
     debugWeightTree.innerHTML = "";
 
     if (typeof debug.error === "string" && debug.error) {
@@ -1319,11 +1306,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   });
   searchMoveOverlay.addEventListener("click", closeSearchMoveOverlay);
   searchMovePanel.addEventListener("click", (event) => event.stopPropagation());
-  searchMoveBoostBtn.addEventListener("click", () => {
-    if (searchMoveBoostBtn.disabled) return;
-    searchMoveBoostBtn.disabled = true;
-    send({ type: "sr_search_move_show_more_often" });
-  });
   searchMoveCloseBtn.addEventListener("click", closeSearchMoveOverlay);
   historyOverlay.addEventListener("click", closeHistoryOverlay);
   historyPanel.addEventListener("click", (event) => event.stopPropagation());
@@ -1340,7 +1322,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     if (startRange === null) return;
     send({ type: "sr_study_from_here", start_range: startRange });
   });
-  srUpdateWeightsBtn.addEventListener("click", () => send({ type: "sr_update_weights" }));
   srGuessGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
   srGuessFinishBtn.addEventListener("click", () => send({ type: "sr_finish_prompt" }));
   srGuessFinishNewBtn.addEventListener("click", () => send({ type: "sr_finish_prompt_new" }));

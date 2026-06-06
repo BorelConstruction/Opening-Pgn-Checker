@@ -232,12 +232,6 @@ async def ws(ws: WebSocket) -> None:
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
-            elif msg_type == "sr_update_weights":
-                try:
-                    sr_controller.update_weights()
-                except Exception as exc:
-                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
-
             elif msg_type == "sr_hint":
                 try:
                     sr_controller.provide_hint()
@@ -291,12 +285,6 @@ async def ws(ws: WebSocket) -> None:
                     continue
                 try:
                     sr_controller.unmark_move(mark, position_fen.strip(), uci.strip())
-                except Exception as exc:
-                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
-
-            elif msg_type == "sr_search_move_show_more_often":
-                try:
-                    sr_controller.show_search_move_more_often()
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 

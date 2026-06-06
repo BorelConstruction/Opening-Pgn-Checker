@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from enum import Enum
 import json
 import os
@@ -9,7 +8,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, Callable, Iterable, Literal, Optional, TypeVar, TypedDict, Union, Dict, Tuple
+from typing import Any, Callable, Literal, Optional, TypeVar, TypedDict, Union, Dict, Tuple
 
 import chess
 import chess.pgn
@@ -44,17 +43,9 @@ from .memory_model import (
 K = TypeVar("K")
 MarkKind = Literal["blacklist", "skip"]
 
-SEARCH_MOVE_BOOST_FACTOR = 2.0
-SEARCH_MOVE_BOOST_MIN_SIMILARITY = 0.8
 
-
-class MoveEntryData(TypedDict):
-    weight: float
-    past_performance: list[PerformanceRecord]
-
-
-class PositionMoveData(TypedDict):
-    moves: dict[UCI, MoveEntryData] | None
+class PositionDrillData(TypedDict):
+    past_performance: dict[UCI, list[PerformanceRecord]]
     blacklist: list[UCI]
     leads_to_skip: list[UCI]
 
@@ -123,13 +114,6 @@ class OffBookSelection:
     blacklist_exhausted: bool = False
 
 
-@dataclass(frozen=True)
-class WeightSyncSummary:
-    positions_checked: int
-    moves_added: int
-    moves_removed: int
-
-
 DEBUG_WEIGHT_TREE_FORWARD_PLIES = 6
 
 
@@ -175,7 +159,11 @@ class RepetitionEngine():
         self.set_start(root=root, start_range=start_range)
 
         self._pos_drill_data = CacheDict(
-            lambda position_fen: PositionMoveData(moves=None, blacklist=[], leads_to_skip=[]),
+            lambda position_fen: PositionDrillData(
+                past_performance={},
+                blacklist=[],
+                leads_to_skip=[],
+            ),
             item_to_json=self._pos_drill_item_to_json,
             item_from_json=self._pos_drill_item_from_json,
             auto_save=False,
@@ -258,13 +246,13 @@ class RepetitionEngine():
                 return
             
             if n.turn() == self._session.options.side:
-                children_uci_weights = {n.move.uci() for n in self._prompt_variations(n.parent)}
-                if n.move.uci() in children_uci_weights:
-                    path_weight = prompt_dict[tuple(path_from_root[:-2])][0]
+                children_uci_moves = {n.move.uci() for n in self._prompt_variations(n.parent)}
+                if n.move.uci() in children_uci_moves:
+                    path_probability = prompt_dict[tuple(path_from_root[:-2])][0]
                     damage_before = prompt_dict[tuple(path_from_root[:-2])][1]
                     prompt_dict[tuple(path_from_root)] = (
-                        path_weight * self._session.move_freq(n.parent, n.move.uci()),
-                        damage_before + path_weight * self._expected_damage_of_move(n.parent, n.move.uci()),
+                        path_probability * self._session.move_freq(n.parent, n.move.uci()),
+                        damage_before + path_probability * self._expected_damage_of_move(n.parent, n.move.uci()),
                     )
 
         def post(n, p, v):
@@ -303,71 +291,6 @@ class RepetitionEngine():
         self._commit_prompt_performance(gave_up=gave_up)
         self._pos_drill_data.serialize()
         self._movemodel_data.serialize()
-
-    def sync_move_weights_with_pgn(self) -> WeightSyncSummary:
-        positions_checked = 0
-        moves_added = 0
-        moves_removed = 0
-
-        for position_fen, position_data in list(self._pos_drill_data.items()):
-            positions_checked += 1
-            current_moves = self._pgn_move_ucis_for_position(position_fen)
-            position_data["leads_to_skip"] = [
-                uci for uci in position_data["leads_to_skip"] if uci in current_moves
-            ]
-            move_weights = position_data["moves"]
-            if move_weights is None:
-                continue
-
-            stale_moves = [uci for uci in move_weights if uci not in current_moves]
-            for uci in stale_moves:
-                del move_weights[uci]
-                self._drop_cached_model(position_fen, uci)
-            moves_removed += len(stale_moves)
-
-            retained_weights = dict(move_weights)
-            missing_moves = sorted(uci for uci in current_moves if uci not in retained_weights)
-            if missing_moves:
-                added_weight = self._added_move_weight(position_fen, retained_weights)
-                for uci in missing_moves:
-                    move_weights[uci] = MoveEntryData(
-                        weight=added_weight,
-                        past_performance=[],
-                    )
-                moves_added += len(missing_moves)
-
-        self._pos_drill_data.serialize()
-        self._movemodel_data.serialize()
-        return WeightSyncSummary(
-            positions_checked=positions_checked,
-            moves_added=moves_added,
-            moves_removed=moves_removed,
-        )
-
-    def _pgn_move_ucis_for_position(self, position_fen: str) -> set[UCI]:
-        moves: set[UCI] = set()
-        for node in self._session.cache[fen(position_fen)].TTed:
-            moves.update(child.move.uci() for child in self._session.variations(node))
-        return moves
-
-    def _added_move_weight(
-        self,
-        position_fen: str,
-        sibling_weights: dict[UCI, MoveEntryData],
-    ) -> float:
-        """Determine the weight for a new PGN move. First try to use siblings, then parent."""
-        if sibling_weights:
-            return sum(entry["weight"] for entry in sibling_weights.values())
-
-        tt_nodes = self._session.cache[fen(position_fen)].TTed
-        if not tt_nodes:
-            raise RuntimeError(f"No file nodes remain for position {position_fen!r}")
-
-        node = tt_nodes[0]
-        parent = node.parent
-        if not hasattr(parent, "parent"):
-            return 1.0
-        return self._get_moves_for_(parent.parent)[parent.move.uci()]["weight"]
 
     def set_start(self, root: Optional[Node] = None, start_range: Optional[int] = None) -> None:
         """ Set the starting point for prompt generation and
@@ -535,25 +458,18 @@ class RepetitionEngine():
 
     def _pos_drill_item_to_json(
         self,
-        item: tuple[str, PositionMoveData],
+        item: tuple[str, PositionDrillData],
     ) -> dict[str, Any]:
         position_fen, position_data = item
-        raw_moves = position_data["moves"]
-        serialized_moves = None
-        if raw_moves is not None:
-            serialized_moves = {
-                move_uci: {
-                    "weight": entry["weight"],
-                    "past_performance": [
-                        record.to_json()
-                        for record in entry["past_performance"]
-                    ],
-                }
-                for move_uci, entry in raw_moves.items()
-            }
         return {
             "fen": position_fen,
-            "moves": serialized_moves,
+            "past_performance": {
+                move_uci: [
+                    record.to_json()
+                    for record in performance
+                ]
+                for move_uci, performance in position_data["past_performance"].items()
+            },
             "blacklist": list(position_data["blacklist"]),
             "leads_to_skip": list(position_data["leads_to_skip"]),
         }
@@ -561,22 +477,38 @@ class RepetitionEngine():
     def _pos_drill_item_from_json(
         self,
         payload: Any,
-    ) -> tuple[str, PositionMoveData]:
+    ) -> tuple[str, PositionDrillData]:
         if isinstance(payload, str):
             payload = json.loads(payload)
         if not isinstance(payload, dict):
             raise TypeError("Move cache payload must be a dict")
 
         position_fen = payload["fen"]
-        if "moves" not in payload:
-            raise KeyError(f"Missing moves payload for position {position_fen!r}")
-        raw_pos_drill_data = payload["moves"]
-        raw_blacklist = payload.get("blacklist", [])
-        raw_leads_to_skip = payload.get("leads_to_skip", [])
+        raw_past_performance = payload["past_performance"]
+        raw_blacklist = payload["blacklist"]
+        raw_leads_to_skip = payload["leads_to_skip"]
 
-        move_probs: dict[UCI, MoveEntryData] = {}
+        past_performance: dict[UCI, list[PerformanceRecord]] = {}
         blacklist: list[UCI] = []
         leads_to_skip: list[UCI] = []
+
+        if not isinstance(raw_past_performance, dict):
+            raise TypeError(f"Performance payload for position {position_fen!r} must be a dict")
+        if not isinstance(raw_blacklist, list):
+            raise TypeError(f"Blacklist payload for position {position_fen!r} must be a list")
+        if not isinstance(raw_leads_to_skip, list):
+            raise TypeError(f"Skip payload for position {position_fen!r} must be a list")
+
+        for uci, raw_history in raw_past_performance.items():
+            if not isinstance(raw_history, list):
+                raise TypeError(
+                    f"Performance history for {uci!r} from position {position_fen!r} must be a list"
+                )
+            past_performance[uci] = [
+                PerformanceRecord.from_json(record)
+                for record in raw_history
+            ]
+
         for raw_uci in raw_blacklist:
             if raw_uci not in blacklist:
                 blacklist.append(raw_uci)
@@ -584,43 +516,8 @@ class RepetitionEngine():
             if raw_uci not in leads_to_skip:
                 leads_to_skip.append(raw_uci)
 
-        if raw_pos_drill_data is None:
-            return position_fen, PositionMoveData(
-                moves=None,
-                blacklist=blacklist,
-                leads_to_skip=leads_to_skip,
-            )
-        if not isinstance(raw_pos_drill_data, dict):
-            raise TypeError(f"Moves payload for position {position_fen!r} must be a dict or null")
-
-        for uci, raw_entry in raw_pos_drill_data.items():
-            if isinstance(raw_entry, dict):
-                raw_weight = raw_entry.get("weight")
-                if raw_weight is None:
-                    raise KeyError(f"Missing move weight for {uci!r} from position {position_fen!r}")
-                if "past_performance" not in raw_entry:
-                    raise KeyError(
-                        f"Missing move performance history for {uci!r} from position {position_fen!r}"
-                    )
-                raw_past_performance = raw_entry["past_performance"]
-                if not isinstance(raw_past_performance, list):
-                    raise TypeError(
-                        f"Move performance history for {uci!r} from position {position_fen!r} must be a list"
-                    )
-                move_probs[uci] = MoveEntryData(
-                    weight=float(raw_weight),
-                    past_performance=[
-                        PerformanceRecord.from_json(record)
-                        for record in raw_past_performance
-                    ],
-                )
-                if raw_entry.get("blacklisted", False) and uci not in blacklist:
-                    blacklist.append(uci)
-            else:
-                raise TypeError(f"Move entry for {uci!r} from position {position_fen!r} must be a dict")
-
-        return position_fen, PositionMoveData(
-            moves=move_probs,
+        return position_fen, PositionDrillData(
+            past_performance=past_performance,
             blacklist=blacklist,
             leads_to_skip=leads_to_skip,
         )
@@ -666,19 +563,6 @@ class RepetitionEngine():
 
     def _new_movemodel(self) -> MemoryModel:
         return NaiveMemoryModel()
-
-    def _get_moves_for_(self, parent: Node, blacklist_included: bool = False) -> dict[UCI, MoveEntryData]:
-        position_data = self._pos_drill_data[fen(parent)]
-        if position_data["moves"] is None:
-            position_data["moves"] = {
-                move_uci: MoveEntryData(
-                    weight=float(freq),
-                    past_performance=[],
-                )
-                for move_uci, freq in self._get_moves_and_freqs(parent).items()
-            }
-            
-        return {m:p for m, p in position_data["moves"].items() if blacklist_included or m not in position_data["blacklist"]}
 
     def _blacklist_for(self, position: BoardLike) -> list[UCI]:
         return self._pos_drill_data[fen(position)]["blacklist"]
@@ -829,24 +713,12 @@ class RepetitionEngine():
     def _has_file_continuation(self, parent: Node) -> bool:
         if self._prompt_state.node_index is not None and self._prompt_state.prechosen_path is not None:
             child_index = self._prompt_state.node_index + 1
-            if child_index >= len(self._prompt_state.prechosen_path):
-                return False
-
-            expected_uci = self._prompt_state.prechosen_path[child_index]
-            return any(child.move.uci() == expected_uci for child in self._prompt_variations(parent))
+            if child_index < len(self._prompt_state.prechosen_path):
+                expected_uci = self._prompt_state.prechosen_path[child_index]
+                return any(child.move.uci() == expected_uci for child in self._prompt_variations(parent))
 
         children = self._prompt_variations(parent)
-        if not children:
-            return False
-        if parent.turn() == self._session.options.side:
-            return True
-
-        move_weights = self._get_moves_for_(parent)
-        blacklisted_moves = set(self._blacklist_for(parent))
-        return any(
-            child.move.uci() in move_weights and child.move.uci() not in blacklisted_moves
-            for child in children
-        )
+        return bool(children)
 
     def _maybe_choose_off_file_prompt(self, parent: Node) -> tuple[bool, str]:
         if parent.turn() == self._session.options.side:
@@ -937,18 +809,19 @@ class RepetitionEngine():
         return [n for n in self._session.variations(position, use_TT=True)
                 if n.move.uci() not in self._blacklist_for(position)]
 
-    def _move_entry_by_key(self, position_fen: str, move_uci: UCI) -> MoveEntryData:
-        moves = self._pos_drill_data[position_fen]["moves"]
-        if move_uci not in moves:
-            raise KeyError(f"Missing move data for {move_uci!r} from position {position_fen!r}")
-        return moves[move_uci]
-
-    def _move_entry(self, parent: BoardLike, move_uci: UCI) -> MoveEntryData:
-        position_fen = fen(parent)
-        return self._move_entry_by_key(position_fen, move_uci)
+    def _existing_performance_history(
+        self,
+        parent: BoardLike,
+        move_uci: UCI,
+    ) -> list[PerformanceRecord] | None:
+        position_data = self._pos_drill_data.get(fen(parent))
+        if position_data is None:
+            return None
+        return position_data["past_performance"].get(move_uci)
 
     def _performance_history(self, parent: BoardLike, move_uci: UCI) -> list[PerformanceRecord]:
-        return self._move_entry(parent, move_uci)["past_performance"]
+        position_fen = fen(parent)
+        return self._pos_drill_data[position_fen]["past_performance"].setdefault(move_uci, [])
 
     def _movemodel(self, parent: BoardLike, move_uci: UCI) -> MemoryModel:
         position_fen = fen(parent)
@@ -963,14 +836,10 @@ class RepetitionEngine():
             return None
         return position_data["moves"].get(move_uci)
 
-    def _drop_cached_model(self, position_fen: str, move_uci: UCI) -> None:
-        model_data = self._movemodel_data[position_fen]
-        if model_data["moves"] is not None:
-            model_data["moves"].pop(move_uci, None)
-
     def _move_predict_success(self, parent: BoardLike, move_uci: UCI) -> float:
-        history = self._performance_history(parent, move_uci)
-        return self._movemodel(parent, move_uci).predict_success(history)
+        history = self._existing_performance_history(parent, move_uci) or []
+        move_model = self._existing_movemodel(parent, move_uci) or self._new_movemodel()
+        return move_model.predict_success(history)
 
 
     def _current_prompt_origin_move(self) -> Optional[tuple[Node, UCI]]:
@@ -989,8 +858,6 @@ class RepetitionEngine():
 
         parent = prompt_node.parent
         move_uci = prompt_node.move.uci()
-        if move_uci not in self._get_moves_for_(parent, blacklist_included=True):
-            return None
         return parent, move_uci
 
     def _current_performance_move(self) -> Optional[tuple[Node, UCI]]:
@@ -1410,9 +1277,9 @@ class RepetitionEngine():
                 message = self._format_rng_weights({child.move.uci(): 1.0 for child in children})
             return choice, message
 
-        move_weights = self._get_moves_for_(parent)
+        move_ucis = [child.move.uci() for child in self._prompt_variations(parent)]
 
-        if not move_weights:
+        if not move_ucis:
             # if there are no moves for them, we can try anyway
             off_book = True
             use_engine = True
@@ -1429,10 +1296,10 @@ class RepetitionEngine():
                 return False, off_book_selection.message
             # Fall through to normal logic
 
-        if not move_weights:
+        if not move_ucis:
             return False, ""
 
-        weights_dict = {uci: self._expected_damage_of_move(parent, uci) for uci in move_weights}
+        weights_dict = {uci: self._expected_damage_of_move(parent, uci) for uci in move_ucis}
 
         sys.stderr.write(f"Choosing move... selection_weights: {[(k, round(v, 3)) for k, v in weights_dict.items()]}\n")
         choice = self._rng_choice(weights_dict)
@@ -1496,8 +1363,8 @@ class RepetitionEngine():
 
     def _off_book_db_candidates(self, position: BoardLike) -> list[tuple[chess.Move, float]]:
         """Find off-book non-BL DB moves with frequency >= 5%, score_rate <= 75%, and no obvious replies."""
-        move_weights = self._get_db_moves_and_nums(position)
-        if not move_weights:
+        db_move_counts = self._get_db_moves_and_nums(position)
+        if not db_move_counts:
             return []
 
         exclude = set(n.move.uci() for n in self._prompt_variations(position))
@@ -1505,7 +1372,7 @@ class RepetitionEngine():
 
         # Filter candidates: frequency >= 5%, score_rate <= 75%
         candidates: list[tuple[chess.Move, float]] = []
-        for uci, weight in move_weights.items():
+        for uci, count in db_move_counts.items():
             position_board = to_board(position)
 
             if wont_work(uci):
@@ -1526,7 +1393,7 @@ class RepetitionEngine():
                 case [popular, *_] if self._session.move_freq(position_board, popular["uci"]) > 0.9:
                     continue
 
-            candidates.append((chess.Move.from_uci(uci), weight))
+            candidates.append((chess.Move.from_uci(uci), count))
 
         return candidates
 
@@ -1538,47 +1405,6 @@ class RepetitionEngine():
             return False
         return True
         
-    
-    def _get_moves_and_freqs(self, node: Node) -> dict[str, float]:
-        """
-        Return a dict UCI -> frequency for children of all nodes with
-        the same position as 'node'.
-        """
-        moves = set(child.move.uci() for child in self._prompt_variations(node))
-        return self._child_freqs(node, moves)
-
-    def _child_freqs(self, node: Node, variations: Iterable[UCI]) -> dict[UCI, float]:
-        """
-        Return a dict UCI -> frequency for moves of the board of 'node'
-        that are present in 'variations'.
-        """
-        weights = self._child_nums(node, variations)
-        total = sum(weights.values())
-        if total == 0: # should not happen, really
-            return {}
-        return {uci: weights[uci] / total for uci in weights}
-    
-    
-    def _child_nums(self, node: Node, variations: Iterable[UCI]) -> dict[UCI, float]:
-        """
-        Return the dict UCI -> weights for each move of the board of 'node' present in 'variations'. A weight 
-        is the amount of move occurrences in the DB. (TODO: add masters' moves with higher weight)
-        plus one. ("Plus one" ensures 1) we give every move a chance; 2) we won't divide by 0 when normalizing.)
-        """
-        if node.turn() == self._session.options.side:
-            # TODO: we may want to assign higher weights to file's main line
-            return {uci: 1.0 for uci in variations}
-        
-        move_weights = self._get_db_moves_and_nums(node)
-        if not move_weights:
-            return {uci: 1.0 for uci in variations}
-
-        weights = {}
-        for uci in variations:
-            weights[uci] = move_weights.get(uci, 1.0)
-
-        return weights
-    
     def _get_db_moves_and_nums(self, position: BoardLike) -> dict[UCI, float]:
         """
         Returns a dict mapping UCI strings to raw DB game counts.
@@ -1598,48 +1424,6 @@ class RepetitionEngine():
             count = move_data.get("white", 0) + move_data.get("draws", 0) + move_data.get("black", 0)
             weights[uci] = float(count)
         return weights
-
-    def boost_move_weight(
-        self,
-        root: Node,
-        results: list[dict[str, Any]],
-        move_uci: UCI,
-        target_position: Any,
-        *,
-        get_children: Callable[[Node], list[Node]] | None = None,
-    ) -> int:
-        """Make a move more likely to appear in a prompt."""
-        # TODO: revisit this when the move choice model is settled.
-        children_for = get_children or self._session.variations
-        updated = 0
-        boosted_positions: set[str] = set()
-        for result in results:
-            path = result.get("path")
-            if not isinstance(path, list) or not all(isinstance(i, int) for i in path):
-                raise TypeError("Search move result path must be a list of integers")
-
-            node = node_at_path(root, path, children_for)
-            if compare_positions(target_position, node).similarity < SEARCH_MOVE_BOOST_MIN_SIMILARITY:
-                continue
-
-            parent = node.parent
-            if parent is None:
-                raise RuntimeError("Search move result is missing a parent node")
-
-            parent_fen = fen(parent)
-            if parent_fen in boosted_positions:
-                continue
-            boosted_positions.add(parent_fen)
-
-            move_weights = self._get_moves_for_(parent)
-            if move_uci not in move_weights:
-                raise RuntimeError(f"Missing move data for {move_uci!r} from position {parent_fen!r}")
-
-            move_weights[move_uci]["weight"] *= SEARCH_MOVE_BOOST_FACTOR
-            updated += 1
-
-        self._pos_drill_data.serialize()
-        return updated
 
     def _grade_eval_loss(self, grade: MoveGrade) -> float:
         if grade.correctness == MoveCorrectness.CORRECT or grade.eval_diff is None:
@@ -1708,12 +1492,26 @@ class RepetitionEngine():
             return None
         return tuple(self._prompt_state.prechosen_path)
 
-    def _sorted_weighted_moves_for(
+    def _debug_move_selection_metrics(
         self,
         parent: Node,
-    ) -> list[tuple[UCI, float, MemoryModel | None, str, Optional[Node]]]:
-        entries: list[tuple[UCI, float, MemoryModel | None, str, Optional[Node]]] = []
-        for move_uci, entry in self._get_moves_for_(parent).items():
+        move_uci: UCI,
+    ) -> tuple[Optional[float], Optional[float], float]:
+        if parent.turn() == self._session.options.side:
+            return None, None, 1.0
+
+        move_freq = self._session.move_freq(parent, move_uci)
+        forget_probability = 1.0 - self._move_predict_success(parent, move_uci)
+        return move_freq, forget_probability, move_freq * forget_probability
+
+    def _sorted_debug_moves_for(
+        self,
+        parent: Node,
+    ) -> list[tuple[UCI, Optional[float], Optional[float], MemoryModel | None, str, Optional[Node]]]:
+        entries: list[tuple[UCI, Optional[float], Optional[float], float, MemoryModel | None, str, Optional[Node]]] = []
+        for child_node in self._prompt_variations(parent):
+            move_uci = child_node.move.uci()
+            move_freq, forget_probability, selection_priority = self._debug_move_selection_metrics(parent, move_uci)
             try:
                 san = node_san(parent, move_uci)
             except Exception:
@@ -1722,9 +1520,20 @@ class RepetitionEngine():
                 child = self._child_for_move(parent, move_uci)
             except RuntimeError:
                 child = None
-            entries.append((move_uci, entry["weight"], self._existing_movemodel(parent, move_uci), san, child))
-        entries.sort(key=lambda item: (-item[1], item[3], item[0]))
-        return entries
+            entries.append((
+                move_uci,
+                move_freq,
+                forget_probability,
+                selection_priority,
+                self._existing_movemodel(parent, move_uci),
+                san,
+                child,
+            ))
+        entries.sort(key=lambda item: (-item[3], item[5], item[0]))
+        return [
+            (move_uci, move_freq, forget_probability, move_model, san, child)
+            for move_uci, move_freq, forget_probability, _priority, move_model, san, child in entries
+        ]
 
     def _build_debug_children(
         self,
@@ -1739,10 +1548,8 @@ class RepetitionEngine():
     ) -> list[dict[str, Any]]:
         if remaining_prefix:
             move_uci = remaining_prefix[0]
-            move_weights = self._get_moves_for_(parent)
-            move_entry = move_weights.get(move_uci)
-            weight = None if move_entry is None else move_entry["weight"]
-            move_model = None if move_entry is None else self._existing_movemodel(parent, move_uci)
+            move_freq, forget_probability, _selection_priority = self._debug_move_selection_metrics(parent, move_uci)
+            move_model = self._existing_movemodel(parent, move_uci)
             try:
                 child = self._child_for_move(parent, move_uci)
             except RuntimeError:
@@ -1755,7 +1562,8 @@ class RepetitionEngine():
                 self._build_debug_move_node(
                     parent,
                     move_uci,
-                    weight,
+                    move_freq,
+                    forget_probability,
                     move_model,
                     san,
                     child,
@@ -1772,12 +1580,13 @@ class RepetitionEngine():
             return []
 
         children: list[dict[str, Any]] = []
-        for move_uci, weight, move_model, san, child in self._sorted_weighted_moves_for(parent):
+        for move_uci, move_freq, forget_probability, move_model, san, child in self._sorted_debug_moves_for(parent):
             children.append(
                 self._build_debug_move_node(
                     parent,
                     move_uci,
-                    weight,
+                    move_freq,
+                    forget_probability,
                     move_model,
                     san,
                     child,
@@ -1795,7 +1604,8 @@ class RepetitionEngine():
         self,
         parent: Node,
         move_uci: UCI,
-        weight: Optional[float],
+        move_freq: Optional[float],
+        forget_probability: Optional[float],
         move_model: Optional[MemoryModel],
         san: str,
         child: Optional[Node],
@@ -1812,7 +1622,7 @@ class RepetitionEngine():
         color = "white" if parent.turn() == chess.WHITE else "black"
         performance = None
         if move_model is not None:
-            history = self._performance_history(parent, move_uci)
+            history = self._existing_performance_history(parent, move_uci) or []
             if history:
                 performance = move_model.debug_payload()
                 performance["predictSuccess"] = move_model.predict_success(history)
@@ -1836,8 +1646,9 @@ class RepetitionEngine():
             "color": color,
             "san": san,
             "uci": move_uci,
-            "weight": weight,
-            "showWeightLabel": parent.turn() != self._session.options.side,
+            "moveFreq": move_freq,
+            "forgetProbability": forget_probability,
+            "showPriorityLabels": parent.turn() != self._session.options.side,
             "performance": performance,
             "children": children,
             "onCurrentPath": self._path_is_prefix(path, current_path),
@@ -1861,7 +1672,7 @@ class RepetitionEngine():
         prompt_path: tuple[UCI, ...] | None,
     ) -> dict[str, Any]:
         return {
-            "title": "Weight / performance visualizer",
+            "title": "Selection / performance visualizer",
             "tree": {
                 "kind": "position",
                 "label": root_label,
@@ -2331,7 +2142,7 @@ class AppController:
                 return self._rep_engine.debug_review_tree_payload(node)
         except Exception as exc:
             return {
-                "title": "Weight visualizer",
+                "title": "Selection visualizer",
                 "error": str(exc),
             }
         return None
@@ -2748,7 +2559,6 @@ class AppController:
             "query": query,
             "results": results,
             "count": len(results),
-            "canBoost": True,
         }
         self._broadcast_ui_state(include_history=False)
 
@@ -2793,7 +2603,6 @@ class AppController:
             },
             "results": results,
             "count": len(results),
-            "canBoost": False,
             "emptyMessage": "No skipped or blacklisted moves in the current repertoire.",
         }
         self._broadcast_ui_state(include_history=False)
@@ -2809,100 +2618,6 @@ class AppController:
 
         self._rep_engine.unmark_move(mark_kind, position_fen, move_uci)
         self.show_marked_moves()
-
-    def show_search_move_more_often(self) -> None:
-        if self._search_move_payload is None:
-            raise RuntimeError("Search move payload is not initialized")
-        if not self._search_move_payload.get("canBoost", False):
-            raise RuntimeError("Search move results were already boosted")
-
-        query = self._search_move_payload["query"]
-        move_uci = query["uci"]
-        query_path = query["path"]
-        if not isinstance(move_uci, str) or not move_uci:
-            raise TypeError("Search move query must contain a non-empty UCI string")
-        if not isinstance(query_path, list) or not all(isinstance(i, int) for i in query_path):
-            raise TypeError("Search move query path must be a list of integers")
-        results = self._search_move_payload.get("results")
-        if not isinstance(results, list):
-            raise TypeError("Search move results must be a list")
-
-        target_node = self._review_node_at_path(query_path)
-        self._rep_engine.boost_move_weight(
-            self._session.game,
-            results,
-            move_uci,
-            target_node,
-            get_children=self._review_children,
-        )
-        self._search_move_payload["canBoost"] = False
-        self._broadcast_ui_state(include_history=False)
-
-    def _format_weight_sync_message(self, summary: WeightSyncSummary) -> str:
-        added_label = "move" if summary.moves_added == 1 else "moves"
-        removed_label = "move" if summary.moves_removed == 1 else "moves"
-        return (
-            f"Updated weights. Checked {summary.positions_checked} cached positions, "
-            f"added {summary.moves_added} {added_label}, removed {summary.moves_removed} {removed_label}."
-        )
-
-    def _show_status_message(self, message: str) -> None:
-        if self._mode == "guess":
-            prompt = self._rep_controller.get_prompt_view()
-            rendered_message = f"{prompt.message} {message}".strip() if prompt.message else message
-            circles = self._rep_engine._prompt_state.hints.circles if self._rep_engine._prompt_state.hints is not None else None
-            if prompt.off_file:
-                self._hub.set_fen(
-                    prompt.off_file_fen,
-                    orientation=self.board_orientation,
-                    message=rendered_message,
-                    allow_moves=True,
-                    circles=circles,
-                )
-                return
-
-            if prompt.node is None:
-                raise RuntimeError("Guess mode requires an active prompt node")
-
-            self._hub.set_from_node(
-                prompt.node,
-                orientation=self.board_orientation,
-                message=rendered_message,
-                allow_moves=True,
-                circles=circles,
-            )
-            return
-
-        if self._mode == "review":
-            if self._review_path is None:
-                raise RuntimeError("Review mode requires a current review path")
-            node = self._review_node_at_path(list(self._review_path))
-            self._hub.set_from_node(
-                node,
-                orientation=self.board_orientation,
-                message=message,
-                allow_moves=False,
-            )
-            return
-
-        board_state = self._hub.get_state()
-        current_fen = board_state.get("fen")
-        if not isinstance(current_fen, str) or not current_fen:
-            raise RuntimeError("Board state does not contain a current FEN")
-        self._hub.set_fen(
-            current_fen,
-            orientation=self.board_orientation,
-            message=message,
-            allow_moves=False,
-        )
-
-    def update_weights(self) -> None:
-        if not self.active:
-            return
-
-        summary = self._rep_engine.sync_move_weights_with_pgn()
-        self._show_status_message(self._format_weight_sync_message(summary))
-        self._broadcast_ui_state(include_history=False)
 
     def provide_hint(self) -> None:
         if self._mode != "guess":
