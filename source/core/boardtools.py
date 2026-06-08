@@ -12,6 +12,16 @@ from .options import DEBUG_MODE
 
 BoardLike = Node | chess.Board | str
 
+
+class MoveIdentity(NamedTuple):
+    turn: chess.Color
+    piece_type: int
+    from_square: int
+    to_square: int
+    promotion: Optional[int]
+    is_capture: bool
+
+
 _LEGACY_FIGURINE_TRANSLATION = str.maketrans(
     {
         "\ue024": "♔",
@@ -114,6 +124,30 @@ def node_san(n: Node, move: Optional[Union[chess.Move, str]] = None) -> str:
         return b.san(move)
     b = n.parent.board()
     return b.san(n.move)
+
+
+def _move_identity(node: Node) -> MoveIdentity:
+    move = node.move
+    parent = node.parent
+    if move is None or parent is None:
+        raise ValueError("Cannot compare a move for a root node")
+
+    board = parent.board()
+    moving_piece = board.piece_at(move.from_square)
+
+    return MoveIdentity(
+        turn=board.turn,
+        piece_type=moving_piece.piece_type,
+        from_square=move.from_square,
+        to_square=move.to_square,
+        promotion=move.promotion,
+        is_capture=board.is_capture(move),
+    )
+
+
+def moves_are_equal(node1: Node, node2: Node) -> bool:
+    return _move_identity(node1) == _move_identity(node2)
+
 
 def uci_to_san(uci: str, board: chess.Board) -> str:
     return board.san(chess.Move.from_uci(uci))

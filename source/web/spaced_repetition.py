@@ -24,7 +24,16 @@ from source.web.scheduler_implem import NaiveScheduler
 
 # from source.web.app import BoardHub
 
-from ..core.boardtools import BoardLike, fen, node_moves, node_san, side, to_board, uci_from_lichess_to_pgn
+from ..core.boardtools import (
+    BoardLike,
+    fen,
+    moves_are_equal,
+    node_moves,
+    node_san,
+    side,
+    to_board,
+    uci_from_lichess_to_pgn,
+)
 from ..core.options import SpacedRepetitionOptions, DEBUG_MODE, save_settings
 from ..core.repertoire import RepertoireSession, default_repertoire_cache_path
 from ..core.runner import quick_eval_lines
@@ -408,7 +417,7 @@ class RepetitionEngine():
     def start_prompt(self, spec_id: SpecId) -> PromptState:
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
-            # seed = 1877424735 # paste the latest seed to reproduce behavior
+            # seed = 1259276098 # paste the latest seed to reproduce behavior
             self._rng.seed(seed)
             sys.stderr.write(f"RNG seed: {seed}\n")
 
@@ -1100,6 +1109,15 @@ class RepetitionEngine():
                     self._prompt_state.node_index += 1
                     self._prompt_state.node = next_node
 
+                if self._prompt_state.off_file:
+                    self._activate_prompt_state()
+                    return
+                self._skip_learned_prompt_positions()
+                if self._is_finished or self._prompt_state.off_file:
+                    if self._prompt_state.off_file:
+                        self._activate_prompt_state()
+                    return
+
                 self._activate_prompt_state()
                 return
             except IndexError:
@@ -1177,7 +1195,8 @@ class RepetitionEngine():
         self._prompt_state.node = anchor
         self._prompt_state.anchor_node = anchor
         self._prompt_state.node_index = offset
-        msg = f"Complete prompt: {self._prompt_state.prechosen_path}" if DEBUG_MODE else ""
+        msg = f"Complete prompt: {self._prompt_state.prechosen_path}, \
+                expected damage {choose_from[(chosen_path, offset)]:.3f}" if DEBUG_MODE else ""
         self._prompt_state.message = msg
         self._skip_learned_prompt_positions()
         if self._is_finished:
@@ -1237,12 +1256,18 @@ class RepetitionEngine():
         self._activate_prompt_state()
         return True
 
+    def _move_probability(self, position: BoardLike, uci: UCI) -> float:
+        """The probability of the opponent playing the move, according to the DB.
+        A correction is to ensure a minimum probability: we trust that a move was
+        added to a file for a reason."""
+        return max(self._session.move_freq(position, uci), 0.05)
+
     def _expected_damage_of_move(self, position: BoardLike, uci: UCI):
         """How damaging it is not to know the reply to a move.
         Intended for determining learning priority.
         Currently equals (chance to get the move)*(chance to get it wrong).
         Ideally should also incorporate (damage from getting it wrong)."""
-        move_probability = self._session.move_freq(position, uci)
+        move_probability = self._move_probability(position, uci)
         return (1-self._move_predict_success(position, uci)) * move_probability
 
     def _choose_move_randomly(
@@ -1497,7 +1522,7 @@ class RepetitionEngine():
         if parent.turn() == self._session.options.side:
             return None, None, 1.0
 
-        move_freq = self._session.move_freq(parent, move_uci)
+        move_freq = self._move_probability(parent, move_uci)
         recall_probability = self._move_predict_success(parent, move_uci)
         return move_freq, recall_probability, move_freq * (1.0 - recall_probability)
 
@@ -2114,7 +2139,7 @@ class AppController:
             "moves": self._history_moves_payload(entry.prompt_id, get_children),
         }
 
-    def _history_payload(self) -> dict[str, Any]:
+    def history_payload(self) -> dict[str, Any]:
         get_children = self._review_children if self._mode == "review" else self._session.variations
         entries = [
             self._history_entry_payload(entry, get_children)
@@ -2144,7 +2169,7 @@ class AppController:
             }
         return None
 
-    def ui_state(self, include_history: bool = True) -> dict[str, Any]:
+    def ui_state(self) -> dict[str, Any]:
         state = {
             "active": self.active,
             "mode": self._mode,
@@ -2156,8 +2181,6 @@ class AppController:
         }
         if hasattr(self, "_cfg"):
             state["startRange"] = self._cfg.start_range
-        if include_history and self.active:
-            state["history"] = self._history_payload()
         return state
 
     def start(self, options: SpacedRepetitionOptions, session: Optional[RepertoireSession] = None) -> None:
@@ -2206,7 +2229,11 @@ class AppController:
         self._rep_controller.start_next_prompt()
         self.show_prompt()
 
-    def show_prompt(self, prompt: PromptState | None = None, **kwargs) -> None:
+    def show_prompt(
+        self,
+        prompt: PromptState | None = None,
+        **kwargs,
+    ) -> None:
         if prompt is None:
             prompt = self._rep_controller.get_prompt_view()
 
@@ -2219,7 +2246,7 @@ class AppController:
                 allow_moves=True,
                 **kwargs
             )
-            self._broadcast_ui_state(include_history=False)
+            self._broadcast_ui_state()
             return
 
         if prompt.node is None:
@@ -2232,7 +2259,7 @@ class AppController:
             allow_moves=True,
             **kwargs
         )
-        self._broadcast_ui_state(include_history=False)
+        self._broadcast_ui_state()
 
     def stop(self) -> None:
         self.active = False
@@ -2240,8 +2267,8 @@ class AppController:
         self._games = []
         self._close_session()
 
-    def _broadcast_ui_state(self, include_history: bool = True) -> None:
-        self._hub.broadcast({"type": "sr_state", "sr": self.ui_state(include_history=include_history)})
+    def _broadcast_ui_state(self) -> None:
+        self._hub.broadcast({"type": "sr_state", "sr": self.ui_state()})
 
     def _next_review_db_stats_request_id(self) -> int:
         self._review_db_stats_request_id += 1
@@ -2512,13 +2539,12 @@ class AppController:
 
         root = self._session.game
         review_path = getattr(self, "_review_path", None)
+        if review_path is None:
+            raise RuntimeError("Cannot search for a review move without an active review path")
 
         end_ply = self._session.options.end_ply
 
-        try:
-            query_node = self._review_node_at_path(list(review_path))
-        except Exception:
-            return
+        query_node = self._review_node_at_path(list(review_path))
 
         query_move = query_node.move
         if query_move is None:
@@ -2533,7 +2559,7 @@ class AppController:
         tp = TraversalPolicy(start_ply=1, end_ply=end_ply, get_children=self._review_children)
         results: list[dict[str, Any]] = []
         for node in iter_nodes(root, tp):
-            if node.move != query_move:
+            if not moves_are_equal(node, query_node):
                 continue
 
             results.append(
@@ -2557,7 +2583,7 @@ class AppController:
             "results": results,
             "count": len(results),
         }
-        self._broadcast_ui_state(include_history=False)
+        self._broadcast_ui_state()
 
     def _marked_move_results(self) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
@@ -2602,7 +2628,7 @@ class AppController:
             "count": len(results),
             "emptyMessage": "No skipped or blacklisted moves in the current repertoire.",
         }
-        self._broadcast_ui_state(include_history=False)
+        self._broadcast_ui_state()
 
     def unmark_move(self, mark: str, position_fen: str, move_uci: UCI) -> None:
         mark_kind: MarkKind
@@ -2783,7 +2809,7 @@ class AppController:
             message=message,
             allow_moves=False,
         )
-        self._broadcast_ui_state(include_history=False)
+        self._broadcast_ui_state()
 
     def goto_history_move(self, path: Optional[list[int]], position_fen: Optional[str], san: str) -> None:
         message = f"History: {san}. Click New to continue practicing."
@@ -2792,7 +2818,7 @@ class AppController:
                 self.goto_review_path(path)
                 return
             node = node_at_path(self._session.game, path, self._session.variations)
-            self._enter_review_mode(node=node, message=message, include_history=False)
+            self._enter_review_mode(node=node, message=message)
             return
 
         if position_fen is None:
@@ -2801,7 +2827,7 @@ class AppController:
 
     def set_review_show_alternatives(self, enabled: bool) -> None:
         if self._review_show_alternatives == enabled:
-            self._broadcast_ui_state(include_history=False)
+            self._broadcast_ui_state()
             return
 
         current_node: Optional[Node] = None
@@ -2816,7 +2842,7 @@ class AppController:
         self._review_show_alternatives = enabled
 
         if current_node is None:
-            self._broadcast_ui_state(include_history=False)
+            self._broadcast_ui_state()
             return
 
         review_node = current_node if enabled else self._visible_review_node(current_node)
@@ -2833,8 +2859,6 @@ class AppController:
         self,
         node: chess.pgn.GameNode,
         message: Optional[str] = "",
-        *,
-        include_history: bool = True,
     ) -> None:
         self._mode = "review"
         self._search_move_payload = None
@@ -2877,7 +2901,7 @@ class AppController:
             message=message,
             allow_moves=False,
         )
-        self._broadcast_ui_state(include_history=include_history)
+        self._broadcast_ui_state()
         if stats_task is not None:
             self._queue_review_db_stats(stats_task)
 

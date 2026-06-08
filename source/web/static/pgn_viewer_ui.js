@@ -54,6 +54,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     searchMoveDismissed: false,
     history: null,
     historyOpen: false,
+    historyLoading: false,
     startRange: null,
   };
 
@@ -242,6 +243,15 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     historyTitle.textContent = `History (${count})`;
     historyResults.innerHTML = "";
 
+    if (state.historyLoading) {
+      const loading = document.createElement("div");
+      loading.className = "history-empty";
+      loading.textContent = "Loading history...";
+      historyResults.appendChild(loading);
+      historyOverlay.hidden = false;
+      return;
+    }
+
     if (!entries.length) {
       const empty = document.createElement("div");
       empty.className = "history-empty";
@@ -321,6 +331,15 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     }
 
     historyOverlay.hidden = false;
+  }
+
+  function applyHistory(history) {
+    if (!history || typeof history.count !== "number" || !Array.isArray(history.entries)) {
+      throw new Error("Invalid history payload");
+    }
+    state.history = history;
+    state.historyLoading = false;
+    renderHistory();
   }
 
   function refreshButtons() {
@@ -1235,12 +1254,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     state.debugTree = sr.debugTree || null;
     state.searchMove = sr.searchMove || null;
     state.startRange = Number.isInteger(sr.startRange) ? sr.startRange : null;
-    // Review/history navigation reuses the existing history list instead of rebroadcasting it on every click.
-    if (Object.prototype.hasOwnProperty.call(sr, "history")) {
-      state.history = sr.history || null;
-    }
     if (!state.active) {
       state.historyOpen = false;
+      state.historyLoading = false;
     }
     resetReviewNavigation();
 
@@ -1303,7 +1319,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   srNewBtn.addEventListener("click", () => send({ type: "sr_new" }));
   srHistoryBtn.addEventListener("click", () => {
     state.historyOpen = true;
+    state.historyLoading = true;
     renderHistory();
+    send({ type: "sr_history" });
   });
   srHintBtn.addEventListener("click", () => send({ type: "sr_hint" }));
   srStudyFromHereBtn.addEventListener("click", () => {
@@ -1339,6 +1357,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
 
   return {
     applySrState,
+    applyHistory,
     applyReviewNavigation,
     refreshBoardState: refreshAnalyzeLichessLink,
     isReviewMode,

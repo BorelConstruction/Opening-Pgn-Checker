@@ -82,6 +82,8 @@ class PgnChecker:
         self.set_output_pgn()
         self.session.options.added_depth = 2 * self.session.options.added_depth - 1
 
+        self.session.moves_added = 0
+
     def pipeline(self):
         # a skeleton for when the logic gets more complex
         pipeline = []

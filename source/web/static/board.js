@@ -263,6 +263,17 @@ function connect() {
       return;
     }
 
+    if (msg.type === "sr_history") {
+      try {
+        srUi.applyHistory(msg.history);
+      } catch (err) {
+        const message = err && err.message ? err.message : String(err);
+        log(`sr ui error: ${message}`);
+        console.error("sr ui error:", err);
+      }
+      return;
+    }
+
     if (msg.type === "sr_review_db_stats") {
       try {
         dbStatsUi.applyReviewDbStats(msg.review);
