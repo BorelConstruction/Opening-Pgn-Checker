@@ -6,6 +6,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   // log("Creating PGN Viewer UI");
   const srNewBtn = document.getElementById("srNew");
   const srHistoryBtn = document.getElementById("srHistory");
+  const srProgressBtn = document.getElementById("srProgress");
   const srHintBtn = document.getElementById("srHint");
   const srStudyFromHereBtn = document.getElementById("srStudyFromHere");
   const srSearchMoveBtn = document.getElementById("srSearchMove");
@@ -41,6 +42,11 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const historyTitle = document.getElementById("historyTitle");
   const historyResults = document.getElementById("historyResults");
   const historyCloseBtn = document.getElementById("historyClose");
+  const progressOverlay = document.getElementById("progressOverlay");
+  const progressPanel = document.getElementById("progressPanel");
+  const progressTitle = document.getElementById("progressTitle");
+  const progressResults = document.getElementById("progressResults");
+  const progressCloseBtn = document.getElementById("progressClose");
   const srToast = document.getElementById("srToast");
 
   const state = {
@@ -55,6 +61,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     history: null,
     historyOpen: false,
     historyLoading: false,
+    progress: null,
+    progressOpen: false,
+    progressLoading: false,
     startRange: null,
   };
 
@@ -211,6 +220,11 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     historyOverlay.hidden = true;
   }
 
+  function closeProgressOverlay() {
+    state.progressOpen = false;
+    progressOverlay.hidden = true;
+  }
+
   function formatHistoryMoveLabel(move) {
     const moveNumber = typeof move.moveNumber === "number" ? move.moveNumber : 0;
     const san = typeof move.san === "string" ? move.san : "";
@@ -333,6 +347,98 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     historyOverlay.hidden = false;
   }
 
+  function progressNumber(progress, key) {
+    const value = progress && progress[key];
+    if (!Number.isFinite(value)) return 0;
+    return Math.max(0, Math.trunc(value));
+  }
+
+  function appendProgressStat(parent, label, value) {
+    const item = document.createElement("div");
+    item.className = "progress-stat";
+
+    const number = document.createElement("div");
+    number.className = "progress-stat-number";
+    number.textContent = value.toLocaleString();
+    item.appendChild(number);
+
+    const text = document.createElement("div");
+    text.className = "progress-stat-label";
+    text.textContent = label;
+    item.appendChild(text);
+
+    parent.appendChild(item);
+  }
+
+  function renderProgress() {
+    if (!state.progressOpen) {
+      progressOverlay.hidden = true;
+      return;
+    }
+
+    progressTitle.textContent = "Progress";
+    progressResults.innerHTML = "";
+
+    if (state.progressLoading) {
+      const loading = document.createElement("div");
+      loading.className = "progress-empty";
+      loading.textContent = "Loading progress...";
+      progressResults.appendChild(loading);
+      progressOverlay.hidden = false;
+      return;
+    }
+
+    if (!state.progress) {
+      const empty = document.createElement("div");
+      empty.className = "progress-empty";
+      empty.textContent = "No progress data yet";
+      progressResults.appendChild(empty);
+      progressOverlay.hidden = false;
+      return;
+    }
+
+    const learnedMoves = progressNumber(state.progress, "learnedMoves");
+    const initiallyMissedMoves = progressNumber(state.progress, "initiallyMissedMoves");
+    const shortTermMoves = progressNumber(state.progress, "shortTermMoves");
+    const testedMoves = progressNumber(state.progress, "testedMoves");
+    const learnableMoves = progressNumber(state.progress, "learnableMoves");
+
+    const summary = document.createElement("div");
+    summary.className = "progress-summary";
+
+    const count = document.createElement("div");
+    count.className = "progress-count";
+    count.textContent = learnedMoves.toLocaleString();
+    summary.appendChild(count);
+
+    const label = document.createElement("div");
+    label.className = "progress-label";
+    label.textContent = learnedMoves === 1 ? "learned move" : "learned moves";
+    summary.appendChild(label);
+    progressResults.appendChild(summary);
+
+    const stats = document.createElement("div");
+    stats.className = "progress-stats";
+    appendProgressStat(stats, "started with a miss", initiallyMissedMoves);
+    appendProgressStat(stats, "waiting on delay", shortTermMoves);
+    appendProgressStat(stats, "tested moves", testedMoves);
+    appendProgressStat(stats, "learnable moves", learnableMoves);
+    progressResults.appendChild(stats);
+
+    const threshold = Number.isFinite(state.progress.recallThreshold)
+      ? Math.round(state.progress.recallThreshold * 100)
+      : 95;
+    const delaySeconds = Number.isFinite(state.progress.delaySeconds)
+      ? Math.round(state.progress.delaySeconds)
+      : 0;
+    const note = document.createElement("div");
+    note.className = "progress-note";
+    note.textContent = `Criterion: recall > ${threshold}%, latest success older than ${delaySeconds}s.`;
+    progressResults.appendChild(note);
+
+    progressOverlay.hidden = false;
+  }
+
   function applyHistory(history) {
     if (!history || typeof history.count !== "number" || !Array.isArray(history.entries)) {
       throw new Error("Invalid history payload");
@@ -342,6 +448,15 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     renderHistory();
   }
 
+  function applyProgress(progress) {
+    if (!progress || typeof progress.learnedMoves !== "number") {
+      throw new Error("Invalid progress payload");
+    }
+    state.progress = progress;
+    state.progressLoading = false;
+    renderProgress();
+  }
+
   function refreshButtons() {
     const active = !!state.active;
     const isGuess = active && state.mode === "guess";
@@ -349,6 +464,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     const canSkipGuess = isGuess && state.currentSpecId === "new";
     srNewBtn.disabled = !active;
     srHistoryBtn.disabled = !active;
+    srProgressBtn.disabled = !active;
     srHintBtn.disabled = !isGuess;
     srStudyFromHereBtn.disabled = !isReview;
     srSearchMoveBtn.disabled = !isReview;
@@ -1257,6 +1373,8 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     if (!state.active) {
       state.historyOpen = false;
       state.historyLoading = false;
+      state.progressOpen = false;
+      state.progressLoading = false;
     }
     resetReviewNavigation();
 
@@ -1267,6 +1385,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     renderReviewComment();
     renderSearchMove();
     renderHistory();
+    renderProgress();
   }
 
   function applyReviewNavigation(review) {
@@ -1315,13 +1434,24 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   historyOverlay.addEventListener("click", closeHistoryOverlay);
   historyPanel.addEventListener("click", (event) => event.stopPropagation());
   historyCloseBtn.addEventListener("click", closeHistoryOverlay);
+  progressOverlay.addEventListener("click", closeProgressOverlay);
+  progressPanel.addEventListener("click", (event) => event.stopPropagation());
+  progressCloseBtn.addEventListener("click", closeProgressOverlay);
 
   srNewBtn.addEventListener("click", () => send({ type: "sr_new" }));
   srHistoryBtn.addEventListener("click", () => {
+    closeProgressOverlay();
     state.historyOpen = true;
     state.historyLoading = true;
     renderHistory();
     send({ type: "sr_history" });
+  });
+  srProgressBtn.addEventListener("click", () => {
+    closeHistoryOverlay();
+    state.progressOpen = true;
+    state.progressLoading = true;
+    renderProgress();
+    send({ type: "sr_progress" });
   });
   srHintBtn.addEventListener("click", () => send({ type: "sr_hint" }));
   srStudyFromHereBtn.addEventListener("click", () => {
@@ -1358,6 +1488,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   return {
     applySrState,
     applyHistory,
+    applyProgress,
     applyReviewNavigation,
     refreshBoardState: refreshAnalyzeLichessLink,
     isReviewMode,

@@ -155,7 +155,7 @@ class NaiveMemoryModel(MemoryModel):
 
     def update(self, success: bool, past_performance: list[PerformanceRecord]) -> None:
         # "remembered" -- successful recall that is not just short-term memory.
-        # got weong 3 times in a row -> forgot, reset
+        # got wrong 3 times in a row -> forgot, reset
         elapsed_seconds = 0
         if success:
             if self.in_short_term_memory(past_performance):

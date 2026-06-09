@@ -23,6 +23,7 @@
         <button id="srSearchMove" title="Spaced repetition: search occurrences of the last move">Search move</button>
         <span class="controls-spacer" aria-hidden="true"></span>
         <button id="srHistory" title="Spaced repetition: browse previous prompts">History</button>
+        <button id="srProgress" title="Spaced repetition: show learned move progress">Progress</button>
         <button id="srMarkedMoves" title="Spaced repetition: review skipped and blacklisted moves">Marked moves</button>
         <span id="status" class="status">disconnected</span>
       </div>
@@ -129,6 +130,16 @@
           <button id="historyClose" type="button" class="search-close" aria-label="Close history">Close</button>
         </div>
         <div id="historyResults" class="history-results"></div>
+      </div>
+    </div>
+
+    <div class="search-overlay" id="progressOverlay" hidden>
+      <div class="panel search-panel progress-panel" id="progressPanel" role="dialog" aria-modal="true" aria-labelledby="progressTitle">
+        <div class="search-head">
+          <div id="progressTitle" class="search-title">Progress</div>
+          <button id="progressClose" type="button" class="search-close" aria-label="Close progress">Close</button>
+        </div>
+        <div id="progressResults" class="progress-results"></div>
       </div>
     </div>
 

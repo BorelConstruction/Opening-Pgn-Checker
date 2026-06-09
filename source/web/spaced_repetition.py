@@ -140,6 +140,7 @@ class RepetitionEngine():
     "attempts" is broader: has eval diff, hint history etc.
     """
     LEARNED_RIGHT_THRESHOLD = 0.85
+    PROGRESS_RECALL_THRESHOLD = 0.75
     LEARNED_MOVE_SKIP_PROBABILITY = 0.90
     MAX_PROMPT_SELECTION_ATTEMPTS = 100
     MAX_OFF_BOOK_BLACKLIST_ATTEMPTS = 3
@@ -417,7 +418,7 @@ class RepetitionEngine():
     def start_prompt(self, spec_id: SpecId) -> PromptState:
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
-            # seed = 1259276098 # paste the latest seed to reproduce behavior
+            seed = 4204615814 # paste the latest seed to reproduce behavior
             self._rng.seed(seed)
             sys.stderr.write(f"RNG seed: {seed}\n")
 
@@ -638,7 +639,7 @@ class RepetitionEngine():
 
         self._pos_drill_data.serialize()
 
-    def _is_move_marked_to_skip(self, position: BoardLike, uci: UCI) -> bool:
+    def _move_is_marked_to_skip(self, position: BoardLike, uci: UCI) -> bool:
         position_data = self._pos_drill_data.get(fen(position))
         if position_data is None:
             return False
@@ -850,6 +851,88 @@ class RepetitionEngine():
         move_model = self._existing_movemodel(parent, move_uci) or self._new_movemodel()
         return move_model.predict_success(history)
 
+    def _memorization_crit_for_progr_feedback(
+        self,
+        parent: BoardLike,
+        move_uci: UCI,
+        history: list[PerformanceRecord],
+        now: float,
+    ) -> bool:
+        """The criteria for counting a move as "learned" for the progress feedback are:
+        1) The user got the move right in the latest attempt
+        2) It is not just in short-term memory
+        3) The chance to recall is high"""
+        if not history:
+            return False
+        latest_repetition = history[-1]
+        if not latest_repetition.success:
+            return False
+        if now - latest_repetition.attempt_time <= DELAY_BEFORE_GUESSED_MEANS_REMEMBERS:
+            return False
+        return self._move_predict_success(parent, move_uci) > self.PROGRESS_RECALL_THRESHOLD
+
+    def progress_payload(self) -> dict[str, Any]:
+        learned_moves = 0
+        initially_missed_moves = 0
+        short_term_moves = 0
+        tested_moves = 0
+        learnable_moves = 0
+        seen: set[tuple[str, UCI]] = set()
+        now = time.time()
+
+        def visit(node: Node) -> None:
+            nonlocal learned_moves
+            nonlocal initially_missed_moves
+            nonlocal short_term_moves
+            nonlocal tested_moves
+            nonlocal learnable_moves
+
+            if node.parent is None or node.move is None:
+                return
+            if node.turn() != self._session.options.side:
+                return
+
+            parent = node.parent
+            move_uci = node.move.uci()
+            position_fen = fen(parent)
+            move_key = (position_fen, move_uci)
+            if move_key in seen:
+                return
+            seen.add(move_key)
+            learnable_moves += 1
+
+            history = self._existing_performance_history(parent, move_uci)
+            if not history:
+                return
+
+            tested_moves += 1
+            if history[0].success:
+                return
+
+            initially_missed_moves += 1
+            latest_repetition = history[-1]
+            if (
+                latest_repetition.success
+                and now - latest_repetition.attempt_time <= DELAY_BEFORE_GUESSED_MEANS_REMEMBERS
+            ):
+                short_term_moves += 1
+                return
+
+            if self._memorization_crit_for_progr_feedback(parent, move_uci, history, now):
+                learned_moves += 1
+
+        self._session.traverse(self._session.game, visit=visit)
+
+        return {
+            "learnedMoves": learned_moves,
+            "initiallyMissedMoves": initially_missed_moves,
+            "shortTermMoves": short_term_moves,
+            "testedMoves": tested_moves,
+            "learnableMoves": learnable_moves,
+            "recallThreshold": self.PROGRESS_RECALL_THRESHOLD,
+            "delaySeconds": DELAY_BEFORE_GUESSED_MEANS_REMEMBERS,
+        }
+
 
     def _current_prompt_origin_move(self) -> Optional[tuple[Node, UCI]]:
         """Return the move from a file node that produced the current prompt."""
@@ -1040,7 +1123,7 @@ class RepetitionEngine():
             return False
         if prompt_node.parent is None or prompt_node.move is None:
             return False
-        if self._is_move_marked_to_skip(prompt_node.parent, prompt_node.move.uci()):
+        if self._move_is_marked_to_skip(prompt_node.parent, prompt_node.move.uci()):
             return True
         if not self._is_learned_prompt_position(prompt_node):
             return False
@@ -1174,7 +1257,7 @@ class RepetitionEngine():
                 total_damage - start_damage_cutoff
         possible_keys = [k for k in choose_from.keys() if len(k[0]) - k[1] == prpt_len]
         possible_keys.sort(key=lambda k: choose_from[k], reverse=True)
-        candidate_amount = max(1, len(possible_keys) // 3)
+        candidate_amount = min(max(1, len(possible_keys) // 3), 10)
         preferred_prompt_keys = possible_keys[:candidate_amount]
 
         if not preferred_prompt_keys:
@@ -1267,6 +1350,8 @@ class RepetitionEngine():
         Intended for determining learning priority.
         Currently equals (chance to get the move)*(chance to get it wrong).
         Ideally should also incorporate (damage from getting it wrong)."""
+        if self._move_is_marked_to_skip(position, uci):
+            return 0.00
         move_probability = self._move_probability(position, uci)
         return (1-self._move_predict_success(position, uci)) * move_probability
 
@@ -2149,6 +2234,11 @@ class AppController:
             "count": len(entries),
             "entries": entries,
         }
+
+    def progress_payload(self) -> dict[str, Any]:
+        if not self.active:
+            raise RuntimeError("Progress is only available after spaced repetition starts")
+        return self._rep_engine.progress_payload()
 
     def _debug_tree_payload(self) -> Optional[dict[str, Any]]:
         if not DEBUG_MODE or not self.active:
