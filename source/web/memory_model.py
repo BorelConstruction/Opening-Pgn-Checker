@@ -108,7 +108,7 @@ class NaiveMemoryModel(MemoryModel):
     Then P(success after t seconds) = (b/(b+t))^a.
     We'll set a=1.
 
-    The default rate is normalized so the predicted success after one day is 0.5.
+    The default rate is normalized so the predicted success after one week is 0.5.
     """
 
     FAILURE_SCALE = 0.5
@@ -116,7 +116,7 @@ class NaiveMemoryModel(MemoryModel):
     SHORT_TERM_MEMORY_RECALL_PROB = 0.99
     MODEL_TYPE: ClassVar[str] = "naive_exponential"
 
-    b: float = SECONDS_PER_DAY
+    b: float = 7 * SECONDS_PER_DAY
     remembers: bool = False
 
     @staticmethod

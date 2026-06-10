@@ -418,7 +418,7 @@ class RepetitionEngine():
     def start_prompt(self, spec_id: SpecId) -> PromptState:
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
-            seed = 4204615814 # paste the latest seed to reproduce behavior
+            # seed = 2886384853 # paste the latest seed to reproduce behavior
             self._rng.seed(seed)
             sys.stderr.write(f"RNG seed: {seed}\n")
 
@@ -692,11 +692,10 @@ class RepetitionEngine():
     def blacklist_current_line(self) -> UCI:
         """Blacklists the first move of the current prompt line.
         (Note that technically the current position may still appear, but via a different line.)"""
-        prompt_start_node = self._prompt_state.anchor_node
-        if prompt_start_node.parent is None or prompt_start_node.move is None:
-            raise RuntimeError("Cannot blacklist the first move of a root prompt")
-
-        blacklisted_uci = prompt_start_node.move.uci()
+        prompt_start_node = self._prompt_state.node
+        while prompt_start_node is not self._root:
+            blacklisted_uci = prompt_start_node.move.uci()
+            prompt_start_node = prompt_start_node.parent
         self._blacklist_move(prompt_start_node.parent, blacklisted_uci)
         self._prompt_state.message = (
             f"Blacklisted the line starting with {blacklisted_uci}. {self._prompt_state.message}"
