@@ -47,7 +47,7 @@ from .memory_model import (
     PerformanceRecord,
 )
 
-# TODO: add transpotitioning moves to the move list?
+# TODO: add transpositioning moves to the move list?
 
 K = TypeVar("K")
 MarkKind = Literal["blacklist", "skip"]
@@ -432,7 +432,7 @@ class RepetitionEngine():
 
         return self._prompt_state
 
-    def start_prompt_by_id(self, prompt_id: PromptLineId, spec_id: SpecId = "history") -> PromptState:
+    def start_prompt_by_id(self, prompt_id: PromptLineId, spec_id: SpecId = "by id") -> PromptState:
         self._reset_prompt_state()
         self._spec_id = spec_id
         self._prompt_state = self._create_prompt_from_id(prompt_id)
@@ -1883,7 +1883,17 @@ class PromptLineId:
 
     @classmethod
     def from_json(cls, payload: Any) -> "PromptLineId":
-        return cls(payload["startFen"], tuple(payload["moves"]))
+        if not isinstance(payload, dict):
+            raise TypeError("Prompt line id payload must be a dict")
+
+        start_fen = payload["startFen"]
+        moves = payload["moves"]
+        if not isinstance(start_fen, str):
+            raise TypeError("Prompt line id startFen must be a string")
+        if not isinstance(moves, list) or not all(isinstance(move, str) for move in moves):
+            raise TypeError("Prompt line id moves must be a list of strings")
+
+        return cls(start_fen, tuple(moves))
 
 
 @dataclass
@@ -1892,6 +1902,7 @@ class PromptLogEntry:
     prompt_id: PromptLineId
     prompt_time: float
     performance: Optional[float] = None
+    bookmarked: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -1899,15 +1910,20 @@ class PromptLogEntry:
             "promptId": self.prompt_id.to_json(),
             "promptTime": self.prompt_time,
             "performance": self.performance,
+            "bookmarked": self.bookmarked,
         }
 
     @classmethod
     def from_json(cls, payload: Any) -> "PromptLogEntry":
+        raw_bookmarked = payload.get("bookmarked", False)
+        if not isinstance(raw_bookmarked, bool):
+            raise TypeError("Prompt log entry bookmarked must be a boolean")
         return cls(
             spec_id=payload["specId"],
             prompt_id=PromptLineId.from_json(payload["promptId"]),
             prompt_time=float(payload["promptTime"]),
             performance=payload.get("performance"),
+            bookmarked=raw_bookmarked,
         )
 
 class Hints():
@@ -1978,12 +1994,23 @@ class PromptLog:
         self.entries: list[PromptLogEntry] = []
         self._save_path: Optional[str] = None
 
+    def _require_prompt_line_id(self, prompt_id: PromptId) -> PromptLineId:
+        if not isinstance(prompt_id, PromptLineId):
+            raise TypeError(f"Expected PromptLineId, got {type(prompt_id).__name__}")
+        return prompt_id
+
+    def is_bookmarked(self, prompt_id: PromptId) -> bool:
+        line_id = self._require_prompt_line_id(prompt_id)
+        return any(entry.bookmarked for entry in self.entries if entry.prompt_id == line_id)
+
     def record_prompt(self, prompt_id: PromptId, spec_id: SpecId) -> None:
+        line_id = self._require_prompt_line_id(prompt_id)
         self.entries.append(
             PromptLogEntry(
                 spec_id=spec_id,
-                prompt_id=prompt_id,
+                prompt_id=line_id,
                 prompt_time=time.time(),
+                bookmarked=self.is_bookmarked(line_id),
             )
         )
 
@@ -1994,6 +2021,51 @@ class PromptLog:
     def record_feedback(self, prompt_id: PromptId, feedback: Feedback) -> None:
         self._last_entry.performance = float(feedback.quality)
         self.serialize()
+
+    def set_bookmarked(self, prompt_id: PromptId, bookmarked: bool) -> bool:
+        line_id = self._require_prompt_line_id(prompt_id)
+        matching_entries = [
+            entry
+            for entry in self.entries
+            if entry.prompt_id == line_id
+        ]
+        if not matching_entries:
+            raise ValueError("Cannot bookmark a prompt that is not in history")
+
+        old_bookmarks = [
+            (entry, entry.bookmarked)
+            for entry in matching_entries
+        ]
+        changed = False
+        for entry in matching_entries:
+            if entry.bookmarked == bookmarked:
+                continue
+            entry.bookmarked = bookmarked
+            changed = True
+
+        if changed:
+            try:
+                self.serialize()
+            except Exception:
+                for entry, old_bookmarked in old_bookmarks:
+                    entry.bookmarked = old_bookmarked
+                raise
+        return changed
+
+    def bookmark_latest_prompt(self) -> bool:
+        if not self.entries:
+            raise RuntimeError("Cannot bookmark latest prompt without history entries")
+        return self.set_bookmarked(self._last_entry.prompt_id, True)
+
+    def bookmarked_prompt_ids(self) -> list[PromptLineId]:
+        prompt_ids: list[PromptLineId] = []
+        seen: set[PromptLineId] = set()
+        for entry in reversed(self.entries):
+            if not entry.bookmarked or entry.prompt_id in seen:
+                continue
+            prompt_ids.append(entry.prompt_id)
+            seen.add(entry.prompt_id)
+        return prompt_ids
 
     def load_from_file(self, path: str) -> bool:
         self._save_path = path
@@ -2082,6 +2154,7 @@ class AppController:
         self._mode = "idle"  # idle | guess | review
 
         self._log = PromptLog()
+        self._bookmark_current_prompt_pending = False
 
         self._review_payload: Optional[dict[str, Any]] = None
         self._review_path: Optional[list[int]] = None
@@ -2220,7 +2293,19 @@ class AppController:
             "promptId": entry.prompt_id.to_json(),
             "promptTime": entry.prompt_time,
             "performance": entry.performance,
+            "bookmarked": entry.bookmarked,
             "moves": self._history_moves_payload(entry.prompt_id, get_children),
+        }
+
+    def _bookmark_entry_payload(
+        self,
+        prompt_id: PromptLineId,
+        get_children: Callable[[Node], list[Node]],
+    ) -> dict[str, Any]:
+        return {
+            "promptId": prompt_id.to_json(),
+            "bookmarked": True,
+            "moves": self._history_moves_payload(prompt_id, get_children),
         }
 
     def history_payload(self) -> dict[str, Any]:
@@ -2228,6 +2313,17 @@ class AppController:
         entries = [
             self._history_entry_payload(entry, get_children)
             for entry in reversed(self._log.entries)
+        ]
+        return {
+            "count": len(entries),
+            "entries": entries,
+        }
+
+    def bookmarks_payload(self) -> dict[str, Any]:
+        get_children = self._review_children if self._mode == "review" else self._session.variations
+        entries = [
+            self._bookmark_entry_payload(prompt_id, get_children)
+            for prompt_id in self._log.bookmarked_prompt_ids()
         ]
         return {
             "count": len(entries),
@@ -2263,6 +2359,7 @@ class AppController:
             "active": self.active,
             "mode": self._mode,
             "currentSpecId": self._rep_engine.current_spec_id() if self.active else None,
+            "bookmarkQueued": self._bookmark_current_prompt_pending if self.active and self._mode == "guess" else False,
             "review": self._review_payload if self.active and self._mode == "review" else None,
             "reviewShowsAlternatives": self._review_show_alternatives,
             "searchMove": self._search_move_payload if self.active and self._mode == "review" else None,
@@ -2283,6 +2380,7 @@ class AppController:
             self.board_orientation = "white" if options.play_white else "black"
             
             self._log.load_from_file(self._log_cache_name())
+            self._bookmark_current_prompt_pending = False
             self._session.cache.autosave_interval = 600
             self._rep_engine: RepetitionEngine = RepetitionEngine(
                 self._session,
@@ -2311,10 +2409,33 @@ class AppController:
             if self._session is not None: 
                 self._session.close()
 
+    def _commit_pending_bookmark_to_latest_prompt(self) -> None:
+        if not self._bookmark_current_prompt_pending:
+            return
+
+        try:
+            self._log.bookmark_latest_prompt()
+        except Exception as exc:
+            if DEBUG_MODE:
+                raise
+            sys.stderr.write(f"Failed to save bookmark: {exc}\n")
+            self._hub.broadcast({"type": "error", "message": f"Failed to save bookmark: {exc}"})
+        self._bookmark_current_prompt_pending = False
+
+    def bookmark_current_prompt(self) -> None:
+        if not self.active or self._mode != "guess":
+            raise RuntimeError("Can only bookmark the active prompt in guess mode")
+        self._bookmark_current_prompt_pending = True
+        self._broadcast_ui_state()
+
+    def set_prompt_bookmark(self, prompt_id: PromptLineId, bookmarked: bool) -> None:
+        self._log.set_bookmarked(prompt_id, bookmarked)
+
 
     def start_next_prompt(self) -> None:
         self.active = True
         self._mode = "guess"
+        self._bookmark_current_prompt_pending = False
         self._rep_controller.start_next_prompt()
         self.show_prompt()
 
@@ -2739,6 +2860,7 @@ class AppController:
 
     def _finalize_finished_prompt(self) -> None:
         self._rep_controller.finalize_current_prompt()
+        self._commit_pending_bookmark_to_latest_prompt()
 
     def handle_guess(self, uci: str) -> None:
         if self._mode != "guess":
@@ -2746,6 +2868,7 @@ class AppController:
         
         continue_prompt = self._rep_controller.on_user_response(uci)
         if not continue_prompt:
+            self._commit_pending_bookmark_to_latest_prompt()
             prompt = self._rep_controller.get_prompt_view()
             if prompt.node is None:
                 raise RuntimeError("Cannot enter review without a file node")
@@ -2882,9 +3005,10 @@ class AppController:
             ),
         )
 
-    def study_history_prompt(self, prompt_id: PromptLineId, spec_id: SpecId) -> None:
+    def study_history_prompt(self, prompt_id: PromptLineId, spec_id: SpecId | None = None) -> None:
         self.active = True
         self._mode = "guess"
+        self._bookmark_current_prompt_pending = False
         self._rep_controller.start_prompt_by_id(prompt_id, spec_id)
         self.show_prompt()
 

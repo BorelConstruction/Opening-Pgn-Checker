@@ -463,6 +463,10 @@ button:disabled,
   background: rgba(2, 6, 23, 0.35);
 }
 
+.history-item.bookmarked {
+  border-color: rgba(250, 204, 21, 0.45);
+}
+
 .history-moves {
   display: block;
   line-height: 1.6;
@@ -503,6 +507,10 @@ button:disabled,
 }
 
 .history-study {
+  white-space: nowrap;
+}
+
+.history-bookmark {
   white-space: nowrap;
 }
 

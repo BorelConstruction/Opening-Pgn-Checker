@@ -19,6 +19,19 @@ def _format_exception_detail() -> str:
     return traceback.format_exc()
 
 
+def _prompt_line_id_from_payload(payload: Any) -> PromptLineId:
+    if not isinstance(payload, dict):
+        raise TypeError("promptId must be an object")
+
+    start_fen = payload.get("startFen")
+    moves = payload.get("moves")
+    if not isinstance(start_fen, str):
+        raise TypeError("promptId.startFen must be a string")
+    if not isinstance(moves, list) or not all(isinstance(move, str) for move in moves):
+        raise TypeError("promptId.moves must be a list of strings")
+    return PromptLineId(start_fen, tuple(moves))
+
+
 class ConnectionManager:
     def __init__(self) -> None:
         self._connections: set[WebSocket] = set()
@@ -266,6 +279,44 @@ async def ws(ws: WebSocket) -> None:
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
+            elif msg_type == "sr_bookmarks":
+                try:
+                    await ws.send_json({"type": "sr_bookmarks", "bookmarks": sr_controller.bookmarks_payload()})
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
+            elif msg_type == "sr_bookmark_current_prompt":
+                try:
+                    sr_controller.bookmark_current_prompt()
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
+            elif msg_type == "sr_bookmark_set":
+                try:
+                    prompt_id = _prompt_line_id_from_payload(msg.get("promptId"))
+                except Exception:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+                    continue
+
+                bookmarked = msg.get("bookmarked")
+                if not isinstance(bookmarked, bool):
+                    await ws.send_json({"type": "error", "message": "bookmarked must be a boolean"})
+                    continue
+
+                view = msg.get("view", "history")
+                if view not in ("history", "bookmarks"):
+                    await ws.send_json({"type": "error", "message": "view must be history or bookmarks"})
+                    continue
+
+                try:
+                    sr_controller.set_prompt_bookmark(prompt_id, bookmarked)
+                    if view == "bookmarks":
+                        await ws.send_json({"type": "sr_bookmarks", "bookmarks": sr_controller.bookmarks_payload()})
+                    else:
+                        await ws.send_json({"type": "sr_history", "history": sr_controller.history_payload()})
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
             elif msg_type == "sr_progress":
                 try:
                     await ws.send_json({"type": "sr_progress", "progress": sr_controller.progress_payload()})
@@ -322,24 +373,18 @@ async def ws(ws: WebSocket) -> None:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
             elif msg_type == "sr_history_study":
-                prompt_id_payload = msg.get("promptId")
-                spec_id = msg.get("specId", "history")
-                if not isinstance(prompt_id_payload, dict):
-                    await ws.send_json({"type": "error", "message": "promptId must be an object"})
+                try:
+                    prompt_id = _prompt_line_id_from_payload(msg.get("promptId"))
+                except Exception:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
                     continue
-                start_fen = prompt_id_payload.get("startFen")
-                moves = prompt_id_payload.get("moves")
-                if not isinstance(start_fen, str):
-                    await ws.send_json({"type": "error", "message": "promptId.startFen must be a string"})
-                    continue
-                if not isinstance(moves, list) or not all(isinstance(move, str) for move in moves):
-                    await ws.send_json({"type": "error", "message": "promptId.moves must be a list of strings"})
-                    continue
-                if not isinstance(spec_id, str):
+
+                spec_id = msg.get("specId")
+                if spec_id is not None and not isinstance(spec_id, str):
                     await ws.send_json({"type": "error", "message": "specId must be a string"})
                     continue
                 try:
-                    sr_controller.study_history_prompt(PromptLineId(start_fen, tuple(moves)), spec_id)
+                    sr_controller.study_history_prompt(prompt_id, spec_id)
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 

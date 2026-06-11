@@ -6,6 +6,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   // log("Creating PGN Viewer UI");
   const srNewBtn = document.getElementById("srNew");
   const srHistoryBtn = document.getElementById("srHistory");
+  const srBookmarksBtn = document.getElementById("srBookmarks");
   const srProgressBtn = document.getElementById("srProgress");
   const srHintBtn = document.getElementById("srHint");
   const srStudyFromHereBtn = document.getElementById("srStudyFromHere");
@@ -18,6 +19,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srGuessGiveUpBtn = document.getElementById("srGuessGiveUp");
   const srGuessFinishBtn = document.getElementById("srGuessFinish");
   const srGuessFinishNewBtn = document.getElementById("srGuessFinishNew");
+  const srGuessBookmarkBtn = document.getElementById("srGuessBookmark");
   const srGuessSkipBtn = document.getElementById("srGuessSkip");
   const srGuessBlacklistBtn = document.getElementById("srGuessBlacklist");
   const srGuessBlacklistLineBtn = document.getElementById("srGuessBlacklistLine");
@@ -59,12 +61,16 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     searchMove: null,
     searchMoveDismissed: false,
     history: null,
+    bookmarks: null,
     historyOpen: false,
+    historyMode: "history",
     historyLoading: false,
+    bookmarksLoading: false,
     progress: null,
     progressOpen: false,
     progressLoading: false,
     startRange: null,
+    bookmarkQueued: false,
   };
 
   const reviewNav = {
@@ -252,15 +258,19 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       return;
     }
 
-    const entries = state.history && Array.isArray(state.history.entries) ? state.history.entries : [];
-    const count = state.history && typeof state.history.count === "number" ? state.history.count : entries.length;
-    historyTitle.textContent = `History (${count})`;
+    const isBookmarks = state.historyMode === "bookmarks";
+    const payload = isBookmarks ? state.bookmarks : state.history;
+    const entries = payload && Array.isArray(payload.entries) ? payload.entries : [];
+    const count = payload && typeof payload.count === "number" ? payload.count : entries.length;
+    const title = isBookmarks ? "Bookmarks" : "History";
+    historyTitle.textContent = `${title} (${count})`;
     historyResults.innerHTML = "";
 
-    if (state.historyLoading) {
+    const loadingActive = isBookmarks ? state.bookmarksLoading : state.historyLoading;
+    if (loadingActive) {
       const loading = document.createElement("div");
       loading.className = "history-empty";
-      loading.textContent = "Loading history...";
+      loading.textContent = isBookmarks ? "Loading bookmarks..." : "Loading history...";
       historyResults.appendChild(loading);
       historyOverlay.hidden = false;
       return;
@@ -269,7 +279,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     if (!entries.length) {
       const empty = document.createElement("div");
       empty.className = "history-empty";
-      empty.textContent = "No prompt history yet";
+      empty.textContent = isBookmarks ? "No bookmarked prompt lines yet" : "No prompt history yet";
       historyResults.appendChild(empty);
       historyOverlay.hidden = false;
       return;
@@ -278,6 +288,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     for (const entry of entries) {
       const item = document.createElement("div");
       item.className = "history-item";
+      item.classList.toggle("bookmarked", !!entry.bookmarked);
 
       if (typeof entry.promptTime === "number") {
         item.title = new Date(entry.promptTime * 1000).toLocaleString();
@@ -312,16 +323,36 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       const meta = document.createElement("div");
       meta.className = "history-meta";
 
-      const performance = document.createElement("div");
-      performance.className = "history-performance";
-      if (typeof entry.performance === "number") {
-        const hue = 120 * (1 - clamp01(entry.performance));
-        performance.textContent = `avg loss ${entry.performance.toFixed(2)}`;
-        performance.style.color = `hsl(${hue} 75% 60%)`;
-      } else {
-        performance.textContent = "avg loss n/a";
+      if (!isBookmarks) {
+        const performance = document.createElement("div");
+        performance.className = "history-performance";
+        if (typeof entry.performance === "number") {
+          const hue = 120 * (1 - clamp01(entry.performance));
+          performance.textContent = `avg loss ${entry.performance.toFixed(2)}`;
+          performance.style.color = `hsl(${hue} 75% 60%)`;
+        } else {
+          performance.textContent = "avg loss n/a";
+        }
+        meta.appendChild(performance);
       }
-      meta.appendChild(performance);
+
+      const bookmarkBtn = document.createElement("button");
+      bookmarkBtn.type = "button";
+      bookmarkBtn.className = "history-bookmark";
+      bookmarkBtn.disabled = !canStudyHistoryEntry(entry);
+      bookmarkBtn.textContent = isBookmarks ? "Remove" : (entry.bookmarked ? "Bookmarked" : "Bookmark");
+      bookmarkBtn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (bookmarkBtn.disabled) return;
+        bookmarkBtn.disabled = true;
+        send({
+          type: "sr_bookmark_set",
+          promptId: entry.promptId,
+          bookmarked: isBookmarks ? false : !entry.bookmarked,
+          view: state.historyMode,
+        });
+      });
+      meta.appendChild(bookmarkBtn);
 
       const studyBtn = document.createElement("button");
       studyBtn.type = "button";
@@ -448,6 +479,15 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     renderHistory();
   }
 
+  function applyBookmarks(bookmarks) {
+    if (!bookmarks || typeof bookmarks.count !== "number" || !Array.isArray(bookmarks.entries)) {
+      throw new Error("Invalid bookmarks payload");
+    }
+    state.bookmarks = bookmarks;
+    state.bookmarksLoading = false;
+    renderHistory();
+  }
+
   function applyProgress(progress) {
     if (!progress || typeof progress.learnedMoves !== "number") {
       throw new Error("Invalid progress payload");
@@ -464,6 +504,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     const canSkipGuess = isGuess && state.currentSpecId === "new";
     srNewBtn.disabled = !active;
     srHistoryBtn.disabled = !active;
+    srBookmarksBtn.disabled = !active;
     srProgressBtn.disabled = !active;
     srHintBtn.disabled = !isGuess;
     srStudyFromHereBtn.disabled = !isReview;
@@ -472,6 +513,8 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srGuessGiveUpBtn.disabled = !isGuess;
     srGuessFinishBtn.disabled = !isGuess;
     srGuessFinishNewBtn.disabled = !isGuess;
+    srGuessBookmarkBtn.disabled = !isGuess || !!state.bookmarkQueued;
+    srGuessBookmarkBtn.textContent = state.bookmarkQueued ? "Bookmark queued" : "Bookmark";
     srGuessSkipBtn.disabled = !canSkipGuess;
     srGuessBlacklistBtn.disabled = !isGuess;
     srGuessBlacklistLineBtn.disabled = !isGuess;
@@ -1370,9 +1413,11 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     state.debugTree = sr.debugTree || null;
     state.searchMove = sr.searchMove || null;
     state.startRange = Number.isInteger(sr.startRange) ? sr.startRange : null;
+    state.bookmarkQueued = !!sr.bookmarkQueued;
     if (!state.active) {
       state.historyOpen = false;
       state.historyLoading = false;
+      state.bookmarksLoading = false;
       state.progressOpen = false;
       state.progressLoading = false;
     }
@@ -1441,10 +1486,19 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   srNewBtn.addEventListener("click", () => send({ type: "sr_new" }));
   srHistoryBtn.addEventListener("click", () => {
     closeProgressOverlay();
+    state.historyMode = "history";
     state.historyOpen = true;
     state.historyLoading = true;
     renderHistory();
     send({ type: "sr_history" });
+  });
+  srBookmarksBtn.addEventListener("click", () => {
+    closeProgressOverlay();
+    state.historyMode = "bookmarks";
+    state.historyOpen = true;
+    state.bookmarksLoading = true;
+    renderHistory();
+    send({ type: "sr_bookmarks" });
   });
   srProgressBtn.addEventListener("click", () => {
     closeHistoryOverlay();
@@ -1462,6 +1516,11 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   srGuessGiveUpBtn.addEventListener("click", () => send({ type: "sr_give_up" }));
   srGuessFinishBtn.addEventListener("click", () => send({ type: "sr_finish_prompt" }));
   srGuessFinishNewBtn.addEventListener("click", () => send({ type: "sr_finish_prompt_new" }));
+  srGuessBookmarkBtn.addEventListener("click", () => {
+    if (srGuessBookmarkBtn.disabled) return;
+    srGuessBookmarkBtn.disabled = true;
+    send({ type: "sr_bookmark_current_prompt" });
+  });
   srGuessSkipBtn.addEventListener("click", () => {
     if (srGuessSkipBtn.disabled) return;
     showSkipToast();
@@ -1488,6 +1547,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   return {
     applySrState,
     applyHistory,
+    applyBookmarks,
     applyProgress,
     applyReviewNavigation,
     refreshBoardState: refreshAnalyzeLichessLink,
