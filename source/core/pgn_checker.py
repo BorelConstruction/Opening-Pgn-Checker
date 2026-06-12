@@ -296,7 +296,7 @@ class PgnChecker:
             if move not in board.legal_moves:
                 continue
 
-            q_eval = self.session.q_eval_move(node, move).eval
+            q_eval = self.session.q_eval_move(node, move).best_eval()
 
             diff = abs(q_eval - engine_eval)
             if diff <= eval_eps:
@@ -392,7 +392,7 @@ class PgnChecker:
 
         # if no DB moves and option enabled, add an engine move
         if not moves and self.session.options.use_engine_for_them and maybe_use_engine:
-            engine_move = self.session.query(fen(node), "q-eval").move
+            engine_move = self.session.query(fen(node), "q-eval").best_move()
             c = "Engine".upper() if DEBUG_MODE else ""
             moves.append(MoveChoice(engine_move, "eng", None, c)) 
 
@@ -500,7 +500,7 @@ class PgnChecker:
 
         popular_child.nags.add(chess.pgn.NAG_DUBIOUS_MOVE)
 
-        engine_reply = self.session.q_eval_move(parent, popular_move).move
+        engine_reply = self.session.q_eval_move(parent, popular_move).best_move()
         if not any(child.move == engine_reply for child in popular_child.variations):
             self.session._add_variation(popular_child, engine_reply, to_main=True)
 
@@ -582,7 +582,7 @@ class PgnChecker:
                     None,
                 )
 
-                base_eval = self.session.query(fen(unique_node), "q-eval").eval
+                base_eval = self.session.query(fen(unique_node), "q-eval").best_eval()
 
                 parent = unique_node.parent
 
@@ -608,7 +608,7 @@ class PgnChecker:
                         )
                         continue
 
-                    alt_eval = self.session.q_eval_move(parent, alt_move).eval
+                    alt_eval = self.session.q_eval_move(parent, alt_move).best_eval()
 
                     diff = abs(alt_eval - base_eval)
                     status = "Replaceable" if diff <= eval_eps else ""

@@ -36,7 +36,6 @@ from ..core.boardtools import (
 )
 from ..core.options import SpacedRepetitionOptions, DEBUG_MODE, save_settings
 from ..core.repertoire import RepertoireSession, default_repertoire_cache_path
-from ..core.runner import quick_eval_lines
 from .pgn_export import export_pgn_subtree
 from .variation_tree import node_at_path, path_from_root, build_variation_tree
 from .scheduler_protocol import *
@@ -212,7 +211,7 @@ class RepetitionEngine():
         prpt_data = self._prompt_state
         if prpt_data.off_file:
             if use_engine:
-                best_move = self._session.query(prpt_data.off_file_fen, "q-eval").move
+                best_move = self._session.query(prpt_data.off_file_fen, "q-eval").best_move()
                 if best_move is not None:
                     return best_move.uci()
             return None
@@ -231,7 +230,7 @@ class RepetitionEngine():
             return expected_node.move.uci()
 
         if use_engine:
-            best_move = self._session.query(fen(prpt_data.node), "q-eval").move
+            best_move = self._session.query(fen(prpt_data.node), "q-eval").best_move()
             if best_move is not None:
                 return best_move.uci()
         return None
@@ -1053,15 +1052,15 @@ class RepetitionEngine():
         expected_moves = [expected_uci] # only this for now
         expected_sans = ", ".join(expected_moves)
         user_ev = self._session.q_eval_move(prpt_data.node, uci)
-        eval, move = user_ev.eval, user_ev.move
+        move_eval, reply_move = user_ev.best_eval(), user_ev.best_move()
         evals = [self._evaluate_move(prpt_data.node, m) for m in expected_moves]
         best_expected_eval = max(evals) if evals else None
 
         msg = f"Wrong. Expected: {expected_sans}."
         if best_expected_eval is not None:
-            msg += f" Your move eval {eval:+.2f} after {move.uci()}. File move eval {best_expected_eval:+.2f}."
+            msg += f" Your move eval {move_eval:+.2f} after {reply_move.uci()}. File move eval {best_expected_eval:+.2f}."
 
-        eval_diff = None if best_expected_eval is None else eval - best_expected_eval
+        eval_diff = None if best_expected_eval is None else move_eval - best_expected_eval
         rel_eval_diff = None
         if best_expected_eval not in (None, 0):
             rel_eval_diff = eval_diff / best_expected_eval
@@ -1082,13 +1081,13 @@ class RepetitionEngine():
         off_file_fen = self._prompt_state.off_file_fen
         off_file_board = to_board(off_file_fen)
         ev = self._session.query(off_file_fen, "q-eval")
-        expected_eval, best_reply = ev.eval, ev.move
+        expected_eval, best_reply = ev.best_eval(), ev.best_move()
         if best_reply is None:
             return MoveGrade(MoveCorrectness.UNDEF, msg="No engine reply for the off-file position.")
 
         best_reply_san = off_file_board.san(best_reply)
         user_ev = self._session.q_eval_move(off_file_board, uci)
-        move_eval, reply_to_user = user_ev.eval, user_ev.move
+        move_eval, reply_to_user = user_ev.best_eval(), user_ev.best_move()
 
         eval_gap = expected_eval - move_eval
         msg = f"Off-file position. Your move: eval {move_eval:+.2f} after {reply_to_user}."
@@ -1110,7 +1109,7 @@ class RepetitionEngine():
         )
 
     def _evaluate_move(self, position: Union[chess.Board, Node], move: Union[chess.Move, str]) -> float:
-        return self._session.q_eval_move(position, move).eval
+        return self._session.q_eval_move(position, move).best_eval()
 
     def _should_skip_current_prompt_position(self, skip_index: int) -> bool:
         prompt_node = self._prompt_state.node
@@ -1444,12 +1443,7 @@ class RepetitionEngine():
 
     def _choose_engine_off_book_move(self, position: BoardLike) -> OffBookSelection:
         for i in range(self.MAX_OFF_BOOK_BLACKLIST_ATTEMPTS):
-            engine_lines = quick_eval_lines(
-                self._session.engine,
-                fen(position),
-                pov=self._session.options.side,
-                multipv=i+1
-            )
+            engine_lines = self._session.query(fen(position), "q-eval").top(i + 1)
             if not engine_lines:
                 return OffBookSelection(None, "no engine move")
 

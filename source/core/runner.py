@@ -89,9 +89,20 @@ class PosCache:
         if "db_masters" in data:
             pc._data["db_masters"] = data["db_masters"]
         if "eval" in data:
-            pc._data["eval"] = EvalProvider.from_dict(session, pc.fen, data["eval"])
+            pc._data["eval"] = EvalProvider.from_dict(
+                session,
+                pc.fen,
+                data["eval"],
+                evaluator=session.engine_eval,
+            )
         if "q-eval" in data:
-            pc._data["q-eval"] = EngineEval.from_dict(data["q-eval"])
+            pc._data["q-eval"] = EvalProvider.from_dict(
+                session,
+                pc.fen,
+                data["q-eval"],
+                evaluator=session.quick_engine_eval,
+                legacy_single_line=True,
+            )
         return pc
 
 
@@ -175,9 +186,15 @@ class EngineEval(NamedTuple):
         return cls(payload["eval"], move)
 
 class EvalProvider(QueryResult):
-    def __init__(self, session: 'PgnSession', fen: str):
+    def __init__(
+        self,
+        session: 'PgnSession',
+        fen: str,
+        evaluator: Callable[[str, int], list[EngineEval]],
+    ):
         self._session = session   # gives access to engine, options, cache helpers
         self._fen = fen
+        self._evaluator = evaluator
         
         # TODO: remember depths
 
@@ -190,14 +207,32 @@ class EvalProvider(QueryResult):
         return {"multipvs": multipvs}
 
     @classmethod
-    def from_dict(cls, session: 'PgnSession', fen: str, payload: dict) -> "EvalProvider":
-        ev = cls(session, fen)
+    def from_dict(
+        cls,
+        session: 'PgnSession',
+        fen: str,
+        payload: dict,
+        evaluator: Callable[[str, int], list[EngineEval]],
+        *,
+        legacy_single_line: bool = False,
+    ) -> "EvalProvider":
+        if not isinstance(payload, dict):
+            raise TypeError("EvalProvider payload must be a dict")
+        ev = cls(session, fen, evaluator)
+        if legacy_single_line and "multipvs" not in payload:
+            ev._multipvs = {1: [cls._engine_eval_from_dict(payload)]}
+            return ev
+        multipv_payload = payload.get("multipvs")
+        if not isinstance(multipv_payload, dict):
+            raise TypeError("EvalProvider payload must contain a multipvs dict")
         multipvs = {}
-        for amount, lines in payload.get("multipvs", {}).items():
+        for amount, lines in multipv_payload.items():
             try:
                 key = int(amount)
-            except (TypeError, ValueError):
-                continue
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid MultiPV cache key: {amount!r}") from exc
+            if not isinstance(lines, list):
+                raise TypeError(f"MultiPV cache entry {amount!r} must be a list")
             multipvs[key] = [cls._engine_eval_from_dict(line) for line in lines]
         ev._multipvs = multipvs
         return ev
@@ -211,6 +246,8 @@ class EvalProvider(QueryResult):
 
     @staticmethod
     def _engine_eval_from_dict(payload: dict) -> EngineEval:
+        if not isinstance(payload, dict):
+            raise TypeError("Engine eval cache payload must be a dict")
         move = payload["move"]
         if isinstance(move, str):
             move = chess.Move.from_uci(move)
@@ -220,17 +257,25 @@ class EvalProvider(QueryResult):
         if amount not in self._multipvs:
             if cache_only:
                 return None
-            result = self._session.engine_eval(self._fen, multipv=amount)
+            result = self._evaluator(self._fen, amount)
             for n in range(1, amount + 1):
                 if n not in self._multipvs:
                     self._multipvs[n] = result[:n] # will make cache heavier, so make push this to retrieval if that becomes a problem
         return self._multipvs[amount]
     
-    def best_move(self) -> str:
+    def best_move(self) -> chess.Move:
         return self.top(1)[0].move
     
     def best_eval(self) -> float:
         return self.top(1)[0].eval
+
+    @property
+    def move(self) -> chess.Move:
+        return self.best_move()
+
+    @property
+    def eval(self) -> float:
+        return self.best_eval()
 
 
 class PgnSession:
@@ -290,7 +335,6 @@ class PgnSession:
             self.options.starting_fen = fen(self.options.starting_fen)
 
     def _init_queries(self):
-        pov = getattr(self.options, "side", WHITE)
         self._queries = {
             # NOTE: will be a bug is self.opening_explorer changes
             # (as self.cache will then store the result relative to the old explorer)
@@ -299,10 +343,10 @@ class PgnSession:
 
             "db_masters": lambda fen: safe_get_games(self.opening_explorer, position=fen, lichess=False),
 
-            "eval": lambda fen: EvalProvider(self, fen),
+            "eval": lambda fen: EvalProvider(self, fen, self.engine_eval),
 
             # if we don't cache quick evals, results will be different every time
-            "q-eval": lambda fen: quick_eval(self.engine, fen, pov=pov),
+            "q-eval": lambda fen: EvalProvider(self, fen, self.quick_engine_eval),
         }
 
     def query(self, fen: str, type: str, cache_only=False):
@@ -365,6 +409,13 @@ class PgnSession:
         adaptive = getattr(self.options, "adaptive_an", True)
         return evaluate_position(self.engine, fen, pov=pov, options=self.options,
                                      adaptive=adaptive, multipv=multipv) # TODO
+
+    def quick_engine_eval(self, position_fen: str, multipv: int = 1) -> list[EngineEval]:
+        board = chess.Board(position_fen)
+        pov = getattr(self.options, "side", WHITE)
+        sys.stderr.write(f"\n Quick eval for {fen(board)}")
+        infos = analyse_time_limit(self.engine, board, time_limit=0.3, multipv=multipv)
+        return process_engine_output(infos, board, pov)
 
 
     def init_client(self):
@@ -561,7 +612,7 @@ class PgnSession:
                 del tted_nodes[idx]
                 return
     
-    def q_eval_move(self, board: Union[Node, chess.Board], move: Union[chess.Move, str]) -> EngineEval:
+    def q_eval_move(self, board: Union[Node, chess.Board], move: Union[chess.Move, str]) -> EvalProvider:
         if isinstance(board, Node):
             board = board.board()
         if isinstance(move, str):
@@ -658,30 +709,6 @@ def close_engine(engine):
 
 def stats_for_uci(games: dict, uci: str):
     return next((m for m in games['moves'] if m['uci'] == uci_from_pgn_to_lichess(uci)), None) # {}
-
-
-def quick_eval_lines(
-    engine,
-    position: str | chess.Board,
-    pov=WHITE,
-    multipv: int = 1,
-    time_limit=0.3,
-) -> list[EngineEval]:
-    if isinstance(position, str):
-            board = chess.Board(position)
-    elif isinstance(position, chess.Board):
-            board = position
-    else:
-        raise TypeError("position must be a FEN string or chess.Board")
-    
-    sys.stderr.write(f"\n Quick eval for {fen(board)}")
-    
-    infos = analyse_time_limit(engine, board, time_limit=time_limit, multipv=multipv)
-    return process_engine_output(infos, board, pov)
-
-
-def quick_eval(engine, position: Union[str, chess.Board], pov=WHITE, time_limit=0.3) -> EngineEval:
-    return quick_eval_lines(engine, position, pov=pov, multipv=1, time_limit=time_limit)[0]
 
 
 class Runner:
