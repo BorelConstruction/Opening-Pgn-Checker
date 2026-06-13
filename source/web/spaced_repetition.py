@@ -1087,11 +1087,11 @@ class RepetitionEngine():
 
         best_reply_san = off_file_board.san(best_reply)
         user_ev = self._session.q_eval_move(off_file_board, uci)
-        move_eval, reply_to_user = user_ev.best_eval(), user_ev.best_move()
+        user_move_eval, reply_to_user = user_ev.best_eval(), user_ev.best_move()
 
-        eval_gap = expected_eval - move_eval
-        msg = f"Off-file position. Your move: eval {move_eval:+.2f} after {reply_to_user}."
-        if uci == best_reply.uci() or eval_gap <= 0.2 or move_eval > 0.8*expected_eval:
+        eval_gap = expected_eval - user_move_eval
+        msg = f"Off-file position. Your move: eval {user_move_eval:+.2f} after {reply_to_user}."
+        if uci == best_reply.uci() or eval_gap <= 0.2 or user_move_eval > 0.8*expected_eval:
             msg += f" Best was {best_reply_san} with evaluation {expected_eval:+.2f}. Good job!"
             grade = MoveCorrectness.CORRECT
         else:
@@ -1099,13 +1099,16 @@ class RepetitionEngine():
                 f" Best was {best_reply_san} with evaluation {expected_eval:+.2f}. "
                 "Try again."
             )
-            grade = MoveCorrectness.INCORRECT
+            if user_move_eval > 2: # okay let's not consider it a mistake if we are still winning
+                grade = MoveCorrectness.ALTERNATIVE
+            else:    
+                grade = MoveCorrectness.INCORRECT
         msg = msg.strip()
 
         return MoveGrade(
             grade,
             msg=msg,
-            eval_diff=move_eval - expected_eval,
+            eval_diff=user_move_eval - expected_eval,
         )
 
     def _evaluate_move(self, position: Union[chess.Board, Node], move: Union[chess.Move, str]) -> float:
