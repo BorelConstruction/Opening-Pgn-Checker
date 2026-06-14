@@ -728,7 +728,7 @@ class RepetitionEngine():
         children = self._prompt_variations(parent)
         return bool(children)
 
-    def _maybe_choose_off_file_prompt(self, parent: Node) -> tuple[bool, str]:
+    def _maybe_choose_off_book_prompt(self, parent: Node) -> tuple[bool, str]:
         if parent.turn() == self._session.options.side:
             return False, ""
         if self._rng.random() >= self.non_file_move_freq:
@@ -1122,11 +1122,14 @@ class RepetitionEngine():
             return False
         if self._current_expected_node() is None:
             return False
+        uci = prompt_node.move.uci()
         if prompt_node.parent is None or prompt_node.move is None:
             return False
-        if self._move_is_marked_to_skip(prompt_node.parent, prompt_node.move.uci()):
+        if self._move_is_marked_to_skip(prompt_node.parent, uci):
             return True
-        if not self._is_learned_prompt_position(prompt_node):
+        if not self._is_learned_prompt_position(prompt_node, uci):
+            return False
+        if self._performance_history(prompt_node, uci)[-3:] != [1, 1, 1]:
             return False
 
         skip_probability = self.LEARNED_MOVE_SKIP_PROBABILITY * (0.4 ** skip_index)
@@ -1172,7 +1175,7 @@ class RepetitionEngine():
 
         if self._prompt_state.node_index is not None:
             if self._prompt_state.node.turn() != self._session.options.side:
-                selected_off_file, selection_debug = self._maybe_choose_off_file_prompt(self._prompt_state.node)
+                selected_off_file, selection_debug = self._maybe_choose_off_book_prompt(self._prompt_state.node)
                 if selected_off_file:
                     self._prompt_state.message = selection_debug
                     self._activate_prompt_state()
