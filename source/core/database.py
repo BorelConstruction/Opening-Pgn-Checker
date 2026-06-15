@@ -2,26 +2,57 @@ import sys
 import time
 import berserk
 
+from collections.abc import Iterable
 from chess import Color as Color
 from chess import WHITE
 from typing import Union
 
+from .options import normalize_db_ratings
 
-ratings = ["2200", "2500"] # TODO: make parameters
-speeds = ["blitz", "rapid", "classical"]
+DEFAULT_DB_SPEEDS = ("blitz", "rapid", "classical")
 
-ratings_n = ["1900", "2200"]
-speeds_n = ["blitz", "rapid", "classical"]
 
-def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attempts=5, lichess=True, base_delay=30.0, **kwargs) -> dict:
+def _normalize_db_speeds(speeds: Iterable[str] | None) -> list[str]:
+    if speeds is None:
+        return list(DEFAULT_DB_SPEEDS)
+    if isinstance(speeds, str):
+        raise TypeError("speeds must be a list of strings")
+    try:
+        normalized = list(speeds)
+    except TypeError as e:
+        raise TypeError("speeds must be a list of strings") from e
+    if any(not isinstance(speed, str) for speed in normalized):
+        raise TypeError("speeds must contain strings")
+    return normalized
+
+
+def safe_get_games(
+    opening_explorer: berserk.OpeningStatistic,
+    *args,
+    max_attempts=5,
+    lichess=True,
+    base_delay=30.0,
+    ratings: Iterable[str] | None = None,
+    speeds: Iterable[str] | None = None,
+    **kwargs,
+) -> dict:
     '''Query the database, retrying if HTTP 429 is raised
         (which means we query too often)'''
+    if lichess:
+        lichess_ratings = normalize_db_ratings(ratings)
+        lichess_speeds = _normalize_db_speeds(speeds)
+    
     time.sleep(0.1)
     for attempt in range(max_attempts):
         try:
             sys.stderr.write("\n querying the DB...")
             if lichess:
-                games = opening_explorer.get_lichess_games(*args, **kwargs, ratings=ratings, speeds=speeds)
+                games = opening_explorer.get_lichess_games(
+                    *args,
+                    **kwargs,
+                    ratings=lichess_ratings,
+                    speeds=lichess_speeds,
+                )
             else:
                 games = opening_explorer.get_masters_games(*args, **kwargs)
             return games
@@ -58,8 +89,6 @@ def safe_get_games(opening_explorer: berserk.OpeningStatistic, *args, max_attemp
                 sys.stderr.write(f"\nRetrying...")
                 time.sleep(10)
             continue
-        except Exception as e:
-            raise  # something else bubble up
 
     raise RuntimeError("Too many failed attempts – giving up")
 

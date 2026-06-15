@@ -339,7 +339,11 @@ class PgnSession:
             # NOTE: will be a bug is self.opening_explorer changes
             # (as self.cache will then store the result relative to the old explorer)
             # If we expect this to happen, here and below such parameters have to be frozen (and not cached)
-            "db_lichess": lambda fen: safe_get_games(self.opening_explorer, position=fen),
+            "db_lichess": lambda fen: safe_get_games(
+                self.opening_explorer,
+                position=fen,
+                ratings=self.options.db_ratings,
+            ),
 
             "db_masters": lambda fen: safe_get_games(self.opening_explorer, position=fen, lichess=False),
 
