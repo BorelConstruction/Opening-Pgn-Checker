@@ -32,7 +32,7 @@ from pyvis.network import Network
 from .traversal import traverse, TraversalPolicy, default_children, mainline_children
 from .runner import PgnSession, fen
 from .boardtools import *
-from .options import cache_filename_from_string, db_ratings_cache_label, is_default_db_ratings
+from .options import DEFAULT_DB_RATINGS, cache_filename_from_string
 
 # Type aliases
 Board : TypeAlias    = chess.Board
@@ -362,8 +362,9 @@ class InclusionGraphRunner:
 
         def default_cache_path() -> str:
             signature = options.starting_fen
-            if not is_default_db_ratings(options.db_ratings):
-                signature = f"{signature}|db_ratings={db_ratings_cache_label(options.db_ratings)}"
+            if options.db_ratings != DEFAULT_DB_RATINGS:
+                ratings_label = "-".join(options.db_ratings) if options.db_ratings else "all"
+                signature = f"{signature}|db_ratings={ratings_label}"
             return cache_filename_from_string("graph", signature)
 
         self.session = PgnSession(

@@ -1301,8 +1301,8 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
 
   function debugViewportFocusNode(scene) {
     return (
-      scene.nodes.find((node) => node.node && node.node.isAnchor) ||
       scene.nodes.find((node) => node.node && node.node.isCurrent) ||
+      scene.nodes.find((node) => node.node && node.node.isAnchor) ||
       scene.nodes[0] ||
       null
     );

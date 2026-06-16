@@ -46,8 +46,6 @@ from .memory_model import (
     PerformanceRecord,
 )
 
-# TODO: add transpositioning moves to the move list?
-
 K = TypeVar("K")
 MarkKind = Literal["blacklist", "skip"]
 
@@ -1817,7 +1815,7 @@ class RepetitionEngine():
         return self._build_debug_tree_payload(
             root=self._root,
             root_label="Study root",
-            prefix_path=tuple(anchor_path_list),
+            prefix_path=tuple(current_path_list),
             current_path=tuple(current_path_list),
             anchor_path=tuple(anchor_path_list),
             prompt_path=prompt_path,
@@ -2401,7 +2399,7 @@ class AppController:
                 self._prefetch_db_stats()
 
             self.start_next_prompt()
-        finally: # TODO: make sure to find the approptiate moment to save the cache
+        finally: # TODO: make sure to find the appropriate moment to save the cache
             try:
                 self._session.save_cache()
             except Exception as exc:

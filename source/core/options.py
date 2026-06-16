@@ -1,4 +1,3 @@
-from collections.abc import Iterable
 from dataclasses import dataclass, field, asdict, fields
 import json
 import os
@@ -10,46 +9,8 @@ CONFIG_FILE = "settings.json"
 
 DEBUG_MODE = True
 
-VALID_DB_RATINGS = ("1900", "2200", "2500")
-DEFAULT_DB_RATINGS = ("2200", "2500")
-
-
-def normalize_db_ratings(ratings: Iterable[str] | None) -> list[str]:
-    if ratings is None:
-        return list(DEFAULT_DB_RATINGS)
-    if isinstance(ratings, str):
-        raise TypeError("db_ratings must be a list of rating strings")
-    try:
-        selected = list(ratings)
-    except TypeError as e:
-        raise TypeError("db_ratings must be a list of rating strings") from e
-
-    non_strings = [rating for rating in selected if not isinstance(rating, str)]
-    if non_strings:
-        raise TypeError("db_ratings must contain strings")
-
-    invalid = [rating for rating in selected if rating not in VALID_DB_RATINGS]
-    if invalid:
-        raise ValueError(
-            f"db_ratings must be a subset of {list(VALID_DB_RATINGS)}; got {invalid}"
-        )
-
-    if len(set(selected)) != len(selected):
-        raise ValueError("db_ratings cannot contain duplicates")
-
-    selected_set = set(selected)
-    return [rating for rating in VALID_DB_RATINGS if rating in selected_set]
-
-
-def is_default_db_ratings(ratings: Iterable[str]) -> bool:
-    return normalize_db_ratings(ratings) == list(DEFAULT_DB_RATINGS)
-
-
-def db_ratings_cache_label(ratings: Iterable[str]) -> str:
-    normalized = normalize_db_ratings(ratings)
-    if not normalized:
-        return "all"
-    return "-".join(normalized)
+VALID_DB_RATINGS = ["1900", "2200", "2500"]
+DEFAULT_DB_RATINGS = ["2200", "2500"]
 
 '''
     CoreOptions are the options that we expect to stay constant throughout the program.
@@ -99,20 +60,23 @@ class CoreOptions:
     )
 
     db_ratings: list = field(
-        default_factory=lambda: list(DEFAULT_DB_RATINGS),
+        default_factory=lambda: DEFAULT_DB_RATINGS.copy(),
         metadata={
             "label": "Lichess Ratings",
             "options": {rating: rating for rating in VALID_DB_RATINGS},
         }
     )
 
-    def __post_init__(self):
-        self.db_ratings = normalize_db_ratings(self.db_ratings)
-
     def validate(self):
-        self.db_ratings = normalize_db_ratings(self.db_ratings)
         if self.min_depth > self.max_depth:
             raise ValueError("min_depth must be ≤ max_depth")
+        if not isinstance(self.db_ratings, list):
+            raise TypeError("db_ratings must be a list")
+        invalid_ratings = [rating for rating in self.db_ratings if rating not in VALID_DB_RATINGS]
+        if invalid_ratings:
+            raise ValueError(f"db_ratings must be a subset of {VALID_DB_RATINGS}; got {invalid_ratings}")
+        if len(set(self.db_ratings)) != len(self.db_ratings):
+            raise ValueError("db_ratings cannot contain duplicates")
         
 
 @dataclass

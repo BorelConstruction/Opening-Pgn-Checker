@@ -514,7 +514,7 @@ class PgnChecker:
 
     def nags_our_move(self, node: Node):
         nags = []
-        if self.move_is_important(node): # TODO: if the move is important, increase added depth, or show why the alternative is worse
+        if self.move_is_important(node):
             nags.append(chess.pgn.NAG_WHITE_ZUGZWANG)
         return nags 
 
@@ -556,7 +556,7 @@ class PgnChecker:
 
     def move_replacements(self, move_coupling: dict[str, list[Node]], *, eval_eps: float = 0.15, sleep_s: float = 2.0):
         """
-        Try to make replies more same for same opponent moves.
+        Try to make replies more similar for similar opponent moves.
 
         Technically:
         For each move A of opponent, see if there is a move B that is suggested only once
@@ -691,15 +691,15 @@ def compute_question_marks(eval_was: float, eval_became: float) -> list[int]:
 
 
 def mark_based_on_freq_them(node: Node, freq: float): # should also depend on the number of games
-    if 0.55 < freq <= 0.76:         # above that consider the move obious and don't mark
+    if 0.55 <= freq < 0.76:         # above that consider the move obious and don't mark
         mark = chess.svg.Arrow(node.move.to_square, node.move.to_square, color="red") # yes that's how you mark squares with this library clownface.png
         node.set_arrows([mark])
-    elif 0.4 < freq <= 0.55:
+    elif 0.4 <= freq < 0.55:
         mark = chess.svg.Arrow(node.move.to_square, node.move.to_square, color="yellow")
         node.set_arrows([mark])
 
 def mark_based_on_freq_us(node: Node, freq: float):
-    if freq <= 0.15:
+    if freq < 0.15:
         mark = chess.svg.Arrow(node.move.from_square, node.move.to_square, color="green")
         node.set_arrows([mark])
 

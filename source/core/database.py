@@ -2,28 +2,13 @@ import sys
 import time
 import berserk
 
-from collections.abc import Iterable
 from chess import Color as Color
 from chess import WHITE
 from typing import Union
 
-from .options import normalize_db_ratings
+from .options import DEFAULT_DB_RATINGS
 
-DEFAULT_DB_SPEEDS = ("blitz", "rapid", "classical")
-
-
-def _normalize_db_speeds(speeds: Iterable[str] | None) -> list[str]:
-    if speeds is None:
-        return list(DEFAULT_DB_SPEEDS)
-    if isinstance(speeds, str):
-        raise TypeError("speeds must be a list of strings")
-    try:
-        normalized = list(speeds)
-    except TypeError as e:
-        raise TypeError("speeds must be a list of strings") from e
-    if any(not isinstance(speed, str) for speed in normalized):
-        raise TypeError("speeds must contain strings")
-    return normalized
+DEFAULT_DB_SPEEDS = ["blitz", "rapid", "classical"]
 
 
 def safe_get_games(
@@ -32,15 +17,15 @@ def safe_get_games(
     max_attempts=5,
     lichess=True,
     base_delay=30.0,
-    ratings: Iterable[str] | None = None,
-    speeds: Iterable[str] | None = None,
+    ratings: list[str] | None = None,
+    speeds: list[str] | None = None,
     **kwargs,
 ) -> dict:
     '''Query the database, retrying if HTTP 429 is raised
         (which means we query too often)'''
     if lichess:
-        lichess_ratings = normalize_db_ratings(ratings)
-        lichess_speeds = _normalize_db_speeds(speeds)
+        lichess_ratings = ratings if ratings is not None else DEFAULT_DB_RATINGS
+        lichess_speeds = speeds if speeds is not None else DEFAULT_DB_SPEEDS
     
     time.sleep(0.1)
     for attempt in range(max_attempts):

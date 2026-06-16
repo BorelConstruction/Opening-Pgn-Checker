@@ -6,7 +6,7 @@ from typing import Callable, Optional
 import chess
 
 from .boardtools import ply_from_move_number
-from .options import RepertoireOptions, db_ratings_cache_label, is_default_db_ratings
+from .options import DEFAULT_DB_RATINGS, RepertoireOptions
 from .runner import PgnSession
 
 
@@ -14,8 +14,9 @@ def default_repertoire_cache_path(options: RepertoireOptions, base = "cache") ->
     name = "cache"
     if options.input_pgn:
         name = os.path.splitext(os.path.basename(options.input_pgn))[0]
-    if not is_default_db_ratings(options.db_ratings):
-        name = f"{name}_ratings-{db_ratings_cache_label(options.db_ratings)}"
+    if options.db_ratings != DEFAULT_DB_RATINGS:
+        ratings_label = "-".join(options.db_ratings) if options.db_ratings else "all"
+        name = f"{name}_ratings-{ratings_label}"
     return os.path.join(base, f"{name}.json")
 
     # more rubust -- does not depend on the file naming
