@@ -577,7 +577,7 @@ class RepetitionEngine():
     def _leads_to_skip_for(self, position: BoardLike) -> list[UCI]:
         return self._pos_drill_data[fen(position)]["leads_to_skip"]
 
-    def _is_learned_prompt_position(self, prompt_node: Node) -> bool:
+    def _prompt_position_is_learned(self, prompt_node: Node) -> bool:
         if prompt_node.parent is None or prompt_node.move is None:
             return False
         parent = prompt_node.parent
@@ -705,10 +705,50 @@ class RepetitionEngine():
             raise RuntimeError("Cannot skip without an active prompt node")
         
         if self._prompt_state.off_file:
-            raise RuntimeError("Cannot skip an off-file prompt")
+            if self._try_get_on_file_by_transposition():
+                return
+            self._prompt_state.message = (
+            "Off-file position. Can't skip --"
+            "no transposition back into the file was found."
+            )
+            self.finish_prompt()
+            return
 
         self._mark_move_to_skip(prompt_node.parent, prompt_node.move.uci())
         self._skip_learned_prompt_positions()
+
+    def _off_file_transposition_node(self, off_file_fen: str, move: chess.Move) -> Node:
+        board = to_board(off_file_fen)
+        board.push(move)
+        cached = self._session.cache.get(fen(board))
+        if cached is None or not cached.TTed:
+            raise RuntimeError(f"Move {move.uci()!r} did not transpose to a file position")
+        return cached.TTed[0]
+
+    def _try_get_on_file_by_transposition(self) -> bool:
+        off_file_fen = self._prompt_state.off_file_fen
+        if off_file_fen is None:
+            raise RuntimeError("Cannot transpose an off-file skip without an off-file FEN")
+
+        board = to_board(off_file_fen)
+        transp_node = self._session.find_transpositioning_move(board)
+        if transp_node is None:
+            return False
+
+        self._prompt_state.node = transp_node
+        self._clear_off_file_state()
+        self._prompt_state.prechosen_path = None
+        self._prompt_state.node_index = None
+
+        transposition_message = (
+            f"Skipped the off-file prompt by transposing back to the file with {node_san(transp_node)}."
+        )
+        if not self._is_finished:
+            self._advance_line()
+        self._prompt_state.message = (
+            f"{transposition_message} {self._prompt_state.message}"
+        ).strip()
+        return True
 
     def _resume_from_off_file_prompt(self) -> None:
         if not self._prompt_state.off_file:
@@ -1125,7 +1165,7 @@ class RepetitionEngine():
             return False
         if self._move_is_marked_to_skip(prompt_node.parent, uci):
             return True
-        if not self._is_learned_prompt_position(prompt_node, uci):
+        if not self._prompt_position_is_learned(prompt_node):
             return False
         if self._performance_history(prompt_node, uci)[-3:] != [1, 1, 1]:
             return False
@@ -2930,13 +2970,20 @@ class AppController:
         The idea is save the user from having to enter the moves that are too obvious
         or file-specific (i.e. file has only one of many acceptable move orders).
         
-        Is disabled in history review and for off-file prompts."""
+        Off-file prompts can only be skipped when a reply transposes back into the file."""
         if self._mode != "guess":
             return
 
+        was_off_file = self._rep_controller.get_prompt_view().off_file
         self._rep_engine.skip_current_move()
         if self._rep_engine.is_finished():
             self._finalize_finished_prompt()
+            if was_off_file:
+                prompt = self._rep_controller.get_prompt_view()
+                if prompt.node is None:
+                    raise RuntimeError("Cannot enter review without a file node")
+                self._enter_review_mode(node=prompt.node, message=prompt.message)
+                return
             self.start_next_prompt()
             return
         self.show_prompt()

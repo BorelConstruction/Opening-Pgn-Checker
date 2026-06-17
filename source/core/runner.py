@@ -445,6 +445,18 @@ class PgnSession:
             return mainline_children(mainline_sides)(position)
         return sum((mainline_children(mainline_sides)(n) for n in self.cache[fen(position)].TTed), [])
 
+    def find_transpositioning_move(self, position: BoardLike) -> Optional[Node]:
+        """Find a move that transposes the position back into the TTed positions.
+        Returns the resulting Node."""
+        board = to_board(position)
+        for move in board.legal_moves:
+            board.push(move)
+            cached = self.cache.get(fen(board))
+            board.pop()
+            if cached is not None and cached.TTed:
+                return cached.TTed[0]
+        return None
+
     def traversal_restrictions(self) -> TraversalPolicy:
         kwargs = {"get_children": self.variations}
         for attr in ("start_ply", "end_ply"):
