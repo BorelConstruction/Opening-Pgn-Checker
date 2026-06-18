@@ -23,6 +23,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srGuessSkipBtn = document.getElementById("srGuessSkip");
   const srGuessBlacklistBtn = document.getElementById("srGuessBlacklist");
   const srGuessBlacklistLineBtn = document.getElementById("srGuessBlacklistLine");
+  const srAcceptAlternativeBtn = document.getElementById("srAcceptAlternative");
   const reviewTreeOptions = document.getElementById("reviewTreeOptions");
   const srShowAlternativesInput = document.getElementById("srShowAlternatives");
   const treeContainer = document.getElementById("variation-tree");
@@ -72,6 +73,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     progressLoading: false,
     startRange: null,
     bookmarkQueued: false,
+    pendingAlternative: null,
   };
 
   const reviewNav = {
@@ -503,6 +505,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     const isGuess = active && state.mode === "guess";
     const isReview = active && state.mode === "review";
     const canSkipGuess = isGuess && state.currentSpecId === "new";
+    const canAcceptAlternative = isGuess && !!state.pendingAlternative;
     srNewBtn.disabled = !active;
     srHistoryBtn.disabled = !active;
     srBookmarksBtn.disabled = !active;
@@ -519,6 +522,8 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srGuessSkipBtn.disabled = !canSkipGuess;
     srGuessBlacklistBtn.disabled = !isGuess;
     srGuessBlacklistLineBtn.disabled = !isGuess;
+    srAcceptAlternativeBtn.hidden = !canAcceptAlternative;
+    srAcceptAlternativeBtn.disabled = !canAcceptAlternative;
     srShowAlternativesInput.disabled = !isReview;
     refreshAnalyzeLichessLink();
   }
@@ -1429,6 +1434,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     state.searchMove = sr.searchMove || null;
     state.startRange = Number.isInteger(sr.startRange) ? sr.startRange : null;
     state.bookmarkQueued = !!sr.bookmarkQueued;
+    state.pendingAlternative = sr.pendingAlternative || null;
     if (!state.active) {
       state.historyOpen = false;
       state.historyLoading = false;
@@ -1541,6 +1547,10 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     if (srGuessSkipBtn.disabled) return;
     showSkipToast();
     send({ type: "sr_skip_move" });
+  });
+  srAcceptAlternativeBtn.addEventListener("click", () => {
+    if (srAcceptAlternativeBtn.disabled) return;
+    send({ type: "sr_accept_alternative" });
   });
   srGuessBlacklistBtn.addEventListener("click", () => send({ type: "sr_blacklist_prompt" }));
   srGuessBlacklistLineBtn.addEventListener("click", () => send({ type: "sr_blacklist_line_prompt" }));

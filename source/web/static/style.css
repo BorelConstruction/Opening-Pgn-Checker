@@ -851,11 +851,30 @@ button:disabled,
   color: var(--text);
 }
 
-.message {
+.message-content {
   grid-column: 2 / 4;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.message {
+  flex: 1 1 220px;
   color: var(--accent);
   min-height: 18px;
   white-space: pre-line;
+}
+
+.message-action {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.message-action[hidden] {
+  display: none;
 }
 
 .sr-toast {

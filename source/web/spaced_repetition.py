@@ -52,10 +52,14 @@ K = TypeVar("K")
 MarkKind = Literal["blacklist", "skip"]
 
 
-class PositionDrillData(TypedDict):
+class RequiredPositionDrillData(TypedDict):
     past_performance: dict[UCI, list[PerformanceRecord]]
     blacklist: list[UCI]
     leads_to_skip: list[UCI]
+
+
+class PositionDrillData(RequiredPositionDrillData, total=False):
+    accepted_alternatives: list[UCI]
 
 
 class PositionModelData(TypedDict):
@@ -164,6 +168,7 @@ class RepetitionEngine():
         self._prompt_spec = None
 
         self._prompt_state = PromptState(node=None, message="", anchor_node=None)
+        self._pending_alternative_uci: Optional[UCI] = None
 
         self.set_start(root=root, start_range=start_range)
 
@@ -295,6 +300,7 @@ class RepetitionEngine():
         return self._is_finished
     
     def finish_prompt(self, gave_up: bool = False) -> None:
+        self._clear_pending_alternative()
         self._finalize_current_move_performance()
         self._is_finished = True
         self._commit_prompt_performance(gave_up=gave_up)
@@ -323,6 +329,7 @@ class RepetitionEngine():
         self._search_move_payload = None
         self._prompt_performance = []
         self._prompt_state = PromptState(node=None, message="", anchor_node=None)
+        self._clear_pending_alternative()
 
     def _relative_move_path_for_node(self, node: Node) -> Optional[list[UCI]]:
         root_moves = node_moves(self._root, san=False)
@@ -343,6 +350,22 @@ class RepetitionEngine():
                 continue
             return child
 
+        return None
+
+    def _tt_child_for_move(
+        self,
+        position: BoardLike,
+        move: chess.Move | UCI,
+    ) -> Optional[Node]:
+        move_uci = move.uci() if isinstance(move, chess.Move) else move
+        cached = self._session.cache.get(fen(position))
+        if cached is None:
+            return None
+
+        for node in cached.TTed:
+            for child in node.variations:
+                if child.move is not None and child.move.uci() == move_uci:
+                    return child
         return None
 
     def _current_prompt_position(self) -> BoardLike:
@@ -470,7 +493,7 @@ class RepetitionEngine():
         item: tuple[str, PositionDrillData],
     ) -> dict[str, Any]:
         position_fen, position_data = item
-        return {
+        payload = {
             "fen": position_fen,
             "past_performance": {
                 move_uci: [
@@ -482,6 +505,10 @@ class RepetitionEngine():
             "blacklist": list(position_data["blacklist"]),
             "leads_to_skip": list(position_data["leads_to_skip"]),
         }
+        accepted_alternatives = position_data.get("accepted_alternatives", [])
+        if accepted_alternatives:
+            payload["accepted_alternatives"] = list(accepted_alternatives)
+        return payload
 
     def _pos_drill_item_from_json(
         self,
@@ -496,10 +523,12 @@ class RepetitionEngine():
         raw_past_performance = payload["past_performance"]
         raw_blacklist = payload["blacklist"]
         raw_leads_to_skip = payload["leads_to_skip"]
+        raw_accepted_alternatives = payload.get("accepted_alternatives", [])
 
         past_performance: dict[UCI, list[PerformanceRecord]] = {}
         blacklist: list[UCI] = []
         leads_to_skip: list[UCI] = []
+        accepted_alternatives: list[UCI] = []
 
         if not isinstance(raw_past_performance, dict):
             raise TypeError(f"Performance payload for position {position_fen!r} must be a dict")
@@ -507,6 +536,8 @@ class RepetitionEngine():
             raise TypeError(f"Blacklist payload for position {position_fen!r} must be a list")
         if not isinstance(raw_leads_to_skip, list):
             raise TypeError(f"Skip payload for position {position_fen!r} must be a list")
+        if not isinstance(raw_accepted_alternatives, list):
+            raise TypeError(f"Accepted alternatives payload for position {position_fen!r} must be a list")
 
         for uci, raw_history in raw_past_performance.items():
             if not isinstance(raw_history, list):
@@ -524,12 +555,18 @@ class RepetitionEngine():
         for raw_uci in raw_leads_to_skip:
             if raw_uci not in leads_to_skip:
                 leads_to_skip.append(raw_uci)
+        for raw_uci in raw_accepted_alternatives:
+            if raw_uci not in accepted_alternatives:
+                accepted_alternatives.append(raw_uci)
 
-        return position_fen, PositionDrillData(
+        position_data = PositionDrillData(
             past_performance=past_performance,
             blacklist=blacklist,
             leads_to_skip=leads_to_skip,
         )
+        if accepted_alternatives:
+            position_data["accepted_alternatives"] = accepted_alternatives
+        return position_fen, position_data
 
     def _model_item_to_json(
         self,
@@ -579,6 +616,15 @@ class RepetitionEngine():
     def _leads_to_skip_for(self, position: BoardLike) -> list[UCI]:
         return self._pos_drill_data[fen(position)]["leads_to_skip"]
 
+    def _accepted_alternatives_for(self, position: BoardLike) -> list[UCI]:
+        position_data = self._pos_drill_data.get(fen(position))
+        if position_data is None:
+            return []
+        return position_data.get("accepted_alternatives", [])
+
+    def _accepted_alternatives_for_update(self, position: BoardLike) -> list[UCI]:
+        return self._pos_drill_data[fen(position)].setdefault("accepted_alternatives", [])
+
     def _prompt_position_is_learned(self, prompt_node: Node) -> bool:
         if prompt_node.parent is None or prompt_node.move is None:
             return False
@@ -596,6 +642,13 @@ class RepetitionEngine():
         leads_to_skip = self._leads_to_skip_for(parent)
         if uci not in leads_to_skip:
             leads_to_skip.append(uci)
+
+    def _record_accepted_alternative(self, parent: BoardLike, uci: UCI) -> None:
+        accepted_alternatives = self._accepted_alternatives_for_update(parent)
+        if uci in accepted_alternatives:
+            return
+        accepted_alternatives.append(uci)
+        self._pos_drill_data.serialize()
 
     def marked_moves(self) -> list[MarkedMoveData]:
         marked: list[MarkedMoveData] = []
@@ -645,6 +698,7 @@ class RepetitionEngine():
         return uci in position_data["leads_to_skip"]
 
     def blacklist_current_move(self) -> UCI:
+        self._clear_pending_alternative()
         prompt_node = self._prompt_state.node
         if prompt_node is None:
             raise RuntimeError("Cannot blacklist without an active prompt node")
@@ -691,6 +745,7 @@ class RepetitionEngine():
     def blacklist_current_line(self) -> UCI:
         """Blacklists the first move of the current prompt line.
         (Note that technically the current position may still appear, but via a different line.)"""
+        self._clear_pending_alternative()
         prompt_start_node = self._prompt_state.node
         while prompt_start_node is not self._root:
             blacklisted_uci = prompt_start_node.move.uci()
@@ -702,6 +757,7 @@ class RepetitionEngine():
         return blacklisted_uci
 
     def skip_current_move(self) -> None:
+        self._clear_pending_alternative()
         prompt_node = self._prompt_state.node
         if prompt_node is None:
             raise RuntimeError("Cannot skip without an active prompt node")
@@ -782,6 +838,7 @@ class RepetitionEngine():
         return True, off_book_selection.message
 
     def on_response(self, uci: str) -> PromptState:
+        self._clear_pending_alternative()
         if self._prompt_state.off_file:
             grade = self._handle_off_file_guess(uci)
             if grade.correctness == MoveCorrectness.CORRECT:
@@ -803,22 +860,25 @@ class RepetitionEngine():
             return self._prompt_state
 
         grade = self._handle_file_guess(uci)
-        self._save_grade(grade)
         if grade.correctness in (MoveCorrectness.INCORRECT, MoveCorrectness.ALTERNATIVE):
             self._prompt_state.message = grade.msg
             return self._prompt_state
+        self._save_grade(grade)
         if grade.correctness == MoveCorrectness.UNDEF:
             self.finish_prompt()
             return self._prompt_state
 
-        self._finalize_current_move_performance()
-        chosen_node = self._child_for_move(
+        chosen_node = self._prompt_child_for_move(
             self._prompt_state.node,
             uci_from_lichess_to_pgn(uci),
         )
         if chosen_node is None:
             self.finish_prompt()
             return self._prompt_state
+        return self._continue_with_file_child(chosen_node, grade)
+
+    def _continue_with_file_child(self, chosen_node: Node, grade: MoveGrade) -> PromptState:
+        self._finalize_current_move_performance()
         self._prompt_state.node = chosen_node
         if self._prompt_state.node_index is not None:
             self._prompt_state.node_index += 1
@@ -847,7 +907,21 @@ class RepetitionEngine():
     def _prompt_variations(self, position: BoardLike) -> list[Node]:
         """The source of truth for the next moves to choose from."""
         if position.turn() == self._session.options.side:
-            return self._session.variations(position, use_TT=False)
+            children = list(self._session.variations(position, use_TT=False))
+            seen_ucis = {
+                child.move.uci()
+                for child in children
+                if child.move is not None
+            }
+            for accepted_uci in self._accepted_alternatives_for(position):
+                if accepted_uci in seen_ucis:
+                    continue
+                child = self._tt_child_for_move(position, accepted_uci)
+                if child is None or child.move is None:
+                    continue
+                children.append(child)
+                seen_ucis.add(accepted_uci)
+            return children
         # ^ we imagine that for us we don't want TT continuations
         # I have in mind a picture of a pgn file with different moves for a node
         # as alternatives; but it is hard to imagine where a user wants to be tested
@@ -856,6 +930,19 @@ class RepetitionEngine():
         # Opponent move selection can still use TT
         return [n for n in self._session.variations(position, use_TT=True)
                 if n.move.uci() not in self._blacklist_for(position)]
+
+    def _prompt_child_for_move(self, parent: BoardLike, move: chess.Move | UCI) -> Optional[Node]:
+        move_uci = move.uci() if isinstance(move, chess.Move) else move
+        for child in self._prompt_variations(parent):
+            if child.move is not None and child.move.uci() == move_uci:
+                return child
+        return None
+
+    def _clear_pending_alternative(self) -> None:
+        self._pending_alternative_uci = None
+
+    def pending_alternative_uci(self) -> Optional[UCI]:
+        return self._pending_alternative_uci
 
     def _existing_performance_history(
         self,
@@ -1073,20 +1160,15 @@ class RepetitionEngine():
         if not expected_uci:
             return MoveGrade(MoveCorrectness.UNDEF)
 
-        if expected_uci == uci:
+        if self._prompt_child_for_move(prpt_data.node, uci) is not None:
             return MoveGrade(MoveCorrectness.CORRECT)
-        if not self._session.options.check_alternatives: # TODO: this is currently leaky. We use the knowledge of
-            # how expected_uci is constructed. Need some alternative_moves and a design that ensures their accord
-            chosen_alternative_node = None
-            for n in self._session.cache[fen(prpt_data.node)].TTed:
-                for c in n.variations:
-                    if c.move.uci() == uci:
-                        chosen_alternative_node = c
-                        break
+        if not self._session.options.check_alternatives:
+            chosen_alternative_node = self._tt_child_for_move(prpt_data.node, uci)
             if chosen_alternative_node is not None:
+                self._pending_alternative_uci = uci
                 return MoveGrade(
                     MoveCorrectness.ALTERNATIVE,
-                    msg="Not the main move. Change the settings to explore alternatives",
+                    msg="Not the main move. Explore this move?",
                 )
 
         expected_moves = [expected_uci] # only this for now
@@ -1150,6 +1232,29 @@ class RepetitionEngine():
             msg=msg,
             eval_diff=user_move_eval - expected_eval,
         )
+
+    def accept_pending_alternative(self) -> PromptState:
+        parent = self._prompt_state.node
+        if parent is None or self._prompt_state.off_file:
+            raise RuntimeError("Cannot accept an alternative without an active file prompt")
+
+        pending_uci = self._pending_alternative_uci
+        if pending_uci is None:
+            raise RuntimeError("No alternative move is pending")
+
+        chosen_node = self._tt_child_for_move(parent, pending_uci)
+        if chosen_node is None:
+            raise RuntimeError(f"Pending alternative {pending_uci!r} no longer resolves to a file move")
+
+        self._record_accepted_alternative(parent, pending_uci)
+        self._clear_pending_alternative()
+
+        grade = MoveGrade(
+            MoveCorrectness.CORRECT,
+            msg=" Accepted alternative saved.",
+        )
+        self._save_grade(grade)
+        return self._continue_with_file_child(chosen_node, grade)
 
     def _evaluate_move(self, position: Union[chess.Board, Node], move: Union[chess.Move, str]) -> float:
         return self._session.q_eval_move(position, move).best_eval()
@@ -1420,7 +1525,7 @@ class RepetitionEngine():
             children = self._prompt_variations(parent)
             if not children:
                 return False, ""
-            if not self._session.options.check_alternatives: # a tiny optimization
+            if not self._session.options.check_alternatives and len(children) == 1:
                 return children[0], ""    
             choice = self._rng_choice(children)
             message = ""
@@ -2395,11 +2500,18 @@ class AppController:
         return None
 
     def ui_state(self) -> dict[str, Any]:
+        pending_alternative = None
+        if self.active and self._mode == "guess":
+            pending_uci = self._rep_engine.pending_alternative_uci()
+            if pending_uci is not None:
+                pending_alternative = {"uci": pending_uci}
+
         state = {
             "active": self.active,
             "mode": self._mode,
             "currentSpecId": self._rep_engine.current_spec_id() if self.active else None,
             "bookmarkQueued": self._bookmark_current_prompt_pending if self.active and self._mode == "guess" else False,
+            "pendingAlternative": pending_alternative,
             "review": self._review_payload if self.active and self._mode == "review" else None,
             "reviewShowsAlternatives": self._review_show_alternatives,
             "searchMove": self._search_move_payload if self.active and self._mode == "review" else None,
@@ -2958,6 +3070,21 @@ class AppController:
             self._enter_review_mode(node=prompt.node, message=prompt.message)
         else:
             self.show_prompt()
+
+    def accept_pending_alternative(self) -> None:
+        if self._mode != "guess":
+            raise RuntimeError("Not currently in guess mode")
+
+        continue_prompt = self._rep_controller.accept_pending_alternative()
+        if not continue_prompt:
+            self._commit_pending_bookmark_to_latest_prompt()
+            prompt = self._rep_controller.get_prompt_view()
+            if prompt.node is None:
+                raise RuntimeError("Cannot enter review without a file node")
+            self._enter_review_mode(node=prompt.node, message=prompt.message)
+            return
+
+        self.show_prompt()
 
 
     def _mainline_node_at_ply(self, game: Any, ply: int) -> Any:

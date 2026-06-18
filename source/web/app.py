@@ -253,6 +253,12 @@ async def ws(ws: WebSocket) -> None:
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
+            elif msg_type == "sr_accept_alternative":
+                try:
+                    sr_controller.accept_pending_alternative()
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
             elif msg_type == "sr_hint":
                 try:
                     sr_controller.provide_hint()

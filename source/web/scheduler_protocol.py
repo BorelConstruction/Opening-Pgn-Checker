@@ -77,6 +77,10 @@ class RepetitionEngine(Protocol):
         """
         ...
 
+    def accept_pending_alternative(self) -> Prompt:
+        """Accept the latest hidden alternative response and continue the prompt."""
+        ...
+
     def summarize(self) -> Feedback:
         """Aggregate prompt-level feedback for the scheduler."""
         ...
@@ -148,6 +152,15 @@ class RepetitionController:
         Returns True if the prompt should continue, False if it should terminate.
         """
         self._prompt = self.engine.on_response(response)
+
+        if not self.engine.is_finished():
+            return True
+
+        self.finalize_current_prompt()
+        return False
+
+    def accept_pending_alternative(self) -> bool:
+        self._prompt = self.engine.accept_pending_alternative()
 
         if not self.engine.is_finished():
             return True
