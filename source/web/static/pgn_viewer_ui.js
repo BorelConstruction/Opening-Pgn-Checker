@@ -37,6 +37,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const searchMovePanel = document.getElementById("searchMovePanel");
   const searchMoveTitle = document.getElementById("searchMoveTitle");
   const searchMoveResults = document.getElementById("searchMoveResults");
+  const searchMoveManualBtn = document.getElementById("searchMoveManual");
   const searchMoveCloseBtn = document.getElementById("searchMoveClose");
 
   const historyOverlay = document.getElementById("historyOverlay");
@@ -563,6 +564,20 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   function closeSearchMoveOverlay() {
     state.searchMoveDismissed = true;
     searchMoveOverlay.hidden = true;
+  }
+
+  function promptSearchMoveNotation() {
+    const notation = prompt('Enter algebraic notation and the side, such as "Nc3xd5 W".');
+    if (notation === null) return;
+
+    const trimmedNotation = notation.trim();
+    if (!trimmedNotation) {
+      alert("Enter a move notation.");
+      return;
+    }
+
+    state.searchMoveDismissed = false;
+    send({ type: "sr_search_move", notation: trimmedNotation });
   }
 
   function markedMoveLabel(mark) {
@@ -1475,6 +1490,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   });
   searchMoveOverlay.addEventListener("click", closeSearchMoveOverlay);
   searchMovePanel.addEventListener("click", (event) => event.stopPropagation());
+  searchMoveManualBtn.addEventListener("click", promptSearchMoveNotation);
   searchMoveCloseBtn.addEventListener("click", closeSearchMoveOverlay);
   historyOverlay.addEventListener("click", closeHistoryOverlay);
   historyPanel.addEventListener("click", (event) => event.stopPropagation());

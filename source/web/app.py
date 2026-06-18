@@ -32,6 +32,14 @@ def _prompt_line_id_from_payload(payload: Any) -> PromptLineId:
     return PromptLineId(start_fen, tuple(moves))
 
 
+def _search_move_notation_from_payload(payload: Any) -> str | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, str) or not payload.strip():
+        raise TypeError("notation must be a non-empty string")
+    return payload.strip()
+
+
 class ConnectionManager:
     def __init__(self) -> None:
         self._connections: set[WebSocket] = set()
@@ -263,7 +271,15 @@ async def ws(ws: WebSocket) -> None:
 
             elif msg_type == "sr_search_move":
                 try:
-                    sr_controller.search_nodes_by_move()
+                    search_notation = _search_move_notation_from_payload(msg.get("notation"))
+                except Exception:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+                    continue
+                try:
+                    if search_notation is None:
+                        sr_controller.search_nodes_by_move()
+                    else:
+                        sr_controller.search_nodes_by_move_notation(search_notation)
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 

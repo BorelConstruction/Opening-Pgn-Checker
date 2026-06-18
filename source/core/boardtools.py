@@ -22,6 +22,23 @@ class MoveIdentity(NamedTuple):
     is_capture: bool
 
 
+_PIECE_SYMBOLS = {
+    "K": chess.KING,
+    "Q": chess.QUEEN,
+    "R": chess.ROOK,
+    "B": chess.BISHOP,
+    "N": chess.KNIGHT,
+}
+_PROMOTION_SYMBOLS = {
+    "Q": chess.QUEEN,
+    "R": chess.ROOK,
+    "B": chess.BISHOP,
+    "N": chess.KNIGHT,
+}
+_FILES = "abcdefgh"
+_RANKS = "12345678"
+
+
 _LEGACY_FIGURINE_TRANSLATION = str.maketrans(
     {
         "\ue024": "♔",
@@ -126,7 +143,113 @@ def node_san(n: Node, move: Optional[Union[chess.Move, str]] = None) -> str:
     return b.san(n.move)
 
 
-def _move_identity(node: Node) -> MoveIdentity:
+def _is_square_name(value: str) -> bool:
+    return len(value) == 2 and value[0] in _FILES and value[1] in _RANKS
+
+
+def _parse_square_name(value: str) -> int:
+    if not _is_square_name(value):
+        raise ValueError(f"Invalid square: {value!r}")
+    return chess.parse_square(value)
+
+
+def _capture_split(body: str) -> tuple[str, str, bool]:
+    capture_mark_count = body.count("x") + body.count(":")
+    if capture_mark_count > 1:
+        raise ValueError(f"Move notation has multiple capture markers: {body!r}")
+    if capture_mark_count == 0:
+        return body, "", False
+
+    marker = "x" if "x" in body else ":"
+    left, right = body.split(marker)
+    if not left or not right:
+        raise ValueError(f"Capture notation must include both sides: {body!r}")
+    return left, right, True
+
+
+def _parse_search_color(value: str) -> chess.Color:
+    normalized = value.strip().lower()
+    if normalized in ("w", "white"):
+        return chess.WHITE
+    if normalized in ("b", "black"):
+        return chess.BLACK
+    raise ValueError(f"Invalid move color: {value!r}")
+
+
+def _infer_pawn_origin(from_file: int, to_square: int, turn: chess.Color) -> int:
+    to_rank = chess.square_rank(to_square)
+    from_rank = to_rank - 1 if turn == chess.WHITE else to_rank + 1
+    if from_rank < 0 or from_rank > 7:
+        to_name = chess.square_name(to_square)
+        color_name = "white" if turn == chess.WHITE else "black"
+        raise ValueError(f"Cannot infer {color_name} pawn origin for {to_name}")
+    return chess.square(from_file, from_rank)
+
+
+def _parse_move_origin(origin: str, piece_type: int, to_square: int, turn: chess.Color) -> int:
+    if _is_square_name(origin):
+        return chess.parse_square(origin)
+    if len(origin) == 1 and origin in _FILES and piece_type == chess.PAWN:
+        return _infer_pawn_origin(_FILES.index(origin), to_square, turn)
+    raise ValueError(f"Invalid move origin: {origin!r}")
+
+
+def parse_move_search_notation(notation: str) -> MoveIdentity:
+    """Produce a MoveIdentity objectfrom a search notation."""
+    parts = notation.strip().split()
+    if len(parts) != 2:
+        raise ValueError('Move notation must include a move and color, e.g. "Nc3xd5 W"')
+
+    text = parts[0].replace("-", "").replace("=", "")
+    if not text:
+        raise ValueError("Move notation is required")
+    turn = _parse_search_color(parts[1])
+
+    piece_type = chess.PAWN
+    body = text
+    first = body[0]
+    if first in _PIECE_SYMBOLS:
+        piece_type = _PIECE_SYMBOLS[first]
+        body = body[1:]
+    elif first == "p" or first == "P":
+        body = body[1:]
+
+    promotion = None
+    if body and body[-1] in _PROMOTION_SYMBOLS:
+        promotion = _PROMOTION_SYMBOLS[body[-1]]
+        body = body[:-1]
+        if piece_type != chess.PAWN:
+            raise ValueError("Only pawn moves can include a promotion")
+
+    if not body:
+        raise ValueError(f"Move notation is missing squares: {notation!r}")
+
+    left, right, is_capture = _capture_split(body)
+    if is_capture:
+        to_square = _parse_square_name(right)
+        from_square = _parse_move_origin(left, piece_type, to_square, turn)
+    elif _is_square_name(left):
+        to_square = chess.parse_square(left)
+        if piece_type != chess.PAWN:
+            raise ValueError(f"Move notation is missing a square: {notation!r}")
+        from_square = _infer_pawn_origin(chess.square_file(to_square), to_square, turn)
+    elif len(left) == 4 and _is_square_name(left[:2]) and _is_square_name(left[2:]):
+        from_square = chess.parse_square(left[:2])
+        to_square = chess.parse_square(left[2:])
+    else:
+        raise ValueError(f"Invalid move notation: {notation!r}")
+
+    return MoveIdentity(
+        turn=turn,
+        piece_type=piece_type,
+        from_square=from_square,
+        to_square=to_square,
+        promotion=promotion,
+        is_capture=is_capture,
+    )
+
+
+def move_identity(node: Node) -> MoveIdentity:
     move = node.move
     parent = node.parent
     if move is None or parent is None:
@@ -134,6 +257,9 @@ def _move_identity(node: Node) -> MoveIdentity:
 
     board = parent.board()
     moving_piece = board.piece_at(move.from_square)
+    if moving_piece is None:
+        from_name = chess.square_name(move.from_square)
+        raise RuntimeError(f"No piece on {from_name} before node move {move.uci()!r}")
 
     return MoveIdentity(
         turn=board.turn,
@@ -146,7 +272,7 @@ def _move_identity(node: Node) -> MoveIdentity:
 
 
 def moves_are_equal(node1: Node, node2: Node) -> bool:
-    return _move_identity(node1) == _move_identity(node2)
+    return move_identity(node1) == move_identity(node2)
 
 
 def uci_to_san(uci: str, board: chess.Board) -> str:

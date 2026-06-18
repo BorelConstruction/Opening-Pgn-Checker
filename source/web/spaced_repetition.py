@@ -27,9 +27,11 @@ from source.web.scheduler_implem import NaiveScheduler
 from ..core.boardtools import (
     BoardLike,
     fen,
+    move_identity,
     moves_are_equal,
     node_moves,
     node_san,
+    parse_move_search_notation,
     side,
     to_board,
     uci_from_lichess_to_pgn,
@@ -2774,6 +2776,71 @@ class AppController:
             result["similarity"] = round(similarity.similarity, 4)
         return result
 
+    def _set_search_move_payload(
+        self,
+        *,
+        target_node: Node,
+        matches_move: Callable[[Node], bool],
+        query: dict[str, Any],
+        query_prev_uci: Optional[UCI] = None,
+        query_next_uci: Optional[UCI] = None,
+        empty_message: Optional[str] = None,
+    ) -> None:
+        tp = TraversalPolicy(
+            start_ply=1,
+            end_ply=self._session.options.end_ply,
+            get_children=self._review_children,
+        )
+        results: list[dict[str, Any]] = []
+        for node in iter_nodes(self._session.game, tp):
+            if not matches_move(node):
+                continue
+
+            results.append(
+                self._review_move_result(
+                    node,
+                    target_node=target_node,
+                    query_prev_uci=query_prev_uci,
+                    query_next_uci=query_next_uci,
+                )
+            )
+
+        results.sort(
+            key=lambda item: (-item["similarity"], item["distance"], item["path"])
+        )
+
+        self._search_move_payload = {
+            "kind": "searchMove",
+            "query": query,
+            "results": results,
+            "count": len(results),
+        }
+        if empty_message is not None:
+            self._search_move_payload["emptyMessage"] = empty_message
+        self._broadcast_ui_state()
+
+    def search_nodes_by_move_notation(self, notation: str) -> None:
+        """
+        Search visible review nodes by algebraic-style move notation.
+        Similarity is still measured against the current review position.
+        """
+        if self._mode != "review":
+            return
+
+        review_path = getattr(self, "_review_path", None)
+        if review_path is None:
+            raise RuntimeError("Cannot search for a review move without an active review path")
+
+        stripped_notation = notation.strip()
+        query_identity = parse_move_search_notation(stripped_notation)
+        target_node = self._review_node_at_path(list(review_path))
+        self._set_search_move_payload(
+            target_node=target_node,
+            matches_move=lambda node: move_identity(node) == query_identity,
+            query={"move": stripped_notation, "notation": stripped_notation},
+            empty_message=f"No occurrences found for {stripped_notation}.",
+        )
+
     def search_nodes_by_move(self) -> None:
         """
         Search for nodes with the same move as in the current review position
@@ -2785,12 +2852,9 @@ class AppController:
         if self._mode != "review":
             return
 
-        root = self._session.game
         review_path = getattr(self, "_review_path", None)
         if review_path is None:
             raise RuntimeError("Cannot search for a review move without an active review path")
-
-        end_ply = self._session.options.end_ply
 
         query_node = self._review_node_at_path(list(review_path))
 
@@ -2804,34 +2868,15 @@ class AppController:
         query_next = self._first_review_child(query_node)
         query_next_uci = query_next.move.uci() if query_next is not None and query_next.move is not None else None
 
-        tp = TraversalPolicy(start_ply=1, end_ply=end_ply, get_children=self._review_children)
-        results: list[dict[str, Any]] = []
-        for node in iter_nodes(root, tp):
-            if not moves_are_equal(node, query_node):
-                continue
-
-            results.append(
-                self._review_move_result(
-                    node,
-                    target_node=query_node,
-                    query_prev_uci=query_prev_uci,
-                    query_next_uci=query_next_uci,
-                )
-            )
-
-        results.sort(
-            key=lambda item: (-item["similarity"], item["distance"], item["path"])
-        )
-
         query = self._review_move_result(query_node, target_node=query_node)
         query["uci"] = query_move_uci
-        self._search_move_payload = {
-            "kind": "searchMove",
-            "query": query,
-            "results": results,
-            "count": len(results),
-        }
-        self._broadcast_ui_state()
+        self._set_search_move_payload(
+            target_node=query_node,
+            matches_move=lambda node: moves_are_equal(node, query_node),
+            query=query,
+            query_prev_uci=query_prev_uci,
+            query_next_uci=query_next_uci,
+        )
 
     def _marked_move_results(self) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
