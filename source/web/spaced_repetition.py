@@ -72,6 +72,14 @@ class MarkedMoveData(TypedDict):
     uci: UCI
 
 
+class HardestMoveData(TypedDict):
+    fen: str
+    uci: UCI
+    wrong_count: int
+    attempt_count: int
+    last_attempt_time: float
+
+
 class MoveCorrectness(Enum):
     CORRECT = 1
     INCORRECT = 2
@@ -195,7 +203,7 @@ class RepetitionEngine():
         # when we fill the TT, we want the whole PGN to be present, as in practice
         # PGNs sometimes contain relevant parts that techincally start with an "alternative" move
         # ("for how to play against 10...Re8, see line after 7.0-0")
-        # Later, we use prompt_children as the truth source of relevant children, which avoid querying with alternatives
+        # Later, we use prompt_variations as the truth source of relevant children, which avoid querying with alternatives
         # Ugly but PGNs are used messy ways, I don't see a better design
         old_check_alternatives = self._session.options.check_alternatives
         self._session.options.check_alternatives = True
@@ -664,13 +672,44 @@ class RepetitionEngine():
         marked.sort(key=lambda item: (item["mark"], item["fen"], item["uci"]))
         return marked
 
-    def file_nodes_for_marked_move(self, position_fen: str, move_uci: UCI) -> list[Node]:
+    def hardest_moves(self) -> list[HardestMoveData]:
+        hardest: list[HardestMoveData] = []
+        for position_fen, position_data in self._pos_drill_data.items():
+            for move_uci, history in position_data["past_performance"].items():
+                wrong_count = sum(1 for record in history if not record.success)
+                if wrong_count == 0:
+                    continue
+                hardest.append(
+                    HardestMoveData(
+                        fen=position_fen,
+                        uci=move_uci,
+                        wrong_count=wrong_count,
+                        attempt_count=len(history),
+                        last_attempt_time=history[-1].attempt_time,
+                    )
+                )
+
+        hardest.sort(
+            key=lambda item: (
+                -item["wrong_count"],
+                -item["attempt_count"],
+                -item["last_attempt_time"],
+                item["fen"],
+                item["uci"],
+            )
+        )
+        return hardest
+
+    def file_nodes_for_position_move(self, position_fen: str, move_uci: UCI) -> list[Node]:
         nodes: list[Node] = []
         for parent in self._session.cache[fen(position_fen)].TTed:
             for child in self._session.variations(parent):
                 if child.move is not None and child.move.uci() == move_uci:
                     nodes.append(child)
         return nodes
+
+    def file_nodes_for_marked_move(self, position_fen: str, move_uci: UCI) -> list[Node]:
+        return self.file_nodes_for_position_move(position_fen, move_uci)
 
     def unmark_move(self, mark: MarkKind, position_fen: str, move_uci: UCI) -> None:
         position_data = self._pos_drill_data.get(position_fen)
@@ -1168,7 +1207,7 @@ class RepetitionEngine():
                 self._pending_alternative_uci = uci
                 return MoveGrade(
                     MoveCorrectness.ALTERNATIVE,
-                    msg="Not the main move. Explore this move?",
+                    msg="       Not the main move. Explore this anyway?",
                 )
 
         expected_moves = [expected_uci] # only this for now
@@ -2428,6 +2467,81 @@ class AppController:
             for move in self._history_moves(prompt_id, get_children)
         ]
 
+    def _history_move_payload_from_board(
+        self,
+        board: chess.Board,
+        move_uci: UCI,
+        path: Optional[list[int]],
+    ) -> dict[str, Any]:
+        move = chess.Move.from_uci(move_uci)
+        if move not in board.legal_moves:
+            raise ValueError(f"Move {move_uci!r} is not legal from {board.fen()!r}")
+
+        move_number = board.fullmove_number
+        color = "white" if board.turn == chess.WHITE else "black"
+        san = board.san(move)
+        result_board = board.copy(stack=False)
+        result_board.push(move)
+        return {
+            "san": san,
+            "moveNumber": move_number,
+            "color": color,
+            "path": path,
+            "fen": None if path is not None else result_board.fen(),
+        }
+
+    def _history_move_payload_from_node(self, node: Node, path: list[int]) -> dict[str, Any]:
+        if node.parent is None or node.move is None:
+            raise ValueError("Cannot build a history move payload for a root node")
+        return self._history_move_payload_from_board(node.parent.board(), node.move.uci(), path)
+
+    def _fallback_history_move_payload(self, position_fen: str, move_uci: UCI) -> dict[str, Any]:
+        return self._history_move_payload_from_board(to_board(position_fen), move_uci, None)
+
+    def _hardest_move_targets_payload(
+        self,
+        hardest_move: HardestMoveData,
+        get_children: Callable[[Node], list[Node]],
+    ) -> list[dict[str, Any]]:
+        targets: list[dict[str, Any]] = []
+        seen_paths: set[tuple[int, ...]] = set()
+
+        for node in self._rep_engine.file_nodes_for_position_move(
+            hardest_move["fen"],
+            hardest_move["uci"],
+        ):
+            if node.ply() > self._session.options.end_ply:
+                continue
+
+            try:
+                path = path_from_root(self._session.game, node, get_children)
+            except ValueError:
+                continue
+
+            path_key = tuple(path)
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            targets.append(self._history_move_payload_from_node(node, path))
+
+        if not targets:
+            targets.append(self._fallback_history_move_payload(hardest_move["fen"], hardest_move["uci"]))
+        return targets
+
+    def _hardest_move_entry_payload(
+        self,
+        hardest_move: HardestMoveData,
+        get_children: Callable[[Node], list[Node]],
+    ) -> dict[str, Any]:
+        return {
+            "fen": hardest_move["fen"],
+            "uci": hardest_move["uci"],
+            "wrongCount": hardest_move["wrong_count"],
+            "attemptCount": hardest_move["attempt_count"],
+            "lastAttemptTime": hardest_move["last_attempt_time"],
+            "moves": self._hardest_move_targets_payload(hardest_move, get_children),
+        }
+
     def _history_entry_payload(
         self,
         entry: PromptLogEntry,
@@ -2469,6 +2583,20 @@ class AppController:
         entries = [
             self._bookmark_entry_payload(prompt_id, get_children)
             for prompt_id in self._log.bookmarked_prompt_ids()
+        ]
+        return {
+            "count": len(entries),
+            "entries": entries,
+        }
+
+    def hardest_moves_payload(self) -> dict[str, Any]:
+        if not self.active:
+            raise RuntimeError("Hardest moves are only available after spaced repetition starts")
+
+        get_children = self._review_children if self._mode == "review" else self._session.variations
+        entries = [
+            self._hardest_move_entry_payload(hardest_move, get_children)
+            for hardest_move in self._rep_engine.hardest_moves()
         ]
         return {
             "count": len(entries),

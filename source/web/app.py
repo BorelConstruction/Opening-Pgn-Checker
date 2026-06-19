@@ -301,6 +301,17 @@ async def ws(ws: WebSocket) -> None:
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
+            elif msg_type == "sr_hardest_moves":
+                try:
+                    await ws.send_json(
+                        {
+                            "type": "sr_hardest_moves",
+                            "hardestMoves": sr_controller.hardest_moves_payload(),
+                        }
+                    )
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
             elif msg_type == "sr_bookmarks":
                 try:
                     await ws.send_json({"type": "sr_bookmarks", "bookmarks": sr_controller.bookmarks_payload()})

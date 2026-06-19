@@ -285,6 +285,17 @@ function connect() {
       return;
     }
 
+    if (msg.type === "sr_hardest_moves") {
+      try {
+        srUi.applyHardestMoves(msg.hardestMoves);
+      } catch (err) {
+        const message = err && err.message ? err.message : String(err);
+        log(`sr ui error: ${message}`);
+        console.error("sr ui error:", err);
+      }
+      return;
+    }
+
     if (msg.type === "sr_progress") {
       try {
         srUi.applyProgress(msg.progress);

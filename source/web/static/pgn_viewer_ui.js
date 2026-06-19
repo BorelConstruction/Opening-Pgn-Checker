@@ -45,6 +45,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const historyPanel = document.getElementById("historyPanel");
   const historyTitle = document.getElementById("historyTitle");
   const historyResults = document.getElementById("historyResults");
+  const historyHardestMovesBtn = document.getElementById("historyHardestMoves");
   const historyCloseBtn = document.getElementById("historyClose");
   const progressOverlay = document.getElementById("progressOverlay");
   const progressPanel = document.getElementById("progressPanel");
@@ -64,10 +65,12 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     searchMoveDismissed: false,
     history: null,
     bookmarks: null,
+    hardestMoves: null,
     historyOpen: false,
     historyMode: "history",
     historyLoading: false,
     bookmarksLoading: false,
+    hardestMovesLoading: false,
     progress: null,
     progressOpen: false,
     progressLoading: false,
@@ -255,25 +258,43 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     );
   }
 
+  function formatHardestMoveStats(entry) {
+    const wrongCount = Number.isFinite(entry.wrongCount) ? Math.max(0, Math.trunc(entry.wrongCount)) : 0;
+    const attemptCount = Number.isFinite(entry.attemptCount) ? Math.max(0, Math.trunc(entry.attemptCount)) : 0;
+    return `${wrongCount.toLocaleString()} wrong / ${attemptCount.toLocaleString()} attempts`;
+  }
+
   function renderHistory() {
     if (!state.historyOpen) {
       historyOverlay.hidden = true;
       return;
     }
 
+    const isHistory = state.historyMode === "history";
     const isBookmarks = state.historyMode === "bookmarks";
-    const payload = isBookmarks ? state.bookmarks : state.history;
+    const isHardestMoves = state.historyMode === "hardestMoves";
+    if (!isHistory && !isBookmarks && !isHardestMoves) {
+      throw new Error(`Unknown history mode: ${state.historyMode}`);
+    }
+
+    const payload = isBookmarks ? state.bookmarks : (isHardestMoves ? state.hardestMoves : state.history);
     const entries = payload && Array.isArray(payload.entries) ? payload.entries : [];
     const count = payload && typeof payload.count === "number" ? payload.count : entries.length;
-    const title = isBookmarks ? "Bookmarks" : "History";
+    const title = isBookmarks ? "Bookmarks" : (isHardestMoves ? "Hardest Moves" : "History");
     historyTitle.textContent = `${title} (${count})`;
+    historyHardestMovesBtn.disabled = !state.active || state.hardestMovesLoading;
+    historyHardestMovesBtn.textContent = state.hardestMovesLoading ? "Loading..." : "Hardest Moves";
     historyResults.innerHTML = "";
 
-    const loadingActive = isBookmarks ? state.bookmarksLoading : state.historyLoading;
+    const loadingActive = isBookmarks
+      ? state.bookmarksLoading
+      : (isHardestMoves ? state.hardestMovesLoading : state.historyLoading);
     if (loadingActive) {
       const loading = document.createElement("div");
       loading.className = "history-empty";
-      loading.textContent = isBookmarks ? "Loading bookmarks..." : "Loading history...";
+      loading.textContent = isBookmarks
+        ? "Loading bookmarks..."
+        : (isHardestMoves ? "Loading hardest moves..." : "Loading history...");
       historyResults.appendChild(loading);
       historyOverlay.hidden = false;
       return;
@@ -282,7 +303,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     if (!entries.length) {
       const empty = document.createElement("div");
       empty.className = "history-empty";
-      empty.textContent = isBookmarks ? "No bookmarked prompt lines yet" : "No prompt history yet";
+      empty.textContent = isBookmarks
+        ? "No bookmarked prompt lines yet"
+        : (isHardestMoves ? "No wrong moves recorded yet" : "No prompt history yet");
       historyResults.appendChild(empty);
       historyOverlay.hidden = false;
       return;
@@ -291,9 +314,11 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     for (const entry of entries) {
       const item = document.createElement("div");
       item.className = "history-item";
-      item.classList.toggle("bookmarked", !!entry.bookmarked);
+      item.classList.toggle("bookmarked", !isHardestMoves && !!entry.bookmarked);
 
-      if (typeof entry.promptTime === "number") {
+      if (isHardestMoves && typeof entry.lastAttemptTime === "number") {
+        item.title = `Last attempt: ${new Date(entry.lastAttemptTime * 1000).toLocaleString()}`;
+      } else if (typeof entry.promptTime === "number") {
         item.title = new Date(entry.promptTime * 1000).toLocaleString();
       }
 
@@ -326,7 +351,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       const meta = document.createElement("div");
       meta.className = "history-meta";
 
-      if (!isBookmarks) {
+      if (isHistory) {
         const performance = document.createElement("div");
         performance.className = "history-performance";
         if (typeof entry.performance === "number") {
@@ -339,39 +364,48 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
         meta.appendChild(performance);
       }
 
-      const bookmarkBtn = document.createElement("button");
-      bookmarkBtn.type = "button";
-      bookmarkBtn.className = "history-bookmark";
-      bookmarkBtn.disabled = !canStudyHistoryEntry(entry);
-      bookmarkBtn.textContent = isBookmarks ? "Remove" : (entry.bookmarked ? "Bookmarked" : "Bookmark");
-      bookmarkBtn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        if (bookmarkBtn.disabled) return;
-        bookmarkBtn.disabled = true;
-        send({
-          type: "sr_bookmark_set",
-          promptId: entry.promptId,
-          bookmarked: isBookmarks ? false : !entry.bookmarked,
-          view: state.historyMode,
-        });
-      });
-      meta.appendChild(bookmarkBtn);
+      if (isHardestMoves) {
+        const performance = document.createElement("div");
+        performance.className = "history-performance";
+        performance.textContent = formatHardestMoveStats(entry);
+        meta.appendChild(performance);
+      }
 
-      const studyBtn = document.createElement("button");
-      studyBtn.type = "button";
-      studyBtn.className = "history-study";
-      studyBtn.textContent = "Study Again";
-      studyBtn.disabled = !canStudyHistoryEntry(entry);
-      studyBtn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        if (studyBtn.disabled) return;
-        closeHistoryOverlay();
-        send({
-          type: "sr_history_study",
-          promptId: entry.promptId,
+      if (!isHardestMoves) {
+        const bookmarkBtn = document.createElement("button");
+        bookmarkBtn.type = "button";
+        bookmarkBtn.className = "history-bookmark";
+        bookmarkBtn.disabled = !canStudyHistoryEntry(entry);
+        bookmarkBtn.textContent = isBookmarks ? "Remove" : (entry.bookmarked ? "Bookmarked" : "Bookmark");
+        bookmarkBtn.addEventListener("click", (event) => {
+          event.stopPropagation();
+          if (bookmarkBtn.disabled) return;
+          bookmarkBtn.disabled = true;
+          send({
+            type: "sr_bookmark_set",
+            promptId: entry.promptId,
+            bookmarked: isBookmarks ? false : !entry.bookmarked,
+            view: state.historyMode,
+          });
         });
-      });
-      meta.appendChild(studyBtn);
+        meta.appendChild(bookmarkBtn);
+
+        const studyBtn = document.createElement("button");
+        studyBtn.type = "button";
+        studyBtn.className = "history-study";
+        studyBtn.textContent = "Study Again";
+        studyBtn.disabled = !canStudyHistoryEntry(entry);
+        studyBtn.addEventListener("click", (event) => {
+          event.stopPropagation();
+          if (studyBtn.disabled) return;
+          closeHistoryOverlay();
+          send({
+            type: "sr_history_study",
+            promptId: entry.promptId,
+          });
+        });
+        meta.appendChild(studyBtn);
+      }
 
       item.appendChild(meta);
 
@@ -488,6 +522,15 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     }
     state.bookmarks = bookmarks;
     state.bookmarksLoading = false;
+    renderHistory();
+  }
+
+  function applyHardestMoves(hardestMoves) {
+    if (!hardestMoves || typeof hardestMoves.count !== "number" || !Array.isArray(hardestMoves.entries)) {
+      throw new Error("Invalid hardest moves payload");
+    }
+    state.hardestMoves = hardestMoves;
+    state.hardestMovesLoading = false;
     renderHistory();
   }
 
@@ -1439,6 +1482,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       state.historyOpen = false;
       state.historyLoading = false;
       state.bookmarksLoading = false;
+      state.hardestMovesLoading = false;
       state.progressOpen = false;
       state.progressLoading = false;
     }
@@ -1500,6 +1544,15 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   searchMoveCloseBtn.addEventListener("click", closeSearchMoveOverlay);
   historyOverlay.addEventListener("click", closeHistoryOverlay);
   historyPanel.addEventListener("click", (event) => event.stopPropagation());
+  historyHardestMovesBtn.addEventListener("click", () => {
+    if (historyHardestMovesBtn.disabled) return;
+    closeProgressOverlay();
+    state.historyMode = "hardestMoves";
+    state.historyOpen = true;
+    state.hardestMovesLoading = true;
+    renderHistory();
+    send({ type: "sr_hardest_moves" });
+  });
   historyCloseBtn.addEventListener("click", closeHistoryOverlay);
   progressOverlay.addEventListener("click", closeProgressOverlay);
   progressPanel.addEventListener("click", (event) => event.stopPropagation());
@@ -1574,6 +1627,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     applySrState,
     applyHistory,
     applyBookmarks,
+    applyHardestMoves,
     applyProgress,
     applyReviewNavigation,
     refreshBoardState: refreshAnalyzeLichessLink,
