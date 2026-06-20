@@ -517,6 +517,9 @@ class RepetitionEngine():
         accepted_alternatives = position_data.get("accepted_alternatives", [])
         if accepted_alternatives:
             payload["accepted_alternatives"] = list(accepted_alternatives)
+        bookmarked_moves = position_data.get("bookmarked_moves", [])
+        if bookmarked_moves:
+            payload["bookmarked_moves"] = list(bookmarked_moves)
         return payload
 
     def _pos_drill_item_from_json(
@@ -533,11 +536,13 @@ class RepetitionEngine():
         raw_blacklist = payload["blacklist"]
         raw_leads_to_skip = payload["leads_to_skip"]
         raw_accepted_alternatives = payload.get("accepted_alternatives", [])
+        raw_bookmarked_moves = payload.get("bookmarked_moves", [])
 
         past_performance: dict[UCI, list[PerformanceRecord]] = {}
         blacklist: list[UCI] = []
         leads_to_skip: list[UCI] = []
         accepted_alternatives: list[UCI] = []
+        bookmarked_moves: list[UCI] = []
 
         if not isinstance(raw_past_performance, dict):
             raise TypeError(f"Performance payload for position {position_fen!r} must be a dict")
@@ -547,6 +552,8 @@ class RepetitionEngine():
             raise TypeError(f"Skip payload for position {position_fen!r} must be a list")
         if not isinstance(raw_accepted_alternatives, list):
             raise TypeError(f"Accepted alternatives payload for position {position_fen!r} must be a list")
+        if not isinstance(raw_bookmarked_moves, list):
+            raise TypeError(f"Bookmarked moves payload for position {position_fen!r} must be a list")
 
         for uci, raw_history in raw_past_performance.items():
             if not isinstance(raw_history, list):
@@ -567,6 +574,9 @@ class RepetitionEngine():
         for raw_uci in raw_accepted_alternatives:
             if raw_uci not in accepted_alternatives:
                 accepted_alternatives.append(raw_uci)
+        for raw_uci in raw_bookmarked_moves:
+            if raw_uci not in bookmarked_moves:
+                bookmarked_moves.append(raw_uci)
 
         position_data = PositionDrillData(
             past_performance=past_performance,
@@ -575,6 +585,8 @@ class RepetitionEngine():
         )
         if accepted_alternatives:
             position_data["accepted_alternatives"] = accepted_alternatives
+        if bookmarked_moves:
+            position_data["bookmarked_moves"] = bookmarked_moves
         return position_fen, position_data
 
     def _model_item_to_json(
@@ -674,6 +686,12 @@ class RepetitionEngine():
             bookmarked.append(uci)
             self._pos_drill_data.serialize()
 
+    def bookmark_move(self, parent: BoardLike, uci: UCI) -> None:
+        self._bookmark_move(parent, uci)
+
+    def move_is_bookmarked(self, parent: BoardLike, uci: UCI) -> bool:
+        return uci in self._bookmarked_moves_for(parent)
+
     def _unbookmark_move(self, position_fen: str, move_uci: UCI) -> None:
         position_data = self._pos_drill_data.get(position_fen)
         if position_data is None:
@@ -682,6 +700,9 @@ class RepetitionEngine():
         if move_uci in bookmarked:
             bookmarked.remove(move_uci)
             self._pos_drill_data.serialize()
+
+    def unbookmark_move(self, position_fen: str, move_uci: UCI) -> None:
+        self._unbookmark_move(position_fen, move_uci)
 
     def marked_moves(self) -> list[MarkedMoveData]:
         marked: list[MarkedMoveData] = []
@@ -2658,6 +2679,21 @@ class AppController:
             }
         return None
 
+    def _build_review_tree_payload(self) -> dict[str, Any]:
+        if not self.active or self._mode != "review":
+            raise RuntimeError("Review tree payload requires active review mode")
+        return build_variation_tree(
+            self._review_children,
+            self._session.game,
+            end_ply=self._session.options.end_ply,
+            is_move_bookmarked=self._rep_engine.move_is_bookmarked,
+        )
+
+    def _refresh_review_tree_payload(self) -> None:
+        if self._mode != "review" or self._review_payload is None:
+            return
+        self._review_payload["tree"] = self._build_review_tree_payload()
+
     def ui_state(self) -> dict[str, Any]:
         pending_alternative = None
         if self.active and self._mode == "guess":
@@ -3037,6 +3073,11 @@ class AppController:
             "move": self._safe_node_san(node),
             "next": self._safe_node_san(next_node),
         }
+        if parent is not None and node.move is not None:
+            move_uci = node.move.uci()
+            result["fen"] = fen(parent)
+            result["uci"] = move_uci
+            result["bookmarked"] = self._rep_engine.move_is_bookmarked(parent, move_uci)
         if query_prev_uci is not None:
             result["matchPrev"] = bool(prev_uci and prev_uci == query_prev_uci)
         if query_next_uci is not None:
@@ -3178,35 +3219,50 @@ class AppController:
         results.sort(key=lambda item: (mark_order[item["mark"]], item["path"]))
         return results
 
+    def _marked_moves_payload(self, *, bookmarks_only: bool = False) -> dict[str, Any]:
+        results = self._marked_move_results()
+        if bookmarks_only:
+            results = [result for result in results if result.get("mark") == "bookmark"]
+            title = "Bookmarked moves"
+            empty_message = "No bookmarked moves in the current repertoire."
+        else:
+            title = "Marked moves"
+            empty_message = "No marked moves in the current repertoire."
+
+        return {
+            "kind": "markedMoves",
+            "query": {
+                "title": title,
+                "bookmarksOnly": bookmarks_only,
+            },
+            "results": results,
+            "count": len(results),
+            "emptyMessage": empty_message,
+        }
+
     def show_marked_moves(self) -> None:
         if self._mode != "review":
             return
 
-        results = self._marked_move_results()
-        self._search_move_payload = {
-            "kind": "markedMoves",
-            "query": {
-                "title": "Marked moves",
-            },
-            "results": results,
-            "count": len(results),
-            "emptyMessage": "No skipped or blacklisted moves in the current repertoire.",
-        }
+        self._search_move_payload = self._marked_moves_payload()
         self._broadcast_ui_state()
 
     def show_bookmarked_moves(self) -> None:
-        results = self._marked_move_results()
-        # Filter to only bookmarked moves
-        bookmarked_results = [r for r in results if r.get("mark") == "bookmark"]
-        self._search_move_payload = {
-            "kind": "markedMoves",
-            "query": {
-                "title": "Bookmarked moves",
-            },
-            "results": bookmarked_results,
-            "count": len(bookmarked_results),
-            "emptyMessage": "No bookmarked moves in the current repertoire.",
-        }
+        if self._mode != "review":
+            return
+
+        self._search_move_payload = self._marked_moves_payload(bookmarks_only=True)
+        self._broadcast_ui_state()
+
+    def _refresh_after_move_mark_change(self) -> None:
+        if self._mode != "review":
+            return
+
+        self._refresh_review_tree_payload()
+        if self._search_move_payload and self._search_move_payload.get("kind") == "markedMoves":
+            query = self._search_move_payload.get("query", {})
+            bookmarks_only = isinstance(query, dict) and query.get("bookmarksOnly") is True
+            self._search_move_payload = self._marked_moves_payload(bookmarks_only=bookmarks_only)
         self._broadcast_ui_state()
 
     def unmark_move(self, mark: str, position_fen: str, move_uci: UCI) -> None:
@@ -3221,19 +3277,15 @@ class AppController:
             raise ValueError(f"Unsupported move mark: {mark!r}")
 
         self._rep_engine.unmark_move(mark_kind, position_fen, move_uci)
-        self.show_marked_moves()
+        self._refresh_after_move_mark_change()
 
     def bookmark_move(self, position_fen: str, move_uci: UCI) -> None:
-        """Bookmark a move at the given position."""
-        
-        self._rep_engine._bookmark_move(position_fen, move_uci)
-        self.show_marked_moves()
+        self._rep_engine.bookmark_move(position_fen, move_uci)
+        self._refresh_after_move_mark_change()
 
     def unbookmark_move(self, position_fen: str, move_uci: UCI) -> None:
-        """Unbookmark a move at the given position."""
-        
-        self._rep_engine._unbookmark_move(position_fen, move_uci)
-        self.show_marked_moves()
+        self._rep_engine.unbookmark_move(position_fen, move_uci)
+        self._refresh_after_move_mark_change()
 
     def provide_hint(self) -> None:
         if self._mode != "guess":
@@ -3499,7 +3551,12 @@ class AppController:
             prefer_mainline_path=self._review_path,
             get_children=self._review_children,
         )
-        tree = build_variation_tree(self._review_children, self._session.game, end_ply=end_ply)
+        tree = build_variation_tree(
+            self._review_children,
+            self._session.game,
+            end_ply=end_ply,
+            is_move_bookmarked=self._rep_engine.move_is_bookmarked,
+        )
         self._review_payload = {
             "fen": exported.fen,
             "pgn": exported.pgn,

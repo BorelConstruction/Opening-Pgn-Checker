@@ -65,7 +65,13 @@ _NAG_DISPLAY = {
 }
 
 
-def build_variation_tree(get_children: Callable[[Node], list[Node]], root: Node, *, end_ply: int) -> dict[str, Any]:
+def build_variation_tree(
+    get_children: Callable[[Node], list[Node]],
+    root: Node,
+    *,
+    end_ply: int,
+    is_move_bookmarked: Callable[[Node, str], bool] | None = None,
+) -> dict[str, Any]:
     """
     Build a JSON-serializable variation tree rooted at 'root'.
 
@@ -96,6 +102,10 @@ def build_variation_tree(get_children: Callable[[Node], list[Node]], root: Node,
         ply = node.ply()
         move_number = (ply + 1) // 2
         color = "white" if ply % 2 == 1 else "black"
+        parent = node.parent
+        if parent is None or node.move is None:
+            raise ValueError("Cannot build a review move node without a parent and move")
+        uci = node.move.uci()
 
         children: list[dict[str, Any]] = []
         if ply < end_ply:
@@ -112,7 +122,9 @@ def build_variation_tree(get_children: Callable[[Node], list[Node]], root: Node,
             "moveNumber": move_number,
             "color": color,
             "san": node_san(node),
-            "uci": node.move.uci() if node.move is not None else "",
+            "uci": uci,
+            "parentFen": fen(parent),
+            "bookmarked": bool(is_move_bookmarked(parent, uci)) if is_move_bookmarked is not None else False,
             "nags": _node_nags(node),
             "comment": _node_comment(node),
             "children": children,

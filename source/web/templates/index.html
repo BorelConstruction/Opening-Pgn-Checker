@@ -26,7 +26,7 @@
         <button id="srHistory" title="Spaced repetition: browse previous prompts">History</button>
         <button id="srBookmarks" title="Spaced repetition: browse bookmarked prompt lines">Bookmarks</button>
         <button id="srProgress" title="Spaced repetition: show learned move progress">Progress</button>
-        <button id="srMarkedMoves" title="Spaced repetition: review skipped and blacklisted moves">Marked moves</button>
+        <button id="srMarkedMoves" title="Spaced repetition: review skipped, blacklisted, and bookmarked moves">Marked moves</button>
         <span id="status" class="status">disconnected</span>
       </div>
     </div>
@@ -75,6 +75,19 @@
             </div>
           </div>
           <div id="reviewTreeOptions" class="review-tree-options" hidden>
+            <div class="review-move-actions">
+              <button
+                id="srBookmarkMove"
+                class="review-bookmark-move"
+                type="button"
+                title="Bookmark or unbookmark the selected review move"
+              >Bookmark move</button>
+              <button
+                id="srBookmarkedMoves"
+                type="button"
+                title="Show bookmarked moves in this repertoire"
+              >Bookmarked moves</button>
+            </div>
             <label class="review-alt-toggle" title="Show all PGN branches while browsing review mode">
               <input id="srShowAlternatives" type="checkbox" />
               <span>Show alternatives</span>

@@ -12,6 +12,8 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srStudyFromHereBtn = document.getElementById("srStudyFromHere");
   const srSearchMoveBtn = document.getElementById("srSearchMove");
   const srMarkedMovesBtn = document.getElementById("srMarkedMoves");
+  const srBookmarkMoveBtn = document.getElementById("srBookmarkMove");
+  const srBookmarkedMovesBtn = document.getElementById("srBookmarkedMoves");
   const srAnalyzeLichessLink = document.getElementById("srAnalyzeLichess");
 
   const treePanel = document.getElementById("treePanel");
@@ -76,6 +78,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     progressLoading: false,
     startRange: null,
     bookmarkQueued: false,
+    moveBookmarkPending: false,
     pendingAlternative: null,
   };
 
@@ -262,6 +265,24 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     const wrongCount = Number.isFinite(entry.wrongCount) ? Math.max(0, Math.trunc(entry.wrongCount)) : 0;
     const attemptCount = Number.isFinite(entry.attemptCount) ? Math.max(0, Math.trunc(entry.attemptCount)) : 0;
     return `${wrongCount.toLocaleString()} wrong / ${attemptCount.toLocaleString()} attempts`;
+  }
+
+  function currentMoveBookmarkTarget() {
+    const ctx = getReviewContext();
+    if (!ctx) return null;
+    if (!Array.isArray(ctx.currentPath) || ctx.currentPath.length === 0) return null;
+
+    const node = ctx.node;
+    if (!node || typeof node.uci !== "string" || !node.uci) return null;
+    if (typeof node.parentFen !== "string" || !node.parentFen.trim()) {
+      throw new Error("Selected review move is missing parentFen");
+    }
+
+    return {
+      fen: node.parentFen,
+      uci: node.uci,
+      bookmarked: !!node.bookmarked,
+    };
   }
 
   function renderHistory() {
@@ -557,6 +578,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srStudyFromHereBtn.disabled = !isReview;
     srSearchMoveBtn.disabled = !isReview;
     srMarkedMovesBtn.disabled = !isReview;
+    srBookmarkedMovesBtn.disabled = !isReview;
     srGuessGiveUpBtn.disabled = !isGuess;
     srGuessFinishBtn.disabled = !isGuess;
     srGuessFinishNewBtn.disabled = !isGuess;
@@ -565,6 +587,10 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srGuessSkipBtn.disabled = !canSkipGuess;
     srGuessBlacklistBtn.disabled = !isGuess;
     srGuessBlacklistLineBtn.disabled = !isGuess;
+    const bookmarkTarget = currentMoveBookmarkTarget();
+    srBookmarkMoveBtn.disabled = !bookmarkTarget || state.moveBookmarkPending;
+    srBookmarkMoveBtn.textContent = bookmarkTarget && bookmarkTarget.bookmarked ? "Unbookmark move" : "Bookmark move";
+    srBookmarkMoveBtn.classList.toggle("active", !!bookmarkTarget && bookmarkTarget.bookmarked);
     srAcceptAlternativeBtn.hidden = !canAcceptAlternative;
     srAcceptAlternativeBtn.disabled = !canAcceptAlternative;
     srShowAlternativesInput.disabled = !isReview;
@@ -628,16 +654,23 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     send({ type: "sr_search_move", notation: trimmedNotation });
   }
 
+  function normalizeMoveMark(mark) {
+    if (mark === "blacklist" || mark === "skip" || mark === "bookmark") return mark;
+    throw new Error(`Unknown move mark: ${mark}`);
+  }
+
   function markedMoveLabel(mark) {
-    if (mark === "blacklist") return "Blacklisted";
-    if (mark === "skip") return "Skipped";
-    return "Marked";
+    const normalizedMark = normalizeMoveMark(mark);
+    if (normalizedMark === "blacklist") return "Blacklisted";
+    if (normalizedMark === "skip") return "Skipped";
+    return "Bookmarked";
   }
 
   function markedMoveActionLabel(mark) {
-    if (mark === "blacklist") return "Unblacklist";
-    if (mark === "skip") return "Stop skipping";
-    return "Remove mark";
+    const normalizedMark = normalizeMoveMark(mark);
+    if (normalizedMark === "blacklist") return "Unblacklist";
+    if (normalizedMark === "skip") return "Stop skipping";
+    return "Unbookmark";
   }
 
   function renderSearchMove() {
@@ -658,7 +691,8 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     const count = typeof state.searchMove.count === "number" ? state.searchMove.count : results.length;
 
     if (isMarkedMoves) {
-      searchMoveTitle.textContent = `Marked moves (${count})`;
+      const title = typeof query.title === "string" && query.title ? query.title : "Marked moves";
+      searchMoveTitle.textContent = `${title} (${count})`;
     } else {
       searchMoveTitle.textContent = queryMove ? `Search move: ${queryMove} (${count})` : `Search move (${count})`;
     }
@@ -689,7 +723,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       });
 
       if (isMarkedMoves) {
-        const mark = item.mark === "blacklist" || item.mark === "skip" ? item.mark : "";
+        const mark = normalizeMoveMark(item.mark);
         const markSpan = document.createElement("span");
         markSpan.className = `search-mark ${mark}`;
         markSpan.textContent = markedMoveLabel(mark);
@@ -723,8 +757,8 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
         action.type = "button";
         action.className = "search-action";
         action.textContent = markedMoveActionLabel(item.mark);
-        const canUnmark = item.mark === "blacklist" || item.mark === "skip";
-        action.disabled = !canUnmark || typeof item.fen !== "string" || typeof item.uci !== "string";
+        const mark = normalizeMoveMark(item.mark);
+        action.disabled = !mark || typeof item.fen !== "string" || typeof item.uci !== "string";
         action.addEventListener("click", (event) => {
           event.stopPropagation();
           if (action.disabled) return;
@@ -997,6 +1031,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       const button = document.createElement("button");
       button.type = "button";
       button.className = "review-next-move";
+      button.classList.toggle("bookmarked", !!child.bookmarked);
       button.textContent = formatTreeMoveLabel(child);
       button.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -1011,8 +1046,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     const normalizedCurrentPath = Array.isArray(globalCurrentPath) ? globalCurrentPath : [];
     const isCurrent = pathsEqual(globalPath, globalCurrentPath);
     const pathRelation = getPathRelation(globalPath, normalizedCurrentPath);
+    const isBookmarked = !!node.bookmarked;
     const div = document.createElement("div");
-    div.className = `tree-node ${pathRelation} ${isCurrent ? 'current' : ''}`.trim();
+    div.className = `tree-node ${pathRelation} ${isCurrent ? 'current' : ''} ${isBookmarked ? 'bookmarked' : ''}`.trim();
     div.dataset.path = JSON.stringify(globalPath);
 
     const row = document.createElement("div");
@@ -1029,6 +1065,12 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
         queueReviewNavigation(globalPath);
       });
       row.appendChild(moveSpan);
+      if (isBookmarked) {
+        const bookmarkSpan = document.createElement("span");
+        bookmarkSpan.className = "tree-bookmark";
+        bookmarkSpan.textContent = "Bookmarked";
+        row.appendChild(bookmarkSpan);
+      }
     } else {
       // This is a position node (root)
       const posSpan = document.createElement("span");
@@ -1477,6 +1519,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     state.searchMove = sr.searchMove || null;
     state.startRange = Number.isInteger(sr.startRange) ? sr.startRange : null;
     state.bookmarkQueued = !!sr.bookmarkQueued;
+    state.moveBookmarkPending = false;
     state.pendingAlternative = sr.pendingAlternative || null;
     if (!state.active) {
       state.historyOpen = false;
@@ -1506,6 +1549,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
 
     state.review.currentPath = clonePath(review.currentPath);
     state.review.viewRootPath = clonePath(review.viewRootPath);
+    state.moveBookmarkPending = false;
     if (Object.prototype.hasOwnProperty.call(review, "dbStatsRequestId")) {
       state.review.dbStatsRequestId = review.dbStatsRequestId;
     }
@@ -1619,6 +1663,31 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     state.searchMoveDismissed = false;
     renderSearchMove();
     send({ type: "sr_marked_moves" });
+  });
+  srBookmarkedMovesBtn.addEventListener("click", () => {
+    state.searchMoveDismissed = false;
+    renderSearchMove();
+    send({ type: "sr_bookmarked_moves" });
+  });
+  srBookmarkMoveBtn.addEventListener("click", () => {
+    const target = currentMoveBookmarkTarget();
+    if (!target || srBookmarkMoveBtn.disabled) return;
+    state.moveBookmarkPending = true;
+    refreshButtons();
+    if (target.bookmarked) {
+      send({
+        type: "sr_unmark_move",
+        mark: "bookmark",
+        fen: target.fen,
+        uci: target.uci,
+      });
+      return;
+    }
+    send({
+      type: "sr_bookmark_move",
+      fen: target.fen,
+      uci: target.uci,
+    });
   });
 
   refreshButtons();
