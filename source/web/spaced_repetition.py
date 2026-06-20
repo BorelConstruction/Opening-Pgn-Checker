@@ -49,7 +49,7 @@ from .memory_model import (
 )
 
 K = TypeVar("K")
-MarkKind = Literal["blacklist", "skip"]
+MarkKind = Literal["blacklist", "skip", "bookmark"]
 
 
 class RequiredPositionDrillData(TypedDict):
@@ -60,6 +60,7 @@ class RequiredPositionDrillData(TypedDict):
 
 class PositionDrillData(RequiredPositionDrillData, total=False):
     accepted_alternatives: list[UCI]
+    bookmarked_moves: list[UCI]
 
 
 class PositionModelData(TypedDict):
@@ -658,6 +659,30 @@ class RepetitionEngine():
         accepted_alternatives.append(uci)
         self._pos_drill_data.serialize()
 
+    def _bookmarked_moves_for(self, position: BoardLike) -> list[UCI]:
+        position_data = self._pos_drill_data.get(fen(position))
+        if position_data is None:
+            return []
+        return position_data.get("bookmarked_moves", [])
+
+    def _bookmarked_moves_for_update(self, position: BoardLike) -> list[UCI]:
+        return self._pos_drill_data[fen(position)].setdefault("bookmarked_moves", [])
+
+    def _bookmark_move(self, parent: BoardLike, uci: UCI) -> None:
+        bookmarked = self._bookmarked_moves_for_update(parent)
+        if uci not in bookmarked:
+            bookmarked.append(uci)
+            self._pos_drill_data.serialize()
+
+    def _unbookmark_move(self, position_fen: str, move_uci: UCI) -> None:
+        position_data = self._pos_drill_data.get(position_fen)
+        if position_data is None:
+            return
+        bookmarked = position_data.get("bookmarked_moves", [])
+        if move_uci in bookmarked:
+            bookmarked.remove(move_uci)
+            self._pos_drill_data.serialize()
+
     def marked_moves(self) -> list[MarkedMoveData]:
         marked: list[MarkedMoveData] = []
         for position_fen, position_data in self._pos_drill_data.items():
@@ -668,6 +693,10 @@ class RepetitionEngine():
             marked.extend(
                 MarkedMoveData(mark="skip", fen=position_fen, uci=uci)
                 for uci in position_data["leads_to_skip"]
+            )
+            marked.extend(
+                MarkedMoveData(mark="bookmark", fen=position_fen, uci=uci)
+                for uci in position_data.get("bookmarked_moves", [])
             )
         marked.sort(key=lambda item: (item["mark"], item["fen"], item["uci"]))
         return marked
@@ -720,6 +749,8 @@ class RepetitionEngine():
             mark_list = position_data["blacklist"]
         elif mark == "skip":
             mark_list = position_data["leads_to_skip"]
+        elif mark == "bookmark":
+            mark_list = position_data.get("bookmarked_moves", [])
         else:
             raise ValueError(f"Unsupported move mark: {mark!r}")
 
@@ -3143,7 +3174,7 @@ class AppController:
                 result.update(marked)
                 results.append(result)
 
-        mark_order: dict[MarkKind, int] = {"blacklist": 0, "skip": 1}
+        mark_order: dict[MarkKind, int] = {"blacklist": 0, "skip": 1, "bookmark": 2}
         results.sort(key=lambda item: (mark_order[item["mark"]], item["path"]))
         return results
 
@@ -3163,16 +3194,45 @@ class AppController:
         }
         self._broadcast_ui_state()
 
+    def show_bookmarked_moves(self) -> None:
+        results = self._marked_move_results()
+        # Filter to only bookmarked moves
+        bookmarked_results = [r for r in results if r.get("mark") == "bookmark"]
+        self._search_move_payload = {
+            "kind": "markedMoves",
+            "query": {
+                "title": "Bookmarked moves",
+            },
+            "results": bookmarked_results,
+            "count": len(bookmarked_results),
+            "emptyMessage": "No bookmarked moves in the current repertoire.",
+        }
+        self._broadcast_ui_state()
+
     def unmark_move(self, mark: str, position_fen: str, move_uci: UCI) -> None:
         mark_kind: MarkKind
         if mark == "blacklist":
             mark_kind = "blacklist"
         elif mark == "skip":
             mark_kind = "skip"
+        elif mark == "bookmark":
+            mark_kind = "bookmark"
         else:
             raise ValueError(f"Unsupported move mark: {mark!r}")
 
         self._rep_engine.unmark_move(mark_kind, position_fen, move_uci)
+        self.show_marked_moves()
+
+    def bookmark_move(self, position_fen: str, move_uci: UCI) -> None:
+        """Bookmark a move at the given position."""
+        
+        self._rep_engine._bookmark_move(position_fen, move_uci)
+        self.show_marked_moves()
+
+    def unbookmark_move(self, position_fen: str, move_uci: UCI) -> None:
+        """Unbookmark a move at the given position."""
+        
+        self._rep_engine._unbookmark_move(position_fen, move_uci)
         self.show_marked_moves()
 
     def provide_hint(self) -> None:

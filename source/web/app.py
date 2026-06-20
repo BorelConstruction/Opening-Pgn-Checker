@@ -295,6 +295,12 @@ async def ws(ws: WebSocket) -> None:
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
+            elif msg_type == "sr_bookmarked_moves":
+                try:
+                    sr_controller.show_bookmarked_moves()
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
             elif msg_type == "sr_history":
                 try:
                     await ws.send_json({"type": "sr_history", "history": sr_controller.history_payload()})
@@ -370,8 +376,8 @@ async def ws(ws: WebSocket) -> None:
                 mark = msg.get("mark")
                 position_fen = msg.get("fen")
                 uci = msg.get("uci")
-                if mark not in ("blacklist", "skip"):
-                    await ws.send_json({"type": "error", "message": "mark must be blacklist or skip"})
+                if mark not in ("blacklist", "skip", "bookmark"):
+                    await ws.send_json({"type": "error", "message": "mark must be blacklist, skip, or bookmark"})
                     continue
                 if not isinstance(position_fen, str) or not position_fen.strip():
                     await ws.send_json({"type": "error", "message": "fen must be a non-empty string"})
@@ -381,6 +387,34 @@ async def ws(ws: WebSocket) -> None:
                     continue
                 try:
                     sr_controller.unmark_move(mark, position_fen.strip(), uci.strip())
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
+            elif msg_type == "sr_bookmark_move":
+                position_fen = msg.get("fen")
+                uci = msg.get("uci")
+                if not isinstance(position_fen, str) or not position_fen.strip():
+                    await ws.send_json({"type": "error", "message": "fen must be a non-empty string"})
+                    continue
+                if not isinstance(uci, str) or not uci.strip():
+                    await ws.send_json({"type": "error", "message": "uci must be a non-empty string"})
+                    continue
+                try:
+                    sr_controller.bookmark_move(position_fen.strip(), uci.strip())
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
+            elif msg_type == "sr_unbookmark_move":
+                position_fen = msg.get("fen")
+                uci = msg.get("uci")
+                if not isinstance(position_fen, str) or not position_fen.strip():
+                    await ws.send_json({"type": "error", "message": "fen must be a non-empty string"})
+                    continue
+                if not isinstance(uci, str) or not uci.strip():
+                    await ws.send_json({"type": "error", "message": "uci must be a non-empty string"})
+                    continue
+                try:
+                    sr_controller.unbookmark_move(position_fen.strip(), uci.strip())
                 except Exception as exc:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
