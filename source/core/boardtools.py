@@ -335,3 +335,12 @@ def ply_from_move_number(move_number: int) -> int:
 
 def child_by_uci(node: Node, uci: str):
     return next(c for c in node.variations if c.move.uci() == uci)
+
+ERROR_NAGS = {
+    chess.pgn.NAG_MISTAKE,       # $2
+    chess.pgn.NAG_BLUNDER,       # $4 
+    chess.pgn.NAG_DUBIOUS_MOVE,  # $6 
+}
+
+def move_is_marked_as_error(node: Node) -> bool:
+    return bool(node.nags & ERROR_NAGS)

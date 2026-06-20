@@ -28,6 +28,7 @@ from ..core.boardtools import (
     BoardLike,
     fen,
     move_identity,
+    move_is_marked_as_error,
     moves_are_equal,
     node_moves,
     node_san,
@@ -1255,7 +1256,8 @@ class RepetitionEngine():
             return MoveGrade(MoveCorrectness.CORRECT)
         if not self._session.options.check_alternatives:
             chosen_alternative_node = self._tt_child_for_move(prpt_data.node, uci)
-            if chosen_alternative_node is not None:
+            if (chosen_alternative_node is not None and
+                not move_is_marked_as_error(chosen_alternative_node)):
                 self._pending_alternative_uci = uci
                 return MoveGrade(
                     MoveCorrectness.ALTERNATIVE,
