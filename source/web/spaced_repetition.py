@@ -1437,7 +1437,9 @@ class RepetitionEngine():
                 if self._prompt_state.off_file:
                     self._activate_prompt_state()
                     return
+                
                 self._skip_learned_prompt_positions()
+
                 if self._is_finished or self._prompt_state.off_file:
                     if self._prompt_state.off_file:
                         self._activate_prompt_state()
@@ -1481,7 +1483,7 @@ class RepetitionEngine():
     
     def _choose_prompt_globally(self) -> bool:
         # Length from the anchor to the final opponent move, in plies.
-        prpt_len = self._rng.randint(2, self.MAX_GLOBAL_PROMPT_LENGTH)
+        prpt_len = self._rng.randint(6, self.MAX_GLOBAL_PROMPT_LENGTH) # TODO: make parameters
         if prpt_len % 2 == 0:
             prpt_len -= 1
 
@@ -1497,7 +1499,9 @@ class RepetitionEngine():
                 start_damage_cutoff = prompt_quality_dict[path[:i-1]][1] if i > 0 else 0
                 choose_from[(path, i)] = \
                 total_damage - start_damage_cutoff
-        possible_keys = [k for k in choose_from.keys() if len(k[0]) - k[1] == prpt_len]
+        possible_keys = [k for k in choose_from.keys() if len(k[0]) - k[1] <= prpt_len]
+        # ^ the only way a short prompt can "win" is if it does not have a file continuation, which
+        # is exactly the case where we could miss it if we did ""== prpt_len" and min prpt len is too high
         possible_keys.sort(key=lambda k: choose_from[k], reverse=True)
         candidate_amount = min(max(1, len(possible_keys) // 3), 10)
         preferred_prompt_keys = possible_keys[:candidate_amount]
@@ -1523,7 +1527,9 @@ class RepetitionEngine():
         msg = f"Complete prompt: {self._prompt_state.prechosen_path}, \
                 expected damage {choose_from[(chosen_path, offset)]:.3f}" if DEBUG_MODE else ""
         self._prompt_state.message = msg
+
         self._skip_learned_prompt_positions()
+
         if self._is_finished:
             return False
         self._set_prompt_start()
