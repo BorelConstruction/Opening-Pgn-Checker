@@ -168,11 +168,13 @@ class RepetitionEngine():
         model_cache_name: str,
         non_file_freq: float,
         local_generation: bool,
+        prompt_len_interval: tuple[int, int] = (3, 10),
     ) -> None:
         self._session = session
         self.non_file_move_freq = non_file_freq
         self._rng = random.Random()
         self.local_generation = local_generation
+        self.prompt_len_interval = (2*prompt_len_interval[0], 2*prompt_len_interval[1]) # convert to plies
 
         # updates whenever asked to generate a new prompt
         self._prompt_spec = None
@@ -1483,7 +1485,7 @@ class RepetitionEngine():
     
     def _choose_prompt_globally(self) -> bool:
         # Length from the anchor to the final opponent move, in plies.
-        prpt_len = self._rng.randint(6, self.MAX_GLOBAL_PROMPT_LENGTH) # TODO: make parameters
+        prpt_len = self._rng.randint(*self.prompt_len_interval)
         if prpt_len % 2 == 0:
             prpt_len -= 1
 
@@ -2744,7 +2746,8 @@ class AppController:
                 self._pos_drill_cache_name(),
                 self._model_cache_name(),
                 self._cfg.non_file_move_frequency,
-                self._cfg.local_generation
+                self._cfg.local_generation,
+                (self._cfg.min_prompt_len, self._cfg.max_prompt_len)
             )
             self._rep_controller = RepetitionController(
                 NaiveScheduler(self._log),

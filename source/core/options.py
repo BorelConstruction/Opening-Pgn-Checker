@@ -229,6 +229,16 @@ class SpacedRepetitionOptions(RepertoireOptions):
         },
     )
 
+    min_prompt_len : int = field(
+        default=3,
+        metadata={"label": "Minimum Prompt Length (Moves)", "min": 1, "max": 10}
+    )
+
+    max_prompt_len : int = field(
+        default=7,
+        metadata={"label": "Maximum Prompt Length (Moves)", "min": 1, "max": 20}
+    )
+
     def validate(self):
         super().validate()
         if not (0.0 <= self.non_file_move_frequency <= 1.0):
