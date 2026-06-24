@@ -19,10 +19,7 @@ def _format_exception_detail() -> str:
     return traceback.format_exc()
 
 
-def _prompt_line_id_from_payload(payload: Any) -> PromptLineId:
-    if not isinstance(payload, dict):
-        raise TypeError("promptId must be an object")
-
+def _prompt_line_id_from_payload(payload: dict) -> PromptLineId:
     start_fen = payload.get("startFen")
     moves = payload.get("moves")
     if not isinstance(start_fen, str):

@@ -174,7 +174,7 @@ class RepetitionEngine():
         self.non_file_move_freq = non_file_freq
         self._rng = random.Random()
         self.local_generation = local_generation
-        self.prompt_len_interval = (2*prompt_len_interval[0], 2*prompt_len_interval[1]) # convert to plies
+        self.prompt_len_interval = prompt_len_interval
 
         # updates whenever asked to generate a new prompt
         self._prompt_spec = None
@@ -2118,6 +2118,7 @@ class PromptState:
 
 @dataclass(frozen=True)
 class PromptLineId:
+    # TODO: keep the moves starting only from start_fen
     start_fen: str
     moves: tuple[str, ...]
 
@@ -2140,6 +2141,20 @@ class PromptLineId:
             raise TypeError("Prompt line id moves must be a list of strings")
 
         return cls(start_fen, tuple(moves))
+
+    def prompt_len(self) -> int:
+        board = chess.Board()
+    
+        for i, san in enumerate(self.moves):
+            if board.fen().split(' ')[0] == self.start_fen.split(' ')[0]:
+                return len(self.moves) - i
+            board.push_san(san)
+        
+        # Check after the last move
+        if board.fen().split(' ')[0] == self.start_fen.split(' ')[0]:
+            return 0
+        
+        return -1
 
 
 @dataclass
@@ -2171,6 +2186,9 @@ class PromptLogEntry:
             performance=payload.get("performance"),
             bookmarked=raw_bookmarked,
         )
+    
+    def prompt_len(self) -> int:
+        return self.prompt_id.prompt_len()
 
 class Hints():
     """
@@ -2259,6 +2277,14 @@ class PromptLog:
                 bookmarked=self.is_bookmarked(line_id),
             )
         )
+
+    def __len__(self) -> int:
+        return len(self.entries)
+    
+    def average_prompt_len(self) -> float:
+        if not self.entries:
+            return 0.0
+        return sum(entry.prompt_len() for entry in self.entries) / len(self.entries)
 
     @property
     def _last_entry(self) -> PromptLogEntry:
@@ -2747,7 +2773,7 @@ class AppController:
                 self._model_cache_name(),
                 self._cfg.non_file_move_frequency,
                 self._cfg.local_generation,
-                (self._cfg.min_prompt_len, self._cfg.max_prompt_len)
+                self._prompt_log_len_range()
             )
             self._rep_controller = RepetitionController(
                 NaiveScheduler(self._log),
@@ -2766,6 +2792,17 @@ class AppController:
                 sys.stderr.write(f"Failed to save cache: {exc}\n")
             if self._session is not None: 
                 self._session.close()
+
+    def _prompt_log_len_range(self) -> tuple[int, int]:
+        """Interval for the global prompt lenths, in plies, for the Engine."""
+        # TODO: I don't think this belongs here, but Engine currently does not
+        # have access to Log. Need to fix this once a proper redesign path becomes clear.
+        if len(self._log) < 20: # small history -- can't conclude
+            return (self._cfg.min_prompt_len, self._cfg.max_prompt_len)
+        avg = int(self._log.average_prompt_len())
+        avg = avg if avg % 2 == 0 else avg + 1 # round to even
+        return (avg - 2, avg + 2)
+
 
     def _commit_pending_bookmark_to_latest_prompt(self) -> None:
         if not self._bookmark_current_prompt_pending:

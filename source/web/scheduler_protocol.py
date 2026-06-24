@@ -24,13 +24,17 @@ The workflow:
     - RepetitionEngine -Feedback-> Scheduler
 """
 
-from typing import Any, Hashable, Protocol, TypeAlias
+from typing import Any, Hashable, Protocol, TypeAlias, runtime_checkable
 
 
 """Abstract identifier of a schedulable unit (no chess knowledge)."""
 SpecId: TypeAlias = Hashable
 
-PromptId: TypeAlias = Hashable
+@runtime_checkable
+class PromptId(Protocol, Hashable):
+    """Length of the corresponding prompt in plies."""
+    def prompt_len(self) -> int:
+        ...
 
 
 class Prompt:
