@@ -66,10 +66,15 @@ class RepertoireSession(PgnSession):
             report_cb=report_cb,
             default_cache_path=default_cache_path or (lambda: default_repertoire_cache_path(options)),
         )
-        self._convert_moves_to_plies()
+        self._set_start_end_ply()
 
-    def _convert_moves_to_plies(self):
+    def _set_start_end_ply(self):
         o = self.options
-        o.start_ply = ply_from_move_number(o.start_move)
         o.end_ply = ply_from_move_number(o.end_move)
+        o.start_ply = ply_from_move_number(o.start_move)
+        try:
+            if o.start_ply > self.starting_node.ply():
+                o.start_ply = self.starting_node.ply()
+        except AttributeError:
+            pass
 

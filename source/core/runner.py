@@ -323,7 +323,7 @@ class PgnSession:
         self._init_queries()
 
         self._init_game()
-        self._set_starting_fen()
+        self._set_starting_node()
 
     def _init_game(self): # TODO: multiple games
         with open(self.options.input_pgn, encoding="utf-8") as pgn_file:
@@ -542,15 +542,16 @@ class PgnSession:
         return score_rate(md, self.options.side)
 
     
-    def _set_starting_fen(self, game: Node = None):
+    def _set_starting_node(self, game: Node = None):
         if not hasattr(self.options, "starting_fen"):
+            self.starting_node = None
             return
         if game is None:
             game = self.game
         if self.options.starting_fen:
             self.starting_node = find_node_by_position(game, self.options.starting_fen)
         else:
-            self.starting_node = game
+            self.starting_node = None
 
     def count_nodes(self, root_node):
         return count_nodes(root_node, self.traversal_restrictions())

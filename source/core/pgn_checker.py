@@ -122,9 +122,10 @@ class PgnChecker:
 
             self.make_headers(game)
             # self.make_move_coupling_dict(game) # MOVE
+            starting_node = self.session.starting_node or game
             sys.stderr.write('starting to traverse...')
             for action in self.pipeline():
-                action(game)
+                action(starting_node)
             print(game, file=open(self.session.options.output_pgn, "a", encoding="utf-8"), end="\n\n") # "a" for adding
 
         except Exception as e:
