@@ -221,9 +221,9 @@ class PgnChecker:
 
     def mark_move_local(self, log_node: Node):
         mark_fn = mark_based_on_freq_us if log_node.turn() == self.session.options.side else mark_based_on_freq_them
+        if self.session.total_games(log_node) < FREQ_MARK_THRESHOLD:
+            return
         for n in log_node.variations:
-            if self.session.total_games(n) < FREQ_MARK_THRESHOLD:
-                continue
             freq = self.session.move_freq(log_node, n.move)
             mark_fn(n, freq)
 
