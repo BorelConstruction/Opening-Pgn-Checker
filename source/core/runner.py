@@ -603,7 +603,7 @@ class PgnSession:
     def _record_position_in_TT(self, node): # TODO: when do we add?
         self.cache[fen(node)].TTed.append(node)
         if len(self.cache[fen(node)].TTed) > 1:
-            self.cache[fen(node)].TTed.sort(key=lambda n: count_nodes(n))
+            self.cache[fen(node)].TTed.sort(key=lambda n: count_nodes(n), reverse=True)
 
     def _collect_subtree_nodes(self, node: Node, out: list[tuple[str, Node]]) -> None:
         out.append((fen(node), node))
