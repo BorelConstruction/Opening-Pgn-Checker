@@ -337,6 +337,12 @@ class PgnChecker:
         eval = self.session.query(fen(node), "eval").best_eval()
         tr_move = self.find_transposition_move(node)
         if tr_move:
+            genuine_trasposition = False
+            board = node.board()
+            board.push(tr_move)
+            if board_seen_in_ancestors(board, node):
+                genuine_trasposition = True
+        if genuine_trasposition:
             board = node.board()
             board.push(tr_move)
             tr_eval = self.session.query(fen(board), "eval").best_eval()

@@ -323,6 +323,20 @@ def first_difference(n1: Node, n2: Node) -> Optional[FirstDifference]:
 
     return None
 
+def board_seen_in_ancestors(board: chess.Board, node: chess.pgn.GameNode) -> bool:
+    """
+    Return True if 'board' matches the position at 'node' or any of its ancestors.
+    """
+    current_board = node.board()
+    current = node
+    while True:
+        if current_board == board:
+            return True
+        if current.parent is None:
+            return False
+        current_board.pop()
+        current = current.parent
+
 def moves_to_algebraic(moves: list[str]) -> str:
     pairs = [
         f"{i + 1}. {' '.join(moves[i * 2:(i + 1) * 2])}"
