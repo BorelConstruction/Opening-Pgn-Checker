@@ -334,19 +334,19 @@ class PgnChecker:
             return MoveChoice(best_move1, "eng", eval1)            
 
     def generate_moves_us(self, node: Node) -> list[MoveChoice]:
-        eval = self.session.query(fen(node), "eval").best_eval()
+        eval_query = self.session.query(fen(node), "eval")
+        eval, move = eval_query.best_eval(), eval_query.best_move()
         tr_move = self.find_transposition_move(node)
+        genuine_trasposition = False
         if tr_move:
-            genuine_trasposition = False
             board = node.board()
             board.push(tr_move)
             if board_seen_in_ancestors(board, node):
                 genuine_trasposition = True
         if genuine_trasposition:
-            board = node.board()
-            board.push(tr_move)
-            tr_eval = self.session.query(fen(board), "eval").best_eval()
-            board.pop()
+            if tr_move == move:
+                return [MoveChoice(tr_move, "tr", eval)]
+            # ^ potentially saves us one eval and avoid that problem that
             # if a position is complex, tr_eval and eval may differ a lot just by the fact that
             # the best move is already "entered" after tr_move. Then we may not recognize tr_move
             # as the best one even if it is. I am not sure why this happens this way
@@ -354,6 +354,10 @@ class PgnChecker:
             # anyway, we don't want to avoid transposing to be +3 intead of +2.7, so the second check is 
             # still needed; hopefully it also prevents the problem just described.
             # Also note that it only makes sense when we are better
+            board = node.board()
+            board.push(tr_move)
+            tr_eval = self.session.query(fen(board), "eval").best_eval()
+            board.pop()
             if tr_eval >= eval - 0.15 or tr_eval >= 0.85*eval:
                 eval = tr_eval
                 return [MoveChoice(tr_move, "tr", tr_eval)]
@@ -364,6 +368,8 @@ class PgnChecker:
 
         if to_tr: # TODO: abstract these two blocks
             to_tr_move, comment = to_tr
+            if to_tr_move == move:
+                return [MoveChoice(to_tr_move, "to_tr", eval, comment)]
             board = node.board()
             board.push(to_tr_move)
             to_tr_eval = self.session.query(fen(board), "eval").best_eval()

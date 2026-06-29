@@ -58,7 +58,7 @@ class CacheDict(OnGetItemMixin[K], KeyDefaultDict[K, V]):
         self.item_to_json = item_to_json
         self.item_from_json = item_from_json
         self._saving = False
-        self.autosave_interval = 180 # seconds
+        self.autosave_interval = 18000 # seconds
         self._last_save_t = time.monotonic()
         self.default_cache_path = save_path
         if auto_save:
