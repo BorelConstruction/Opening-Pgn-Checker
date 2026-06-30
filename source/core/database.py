@@ -83,10 +83,14 @@ def total_games(game_data: dict):
 def total_decisive_games(game_data: dict):
     return game_data['white'] + game_data['black']
 
-def score_rate(game_data: dict, side: Union[str, Color]):
+def score_rate(game_data: dict, side: Union[str, Color], rating_adjustment: float = 0.0):
+    if rating_adjustment > 0.0:
+        factor = 1.0 + pow(10.0, -rating_adjustment / 400.0)
+    if rating_adjustment < 0.0:
+        factor = 1.0 / (1.0 + pow(10.0, rating_adjustment / 400.0))
     if isinstance(side, Color):
         side = 'white' if side == WHITE else 'black'
-    return (game_data[side] + 0.5 * game_data['draws']) / total_games(game_data)
+    return factor * (game_data[side] + 0.5 * game_data['draws']) / total_games(game_data)
 
 def win_rate(game_data: dict, side: Union[str, Color]):
     if isinstance(side, Color):

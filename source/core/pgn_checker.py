@@ -322,8 +322,11 @@ class PgnChecker:
         stats = self.session.query(fen(node), "db_lichess")
         stats1 = stats_for_uci(stats, best_move1.uci())
         stats2 = stats_for_uci(stats, best_move2.uci())
-        sr1 = score_rate(stats1, self.session.options.side) if stats1 else 0.5
-        sr2 = score_rate(stats2, self.session.options.side) if stats2 else 0.5
+        if not stats1 or not stats2:
+            return MoveChoice(best_move1, "eng", eval1)
+        rating_diff = stats1.get("averageRating", 0) - stats2.get("averageGating", 0)
+        sr1 = score_rate(stats1, self.session.options.side, -rating_diff)
+        sr2 = score_rate(stats2, self.session.options.side)
         tg1 = total_games(stats1) if stats1 else 0
         tg2 = total_games(stats2) if stats2 else 0
         if (eval2 is not None and eval1 - eval2 < 0.1 
@@ -331,7 +334,7 @@ class PgnChecker:
             comment = f"Best move is close, but {best_move2.uci()} has a better score rate ({sr2*100:.1f}% vs {sr1*100:.1f}%)".upper()
             return MoveChoice(best_move2, "eng", eval2, comment)
         else:
-            return MoveChoice(best_move1, "eng", eval1)            
+            return MoveChoice(best_move1, "eng", eval1)
 
     def generate_moves_us(self, node: Node) -> list[MoveChoice]:
         eval_query = self.session.query(fen(node), "eval")
