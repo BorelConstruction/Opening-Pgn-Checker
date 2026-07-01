@@ -1,6 +1,7 @@
 import sys
 import time
 import berserk
+import math
 
 from chess import Color as Color
 from chess import WHITE
@@ -84,13 +85,9 @@ def total_decisive_games(game_data: dict):
     return game_data['white'] + game_data['black']
 
 def score_rate(game_data: dict, side: Union[str, Color], rating_adjustment: float = 0.0):
-    if rating_adjustment > 0.0:
-        factor = 1.0 + pow(10.0, -rating_adjustment / 400.0)
-    if rating_adjustment < 0.0:
-        factor = 1.0 / (1.0 + pow(10.0, rating_adjustment / 400.0))
     if isinstance(side, Color):
         side = 'white' if side == WHITE else 'black'
-    return factor * (game_data[side] + 0.5 * game_data['draws']) / total_games(game_data)
+    return (game_data[side] + 0.5 * game_data['draws']) / total_games(game_data)
 
 def win_rate(game_data: dict, side: Union[str, Color]):
     if isinstance(side, Color):
@@ -102,3 +99,9 @@ def move_frequency(move_data: dict, games: dict):
 
 def move_freq_frac(move_data: dict, games: dict):
     return total_games(move_data), total_games(games)
+
+def adjust_score_rate(p: float, rating_diff: float, eps: float = 1e-6) -> float:
+    p = min(max(p, eps), 1 - eps)  # avoid log(0) at the extremes
+    d_p = 400.0 * math.log10(p / (1 - p))
+    d_adj = d_p + rating_diff
+    return 1.0 / (1.0 + 10 ** (-d_adj / 400.0))

@@ -1649,7 +1649,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     if (srAcceptAlternativeBtn.disabled) return;
     send({ type: "sr_accept_alternative" });
   });
-  srGuessBlacklistBtn.addEventListener("click", () => send({ type: "sr_blacklist_prompt" }));
+  srGuessBlacklistBtn.addEventListener("click", () => send({ type: "sr_blacklist_move" }));
   srGuessBlacklistLineBtn.addEventListener("click", () => send({ type: "sr_blacklist_line_prompt" }));
   srShowAlternativesInput.addEventListener("change", () => {
     send({ type: "sr_review_show_alternatives", enabled: srShowAlternativesInput.checked });

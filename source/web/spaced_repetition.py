@@ -836,7 +836,7 @@ class RepetitionEngine():
         ).strip()
         return blacklisted_uci
 
-    def blacklist_current_line(self) -> UCI:
+    def blacklist_current_line(self) -> UCI: # TODO: remove
         """Blacklists the first move of the current prompt line.
         (Note that technically the current position may still appear, but via a different line.)"""
         self._clear_pending_alternative()
@@ -2760,6 +2760,7 @@ class AppController:
                 options,
                 default_cache_path=lambda: default_repertoire_cache_path(options),
             )
+            self._session.starting_node = self._session.starting_node or self._session.game
             self.board_orientation = "white" if options.play_white else "black"
             
             self._log.load_from_file(self._log_cache_name())

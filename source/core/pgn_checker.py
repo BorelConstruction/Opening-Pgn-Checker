@@ -322,15 +322,15 @@ class PgnChecker:
         stats = self.session.query(fen(node), "db_lichess")
         stats1 = stats_for_uci(stats, best_move1.uci())
         stats2 = stats_for_uci(stats, best_move2.uci())
-        if not stats1 or not stats2:
-            return MoveChoice(best_move1, "eng", eval1)
-        rating_diff = stats1.get("averageRating", 0) - stats2.get("averageGating", 0)
-        sr1 = score_rate(stats1, self.session.options.side, -rating_diff)
-        sr2 = score_rate(stats2, self.session.options.side)
         tg1 = total_games(stats1) if stats1 else 0
         tg2 = total_games(stats2) if stats2 else 0
-        if (eval2 is not None and eval1 - eval2 < 0.1 
-            and sr2 - sr1 > 0.1 and min(tg1, tg2) > STAT_SIGNIFICANCE_THRESHOLD):
+        if min(tg1, tg2) < STAT_SIGNIFICANCE_THRESHOLD or eval2 is None or eval1 - eval2 > 0.1:
+            return MoveChoice(best_move1, "eng", eval1)
+        rating_diff = stats1["averageRating"] - stats2["averageRating"]
+        sr1 = score_rate(stats1, self.session.options.side)
+        sr1 = adjust_score_rate(sr1, -rating_diff)
+        sr2 = score_rate(stats2, self.session.options.side)
+        if sr2 - sr1 > 0.1:
             comment = f"Best move is close, but {best_move2.uci()} has a better score rate ({sr2*100:.1f}% vs {sr1*100:.1f}%)".upper()
             return MoveChoice(best_move2, "eng", eval2, comment)
         else:
