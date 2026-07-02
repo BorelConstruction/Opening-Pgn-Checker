@@ -452,7 +452,7 @@ class RepetitionEngine():
     def start_prompt(self, spec_id: SpecId) -> PromptState:
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
-            # seed = 2886384853 # paste the latest seed to reproduce behavior
+            seed = 354357997 # paste the latest seed to reproduce behavior
             self._rng.seed(seed)
             sys.stderr.write(f"RNG seed: {seed}\n")
 
@@ -1369,7 +1369,8 @@ class RepetitionEngine():
             return True
         if not self._prompt_position_is_learned(prompt_node):
             return False
-        if self._performance_history(prompt_node, uci)[-3:] != [1, 1, 1]:
+        if sum(perf.success for perf in 
+               self._performance_history(prompt_node.parent, uci)[-3:]) < 3:
             return False
 
         skip_probability = self.LEARNED_MOVE_SKIP_PROBABILITY * (0.4 ** skip_index)
