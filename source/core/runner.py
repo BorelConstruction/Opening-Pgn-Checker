@@ -637,6 +637,9 @@ class PgnSession:
         board.push(move)
         return self.query(fen(board), 'q-eval')
 
+    def append_master_game(self, node: Node) -> bool:
+        return append_master_game(node, self.opening_explorer)
+
 
   
 def init_engine(exe_path: str, conf=None):

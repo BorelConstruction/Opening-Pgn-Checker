@@ -452,7 +452,7 @@ class RepetitionEngine():
     def start_prompt(self, spec_id: SpecId) -> PromptState:
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
-            seed = 354357997 # paste the latest seed to reproduce behavior
+            # seed = 354357997 # paste the latest seed to reproduce behavior
             self._rng.seed(seed)
             sys.stderr.write(f"RNG seed: {seed}\n")
 
@@ -1390,7 +1390,7 @@ class RepetitionEngine():
         if self._prompt_state.node_index is not None:
             self._prompt_state.node_index += 1
 
-        self._advance_line()
+        self._advance_line(try_skip=False)
 
     def _skip_learned_prompt_positions(self) -> None:
         """
@@ -1404,7 +1404,7 @@ class RepetitionEngine():
             if self._is_finished or self._prompt_state.off_file:
                 return
 
-    def _advance_line(self) -> None:
+    def _advance_line(self, try_skip: bool = True) -> None:
         """
         Assuming self._prompt_state.node is set for them to move,
         choose a move for them to continue along the line (or off-file) and
@@ -1441,7 +1441,8 @@ class RepetitionEngine():
                     self._activate_prompt_state()
                     return
                 
-                self._skip_learned_prompt_positions()
+                if try_skip:
+                    self._skip_learned_prompt_positions()
 
                 if self._is_finished or self._prompt_state.off_file:
                     if self._prompt_state.off_file:
@@ -1466,7 +1467,8 @@ class RepetitionEngine():
         if self._prompt_state.off_file:
             self._activate_prompt_state()
             return
-        self._skip_learned_prompt_positions()
+        if try_skip:
+            self._skip_learned_prompt_positions()
         if self._is_finished or self._prompt_state.off_file:
             if self._prompt_state.off_file:
                 self._activate_prompt_state()

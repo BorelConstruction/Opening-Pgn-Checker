@@ -358,3 +358,53 @@ ERROR_NAGS = {
 
 def move_is_marked_as_error(node: Node) -> bool:
     return bool(node.nags & ERROR_NAGS)
+
+def append_master_game(node: chess.pgn.GameNode, opening_explorer) -> bool:
+    """
+    Fetch a master game from the node's position and append its
+    moves as a variation on the node. Returns True if successful.
+    """
+    import io
+
+    node_fen = node_fen(node)
+
+    stats = opening_explorer.get_masters_games(position=node_fen, top_games=1)
+    top_games = stats.get("topGames", [])
+    if not top_games:
+        return False
+
+    game_info = top_games[0]
+    pgn_str = opening_explorer.get_otb_master_game(game_info["id"])
+    master_game = chess.pgn.read_game(io.StringIO(pgn_str))
+    if master_game is None:
+        return False
+
+    # Walk the master game until we find the matching position
+    current = master_game
+    while fen(current) != node_fen:
+        if not current.variations:
+            return False  # position not found in this game
+        current = current.variations[0]
+
+    # Add a comment at the entry point with game metadata
+    white = game_info.get("white", {}).get("name", "?")
+    black = game_info.get("black", {}).get("name", "?")
+    year = game_info.get("year", "?")
+    entry_comment = f"{white} - {black}, {year}"
+
+    # Graft moves onto node, skipping moves that already exist
+    src = current
+    dst = node
+    first = True
+    while src.variations:
+        src = src.variations[0]
+        existing = next((v for v in dst.variations if v.move == src.move), None)
+        if existing is None:
+            dst = dst.add_variation(src.move)
+            if first:
+                dst.comment = entry_comment
+        else:
+            dst = existing
+        first = False
+
+    return True
