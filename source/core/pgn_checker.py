@@ -349,7 +349,7 @@ class PgnChecker:
         if genuine_trasposition:
             if tr_move == move:
                 return [MoveChoice(tr_move, "tr", eval)]
-            # ^ potentially saves us one eval and avoid that problem that
+            # ^ potentially saves us one eval and avoids that problem that
             # if a position is complex, tr_eval and eval may differ a lot just by the fact that
             # the best move is already "entered" after tr_move. Then we may not recognize tr_move
             # as the best one even if it is. I am not sure why this happens this way
@@ -494,6 +494,21 @@ class PgnChecker:
                 best_move_child.nags.add(
                     eval_to_nag(pov_eval_to_white_eval(best_choice.eval, self.session.options.side))
                 )
+
+            self.try_append_master_game(best_move_child)
+
+    def try_append_master_game(self, node: Node, min_avg_rating: int = 2700):
+        stats = self.session.query(fen(node), "db_masters")
+
+        eligible = [
+            g for g in stats.get("topGames", [])
+            if (g["white"]["rating"] + g["black"]["rating"]) / 2 >= min_avg_rating
+        ]
+
+        for g in eligible:
+            pgn_str = self.session.client.games.export(g["id"], as_pgn=True)
+            comment = f"{g['white']['name']} - {g['black']['name']}, {g['year']}"
+            graft_game(node, pgn_str, comment)
 
     def explain_important_move(self, node: Node):
         """

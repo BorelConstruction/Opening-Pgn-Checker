@@ -429,6 +429,7 @@ class PgnSession:
             client.opening_explorer._r.base_url = "https://explorer.lichess.org/lichess"
         else:
             client = berserk.Client()
+        self.client = client
         self.opening_explorer = client.opening_explorer
 
     def variations(self, position: BoardLike, use_TT: bool = False) ->  list[Node]:
