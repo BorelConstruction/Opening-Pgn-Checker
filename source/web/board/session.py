@@ -62,6 +62,7 @@ class BoardSession(WebBoard):
         message: str = "",
         allow_moves: bool = True,
         circles: Optional[list[Circle]] = None,
+        arrows: Optional[list[Arrow]] = None,
     ) -> BoardState:
         """
         Accepts a python-chess 'chess.pgn.GameNode'.
@@ -72,6 +73,8 @@ class BoardSession(WebBoard):
             ann = parse_comment(getattr(node, "comment", "") or "")
             if circles is not None:
                 ann = replace(ann, circles=ann.circles + circles)
+            if arrows is not None:
+                ann = replace(ann, arrows=ann.arrows + arrows)
             self._state = self._compute_state(
                 orientation=orientation,
                 arrows=ann.arrows,

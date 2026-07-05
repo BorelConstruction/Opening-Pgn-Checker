@@ -13,6 +13,10 @@ class Arrow:
     dest: str
     color: str = "green"  # chessground brush: green|red|blue|yellow
 
+    @classmethod
+    def from_uci(cls, uci: str, color: str = "green") -> Arrow:
+        return cls(orig=uci[0:2], dest=uci[2:4], color=color)
+
 
 @dataclass(frozen=True)
 class Circle:
@@ -78,6 +82,8 @@ class WebBoard(ABC):
         orientation: str = "white",
         message: str = "",
         allow_moves: bool = True,
+        circles: Optional[list[Circle]] = None,
+        arrows: Optional[list[Arrow]] = None,
     ) -> BoardState: ...
 
     @abstractmethod

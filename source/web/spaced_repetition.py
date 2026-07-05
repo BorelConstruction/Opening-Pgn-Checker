@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from source.core.caching import CacheDict
 from source.core.position_similarity import compare_positions
 from source.core.traversal import TraversalPolicy, iter_nodes, mainline_children, traverse as traverse_nodes
-from source.web.board.contracts import Circle
+from source.web.board.contracts import Arrow, Circle
 from source.web.board.session import UCI
 from source.web.scheduler_implem import NaiveScheduler
 
@@ -26,6 +26,7 @@ from source.web.scheduler_implem import NaiveScheduler
 
 from ..core.boardtools import (
     BoardLike,
+    arrow_from_uci,
     fen,
     move_identity,
     move_is_marked_as_error,
@@ -95,8 +96,9 @@ class MoveCorrectness(Enum):
 class MoveGrade():
     correctness: MoveCorrectness
     msg: str = ""
-    eval_diff: Optional[float] = None
-    rel_eval_diff: Optional[float] = None
+    eval_diff: float | None = None
+    rel_eval_diff: float | None = None
+    opponent_reply: UCI | None = None
 
 
 @dataclass
@@ -402,6 +404,7 @@ class RepetitionEngine():
     def _clear_off_file_state(self) -> None:
         self._prompt_state.off_file_fen = None
         self._prompt_state.hints = None
+        self._prompt_state.feedback = []
 
     def _infer_off_file_move(self, parent: Node) -> UCI:
         # Note: off-file blacklisting currently assumes the
@@ -499,6 +502,7 @@ class RepetitionEngine():
     def _activate_prompt_state(self) -> None:
         self._prompt_state.prompt_time = time.time()
         self._prompt_state.hints = None
+        self._prompt_state.feedback = []
 
     def _pos_drill_item_to_json(
         self,
@@ -956,6 +960,7 @@ class RepetitionEngine():
         grade = self._handle_file_guess(uci)
         if grade.correctness in (MoveCorrectness.INCORRECT, MoveCorrectness.ALTERNATIVE):
             self._prompt_state.message = grade.msg
+            self._prompt_state.feedback += [Arrow.from_uci(grade.opponent_reply)]
             return self._prompt_state
         self._save_grade(grade)
         if grade.correctness == MoveCorrectness.UNDEF:
@@ -1287,6 +1292,7 @@ class RepetitionEngine():
             msg=msg,
             eval_diff=eval_diff,
             rel_eval_diff=rel_eval_diff,
+            opponent_reply=reply_move.uci()
         )
 
     def _handle_off_file_guess(self, uci: UCI) -> MoveGrade:
@@ -1312,6 +1318,7 @@ class RepetitionEngine():
             msg += f" Best was {best_reply_san} with evaluation {expected_eval:+.2f}. Good job!"
             grade = MoveCorrectness.CORRECT
         else:
+            opponent_reply = reply_to_user.uci()
             msg += (
                 f" Best was {best_reply_san} with evaluation {expected_eval:+.2f}. "
                 "Try again."
@@ -1326,6 +1333,7 @@ class RepetitionEngine():
             grade,
             msg=msg,
             eval_diff=user_move_eval - expected_eval,
+            opponent_reply=opponent_reply
         )
 
     def accept_pending_alternative(self) -> PromptState:
@@ -2110,6 +2118,7 @@ class PromptState:
     node_index: int | None = None # None means we are not following the prechosen path
     prompt_time: float | None = None
     hints: Hints | None = None
+    feedback: list[Arrow] = field(default_factory=list)
 
     @property
     def off_file(self) -> bool:
@@ -2853,6 +2862,7 @@ class AppController:
                 orientation=self.board_orientation,
                 message=prompt.message,
                 allow_moves=True,
+                arrows=prompt.feedback,
                 **kwargs
             )
             self._broadcast_ui_state()
@@ -2866,6 +2876,7 @@ class AppController:
             orientation=self.board_orientation,
             message=prompt.message,
             allow_moves=True,
+            arrows=prompt.feedback,
             **kwargs
         )
         self._broadcast_ui_state()
