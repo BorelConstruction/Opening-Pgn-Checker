@@ -576,7 +576,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srProgressBtn.disabled = !active;
     srHintBtn.disabled = !isGuess;
     srStudyFromHereBtn.disabled = !isReview;
-    srSearchMoveBtn.disabled = !isReview;
+    // srSearchMoveBtn.disabled = !isReview;
     srMarkedMovesBtn.disabled = !isReview;
     srBookmarkedMovesBtn.disabled = !isReview;
     srGuessGiveUpBtn.disabled = !isGuess;

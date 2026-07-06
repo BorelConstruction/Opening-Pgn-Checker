@@ -3225,7 +3225,7 @@ class AppController:
         Each result also carries similarity data relative to the current position.
         """
         if self._mode != "review":
-            return
+            self.finish_prompt()
 
         review_path = getattr(self, "_review_path", None)
         if review_path is None:
