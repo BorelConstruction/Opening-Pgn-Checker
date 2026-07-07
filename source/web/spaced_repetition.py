@@ -936,6 +936,8 @@ class RepetitionEngine():
         return True, off_book_selection.message
 
     def on_response(self, uci: str) -> PromptState:
+        self._prompt_state.feedback = []
+
         self._clear_pending_alternative()
         if self._prompt_state.off_file:
             grade = self._handle_off_file_guess(uci)
@@ -960,7 +962,11 @@ class RepetitionEngine():
         grade = self._handle_file_guess(uci)
         if grade.correctness in (MoveCorrectness.INCORRECT, MoveCorrectness.ALTERNATIVE):
             self._prompt_state.message = grade.msg
-            self._prompt_state.feedback += [Arrow.from_uci(grade.opponent_reply)]
+
+
+            arrow_color = "red" if grade.eval_diff < -0.7 else "yellow"
+            self._prompt_state.feedback += [Arrow.from_uci(uci, "blue")]
+            self._prompt_state.feedback += [Arrow.from_uci(grade.opponent_reply, arrow_color)]
             return self._prompt_state
         self._save_grade(grade)
         if grade.correctness == MoveCorrectness.UNDEF:
@@ -1314,11 +1320,11 @@ class RepetitionEngine():
 
         eval_gap = expected_eval - user_move_eval
         msg = f"Off-file position. Your move: eval {user_move_eval:+.2f} after {reply_to_user}."
+        opponent_reply = reply_to_user.uci()
         if uci == best_reply.uci() or eval_gap <= 0.2 or user_move_eval > 0.8*expected_eval:
             msg += f" Best was {best_reply_san} with evaluation {expected_eval:+.2f}. Good job!"
             grade = MoveCorrectness.CORRECT
         else:
-            opponent_reply = reply_to_user.uci()
             msg += (
                 f" Best was {best_reply_san} with evaluation {expected_eval:+.2f}. "
                 "Try again."
