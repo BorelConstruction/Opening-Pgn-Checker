@@ -182,7 +182,8 @@ class RepetitionEngine():
         self._prompt_spec = None
 
         self._prompt_state = PromptState(node=None, message="", anchor_node=None)
-        self._pending_alternative_uci: Optional[UCI] = None
+        self._pending_alternative_uci: UCI | None = None
+        self._prompt_candidates: list[Node] = []
 
         self.set_start(root=root, start_range=start_range)
 
@@ -264,7 +265,7 @@ class RepetitionEngine():
 
         prompt_dict = {}
         prompt_dict[()] = (1.0, 0.0)
-        path_from_root = []
+        path_from_root = [] # note it's different in type from return of function path_from_root
         def visit(n: Node):
             nonlocal path_from_root
             
@@ -324,6 +325,8 @@ class RepetitionEngine():
     def set_start(self, root: Optional[Node] = None, start_range: Optional[int] = None) -> None:
         """ Set the starting point for prompt generation and
             the max of how far we move from the root, in MOVES."""
+        self._prompt_candidates = []
+
         if root is not None:
             if root.turn() == self._session.options.side:
                 try: 
@@ -455,7 +458,7 @@ class RepetitionEngine():
     def start_prompt(self, spec_id: SpecId) -> PromptState:
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
-            # seed = 354357997 # paste the latest seed to reproduce behavior
+            # seed = 717592441 # paste the latest seed to reproduce behavior
             self._rng.seed(seed)
             sys.stderr.write(f"RNG seed: {seed}\n")
 
@@ -475,6 +478,17 @@ class RepetitionEngine():
         self._prompt_state = self._create_prompt_from_id(prompt_id)
         self._activate_prompt_state()
         return self._prompt_state
+
+    def study_moves(self, nodes: list[Node]) -> None:
+        for node in nodes:
+            if node.turn() != self._session.options.side:
+                raise ValueError("Can only study against opponent's moves")
+            
+        
+        parent = node.parent
+
+
+
 
     def _choose_random_prompt(self) -> PromptState:
         for _ in range(self.MAX_PROMPT_SELECTION_ATTEMPTS):
@@ -941,6 +955,7 @@ class RepetitionEngine():
         self._clear_pending_alternative()
         if self._prompt_state.off_file:
             grade = self._handle_off_file_guess(uci)
+            self._add_arrow_feedback(uci, grade)
             if grade.correctness == MoveCorrectness.CORRECT:
                 if self._prompt_state.node is None:
                     self._prompt_state.message = grade.msg
@@ -960,13 +975,10 @@ class RepetitionEngine():
             return self._prompt_state
 
         grade = self._handle_file_guess(uci)
+        self._add_arrow_feedback(uci, grade)
         if grade.correctness in (MoveCorrectness.INCORRECT, MoveCorrectness.ALTERNATIVE):
             self._prompt_state.message = grade.msg
 
-
-            arrow_color = "red" if grade.eval_diff < -0.7 else "yellow"
-            self._prompt_state.feedback += [Arrow.from_uci(uci, "blue")]
-            self._prompt_state.feedback += [Arrow.from_uci(grade.opponent_reply, arrow_color)]
             return self._prompt_state
         self._save_grade(grade)
         if grade.correctness == MoveCorrectness.UNDEF:
@@ -981,6 +993,15 @@ class RepetitionEngine():
             self.finish_prompt()
             return self._prompt_state
         return self._continue_with_file_child(chosen_node, grade)
+
+
+    def _add_arrow_feedback(self, move_uci: UCI, grade: MoveGrade) -> None:
+        if grade.correctness == MoveCorrectness.CORRECT:
+            return
+
+        arrow_color = "red" if grade.eval_diff < -0.7 else "yellow"
+        self._prompt_state.feedback += [Arrow.from_uci(move_uci, "blue")]
+        self._prompt_state.feedback += [Arrow.from_uci(grade.opponent_reply, arrow_color)]
 
     def _continue_with_file_child(self, chosen_node: Node, grade: MoveGrade) -> PromptState:
         self._finalize_current_move_performance()
@@ -1348,8 +1369,6 @@ class RepetitionEngine():
             raise RuntimeError("Cannot accept an alternative without an active file prompt")
 
         pending_uci = self._pending_alternative_uci
-        if pending_uci is None:
-            raise RuntimeError("No alternative move is pending")
 
         chosen_node = self._tt_child_for_move(parent, pending_uci)
         if chosen_node is None:
@@ -1508,7 +1527,7 @@ class RepetitionEngine():
 
         prompt_quality_dict = self.make_prompt_dict(self._root, prpt_len + self.start_range * 2)
         choose_from : Dict[Tuple[Tuple[int, ...], int], float] = {}
-        all_possible_paths = list(prompt_quality_dict.keys())
+        all_possible_paths = self._prompt_candidates or list(prompt_quality_dict.keys())
         # i is offset from root. So root ---i---> anchor ---prpt_len---> prompt end
         for i in range(0, self.start_range * 2, 2):
             for path in all_possible_paths:
@@ -2432,6 +2451,23 @@ class ReviewDbStatsTask:
     position_fen: str
 
 
+class InteractionMode(Enum):
+    IDLE = "idle"
+    GUESS = "guess"
+    REVIEW = "review"
+
+
+class PromptSource(Enum):
+    GLOBAL = "global"
+    STUDY_SET = "study_set"
+
+
+@dataclass
+class AppState:
+    interaction: InteractionMode = InteractionMode.IDLE
+    prompt_source: PromptSource = PromptSource.GLOBAL
+
+
 class AppController:
     """
     Owns chess-related objects, reacts to user actions.
@@ -2441,7 +2477,7 @@ class AppController:
         self._hub = hub
 
         self.active = False
-        self._mode = "idle"  # idle | guess | review
+        self._state = AppState()
 
         self._log = PromptLog()
         self._bookmark_current_prompt_pending = False
@@ -2465,6 +2501,10 @@ class AppController:
 
     def _review_children(self, node: Node) -> list[Node]:
         return self._review_children_for(self._review_show_alternatives, node)
+
+    def _payload_children(self) -> Callable[[Node], list[Node]]:
+        """Choose children type depending on the current interaction mode."""
+        return self._review_children if self._state.interaction == InteractionMode.REVIEW else self._session.variations
 
     def _review_node_at_path(
         self,
@@ -2674,7 +2714,7 @@ class AppController:
         }
 
     def history_payload(self) -> dict[str, Any]:
-        get_children = self._review_children if self._mode == "review" else self._session.variations
+        get_children = self._payload_children()
         entries = [
             self._history_entry_payload(entry, get_children)
             for entry in reversed(self._log.entries)
@@ -2685,7 +2725,7 @@ class AppController:
         }
 
     def bookmarks_payload(self) -> dict[str, Any]:
-        get_children = self._review_children if self._mode == "review" else self._session.variations
+        get_children = self._payload_children()
         entries = [
             self._bookmark_entry_payload(prompt_id, get_children)
             for prompt_id in self._log.bookmarked_prompt_ids()
@@ -2699,7 +2739,7 @@ class AppController:
         if not self.active:
             raise RuntimeError("Hardest moves are only available after spaced repetition starts")
 
-        get_children = self._review_children if self._mode == "review" else self._session.variations
+        get_children = self._payload_children()
         entries = [
             self._hardest_move_entry_payload(hardest_move, get_children)
             for hardest_move in self._rep_engine.hardest_moves()
@@ -2719,9 +2759,9 @@ class AppController:
             return None
 
         try:
-            if self._mode == "guess":
+            if self._state.interaction == InteractionMode.GUESS:
                 return self._rep_engine.debug_guess_tree_payload()
-            if self._mode == "review":
+            if self._state.interaction == InteractionMode.REVIEW:
                 if self._review_path is None:
                     raise RuntimeError("Review mode requires an active review path")
                 node = self._review_node_at_path(list(self._review_path))
@@ -2734,7 +2774,7 @@ class AppController:
         return None
 
     def _build_review_tree_payload(self) -> dict[str, Any]:
-        if not self.active or self._mode != "review":
+        if not self.active or self._state.interaction != InteractionMode.REVIEW:
             raise RuntimeError("Review tree payload requires active review mode")
         return build_variation_tree(
             self._review_children,
@@ -2744,26 +2784,27 @@ class AppController:
         )
 
     def _refresh_review_tree_payload(self) -> None:
-        if self._mode != "review" or self._review_payload is None:
+        if self._state.interaction != InteractionMode.REVIEW or self._review_payload is None:
             return
         self._review_payload["tree"] = self._build_review_tree_payload()
 
     def ui_state(self) -> dict[str, Any]:
         pending_alternative = None
-        if self.active and self._mode == "guess":
+        if self.active and self._state.interaction == InteractionMode.GUESS:
             pending_uci = self._rep_engine.pending_alternative_uci()
             if pending_uci is not None:
                 pending_alternative = {"uci": pending_uci}
 
         state = {
             "active": self.active,
-            "mode": self._mode,
+            "mode": self._state.interaction.value,
+            "promptSource": self._state.prompt_source.value,
             "currentSpecId": self._rep_engine.current_spec_id() if self.active else None,
-            "bookmarkQueued": self._bookmark_current_prompt_pending if self.active and self._mode == "guess" else False,
+            "bookmarkQueued": self._bookmark_current_prompt_pending if self.active and self._state.interaction == InteractionMode.GUESS else False,
             "pendingAlternative": pending_alternative,
-            "review": self._review_payload if self.active and self._mode == "review" else None,
+            "review": self._review_payload if self.active and self._state.interaction == InteractionMode.REVIEW else None,
             "reviewShowsAlternatives": self._review_show_alternatives,
-            "searchMove": self._search_move_payload if self.active and self._mode == "review" else None,
+            "searchMove": self._search_move_payload if self.active and self._state.interaction == InteractionMode.REVIEW else None,
             "debugTree": self._debug_tree_payload(),
         }
         if hasattr(self, "_cfg"):
@@ -2837,7 +2878,7 @@ class AppController:
         self._bookmark_current_prompt_pending = False
 
     def bookmark_current_prompt(self) -> None:
-        if not self.active or self._mode != "guess":
+        if not self.active or self._state.interaction != InteractionMode.GUESS:
             raise RuntimeError("Can only bookmark the active prompt in guess mode")
         self._bookmark_current_prompt_pending = True
         self._broadcast_ui_state()
@@ -2848,7 +2889,8 @@ class AppController:
 
     def start_next_prompt(self) -> None:
         self.active = True
-        self._mode = "guess"
+        self._state.interaction = InteractionMode.GUESS
+        self._state.prompt_source = PromptSource.GLOBAL
         self._bookmark_current_prompt_pending = False
         self._rep_controller.start_next_prompt()
         self.show_prompt()
@@ -2861,7 +2903,7 @@ class AppController:
         if prompt is None:
             prompt = self._rep_controller.get_prompt_view()
 
-        self._mode = "guess"
+        self._state.interaction = InteractionMode.GUESS
         if prompt.off_file:
             self._hub.set_fen(
                 prompt.off_file_fen,
@@ -2889,7 +2931,8 @@ class AppController:
 
     def stop(self) -> None:
         self.active = False
-        self._mode = "idle"
+        self._state.interaction = InteractionMode.IDLE
+        self._state.prompt_source = PromptSource.GLOBAL
         self._games = []
         self._close_session()
 
@@ -3046,7 +3089,7 @@ class AppController:
             except Exception as exc:
                 db_stats = self._error_review_db_stats(task.position_fen, exc)
 
-            if not self.active or self._mode != "review" or self._review_payload is None:
+            if not self.active or self._state.interaction != InteractionMode.REVIEW or self._review_payload is None:
                 continue
 
             if self._review_payload.get("dbStatsRequestId") != task.request_id:
@@ -3057,7 +3100,7 @@ class AppController:
 
     def _broadcast_review_navigation(self) -> None:
 
-        if not self.active or self._mode != "review":
+        if not self.active or self._state.interaction != InteractionMode.REVIEW:
             raise RuntimeError("Review navigation broadcast requires active review mode")
         if self._review_payload is None or self._review_path is None:
             raise RuntimeError("Review navigation payload is not initialized")
@@ -3157,6 +3200,13 @@ class AppController:
             result["similarity"] = round(similarity.similarity, 4)
         return result
 
+    def study_searched_move(self):
+        """Study a move from move search """
+        path_to_move = self._search_move_payload["results"][0]["path"]
+        move_node = self._review_node_at_path(path_to_move)
+        self._rep_engine.study_moves(move_node)
+
+
     def _set_search_move_payload(
         self,
         *,
@@ -3205,7 +3255,7 @@ class AppController:
         Search visible review nodes by algebraic-style move notation.
         Similarity is still measured against the current review position.
         """
-        if self._mode != "review":
+        if self._state.interaction != InteractionMode.REVIEW:
             return
 
         review_path = getattr(self, "_review_path", None)
@@ -3230,7 +3280,7 @@ class AppController:
         the same as those in the current review node.
         Each result also carries similarity data relative to the current position.
         """
-        if self._mode != "review":
+        if self._state.interaction != InteractionMode.REVIEW:
             self.finish_prompt()
 
         review_path = getattr(self, "_review_path", None)
@@ -3258,6 +3308,8 @@ class AppController:
             query_prev_uci=query_prev_uci,
             query_next_uci=query_next_uci,
         )
+
+        self.study_searched_move()
 
     def _marked_move_results(self) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
@@ -3310,21 +3362,21 @@ class AppController:
         }
 
     def show_marked_moves(self) -> None:
-        if self._mode != "review":
+        if self._state.interaction != InteractionMode.REVIEW:
             return
 
         self._search_move_payload = self._marked_moves_payload()
         self._broadcast_ui_state()
 
     def show_bookmarked_moves(self) -> None:
-        if self._mode != "review":
+        if self._state.interaction != InteractionMode.REVIEW:
             return
 
         self._search_move_payload = self._marked_moves_payload(bookmarks_only=True)
         self._broadcast_ui_state()
 
     def _refresh_after_move_mark_change(self) -> None:
-        if self._mode != "review":
+        if self._state.interaction != InteractionMode.REVIEW:
             return
 
         self._refresh_review_tree_payload()
@@ -3357,7 +3409,7 @@ class AppController:
         self._refresh_after_move_mark_change()
 
     def provide_hint(self) -> None:
-        if self._mode != "guess":
+        if self._state.interaction != InteractionMode.GUESS:
             return
 
         self.show_prompt(circles=self._rep_engine.get_hint_circles())
@@ -3367,9 +3419,9 @@ class AppController:
         self._commit_pending_bookmark_to_latest_prompt()
 
     def handle_guess(self, uci: str) -> None:
-        if self._mode != "guess":
+        if self._state.interaction != InteractionMode.GUESS:
             raise RuntimeError("Not currently in guess mode")
-        
+
         continue_prompt = self._rep_controller.on_user_response(uci)
         if not continue_prompt:
             self._commit_pending_bookmark_to_latest_prompt()
@@ -3381,7 +3433,7 @@ class AppController:
             self.show_prompt()
 
     def accept_pending_alternative(self) -> None:
-        if self._mode != "guess":
+        if self._state.interaction != InteractionMode.GUESS:
             raise RuntimeError("Not currently in guess mode")
 
         continue_prompt = self._rep_controller.accept_pending_alternative()
@@ -3395,18 +3447,17 @@ class AppController:
 
         self.show_prompt()
 
-
     def _mainline_node_at_ply(self, game: Any, ply: int) -> Any:
         node = game
         while getattr(node, "variations", None) and node.ply() < ply:
             node = node.variations[0]
         return node
-    
+
     def give_up(self) -> None:
         self.finish_prompt(gave_up=True)
 
     def finish_prompt(self, gave_up: bool = False) -> None:
-        if self._mode != "guess":
+        if self._state.interaction != InteractionMode.GUESS:
             return
 
         self._rep_engine.finish_prompt(gave_up=gave_up)
@@ -3414,7 +3465,7 @@ class AppController:
         self._reveal_prompt_in_review()
 
     def finish_prompt_and_start_new(self) -> None:
-        if self._mode != "guess":
+        if self._state.interaction != InteractionMode.GUESS:
             return
 
         self._rep_engine.finish_prompt()
@@ -3422,7 +3473,7 @@ class AppController:
         self.start_next_prompt()
 
     def blacklist_current_move(self) -> None:
-        if self._mode != "guess":
+        if self._state.interaction != InteractionMode.GUESS:
             return
 
         self._rep_engine.blacklist_current_move()
@@ -3437,7 +3488,7 @@ class AppController:
         self.show_prompt()
 
     def blacklist_current_line(self) -> None:
-        if self._mode != "guess":
+        if self._state.interaction != InteractionMode.GUESS:
             return
 
         self._rep_engine.blacklist_current_line()
@@ -3450,9 +3501,9 @@ class AppController:
 
         The idea is save the user from having to enter the moves that are too obvious
         or file-specific (i.e. file has only one of many acceptable move orders).
-        
+
         Off-file prompts can only be skipped when a reply transposes back into the file."""
-        if self._mode != "guess":
+        if self._state.interaction != InteractionMode.GUESS:
             return
 
         was_off_file = self._rep_controller.get_prompt_view().off_file
@@ -3470,7 +3521,7 @@ class AppController:
         self.show_prompt()
 
     def _reveal_prompt_in_review(self) -> None:
-        if self._mode != "guess":
+        if self._state.interaction != InteractionMode.GUESS:
             return
 
         prompt = self._rep_controller.get_prompt_view()
@@ -3486,7 +3537,7 @@ class AppController:
         self._enter_review_mode(node=prompt.node, message=message)
 
     def goto_review_path(self, path: list[int]) -> None:
-        if self._mode != "review":
+        if self._state.interaction != InteractionMode.REVIEW:
             raise RuntimeError("Browsing is only available in review mode")
         if self._review_payload is None:
             raise RuntimeError("Review payload is not initialized")
@@ -3509,7 +3560,7 @@ class AppController:
             self._queue_review_db_stats(stats_task)
 
     def study_from_here(self, start_range: int) -> None:
-        if self._mode != "review":
+        if self._state.interaction != InteractionMode.REVIEW:
             raise RuntimeError("Study root can only be changed in review mode")
 
         node = self._review_node_at_path(list(self._review_path))
@@ -3533,13 +3584,14 @@ class AppController:
 
     def study_history_prompt(self, prompt_id: PromptLineId, spec_id: SpecId | None = None) -> None:
         self.active = True
-        self._mode = "guess"
+        self._state.interaction = InteractionMode.GUESS
+        self._state.prompt_source = PromptSource.GLOBAL
         self._bookmark_current_prompt_pending = False
         self._rep_controller.start_prompt_by_id(prompt_id, spec_id)
         self.show_prompt()
 
     def _show_history_board(self, position_fen: str, message: str) -> None:
-        self._mode = "idle"
+        self._state.interaction = InteractionMode.IDLE
         self._review_payload = None
         self._search_move_payload = None
         self._hub.set_fen(
@@ -3553,7 +3605,7 @@ class AppController:
     def goto_history_move(self, path: Optional[list[int]], position_fen: Optional[str], san: str) -> None:
         message = f"History: {san}. Click New to continue practicing."
         if path is not None:
-            if self._mode == "review":
+            if self._state.interaction == InteractionMode.REVIEW:
                 self.goto_review_path(path)
                 return
             node = node_at_path(self._session.game, path, self._session.variations)
@@ -3570,7 +3622,7 @@ class AppController:
             return
 
         current_node: Optional[Node] = None
-        if self.active and self._mode == "review":
+        if self.active and self._state.interaction == InteractionMode.REVIEW:
             if self._review_path is None:
                 raise RuntimeError("Review mode requires a current review path")
             current_node = self._review_node_at_path(
@@ -3599,7 +3651,7 @@ class AppController:
         node: chess.pgn.GameNode,
         message: Optional[str] = "",
     ) -> None:
-        self._mode = "review"
+        self._state.interaction = InteractionMode.REVIEW
         self._search_move_payload = None
         end_ply = self._session.options.end_ply
         try:
