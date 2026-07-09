@@ -126,6 +126,12 @@ class PgnChecker:
             sys.stderr.write('starting to traverse...')
             for action in self.pipeline():
                 action(starting_node)
+
+            game.comment = 'PGN checker: ' + \
+            f'added depth {self.session.options.added_depth}, ' + \
+            f'freq threshold {self.session.options.freq_threshold}, ' + \
+            f'min games {self.session.options.min_games}, ' + \
+            f'end ply {self.session.options.end_ply}, min engine depth {self.session.options.min_depth}.'
             print(game, file=open(self.session.options.output_pgn, "a", encoding="utf-8"), end="\n\n") # "a" for adding
 
         except Exception as e:
