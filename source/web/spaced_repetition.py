@@ -466,7 +466,11 @@ class RepetitionEngine():
 
         if spec_id == "new":
             self._spec_id = spec_id
+            self.nodes_to_prompt = []
             self._choose_random_prompt()
+        elif spec_id == "node list":
+            self._spec_id = spec_id
+            self._prompt_from_move_list()
         else:
             raise ValueError(f"Unsupported spec_id: {spec_id!r}")
 
@@ -480,15 +484,18 @@ class RepetitionEngine():
         return self._prompt_state
 
     def study_moves(self, nodes: list[Node]) -> None:
-        for node in nodes:
-            if node.turn() != self._session.options.side:
-                raise ValueError("Can only study against opponent's moves")
-            
-        
-        parent = node.parent
+        self.nodes_to_prompt = nodes
+        self.start_prompt(spec_id="node list")
 
+    def _prompt_from_move_list(self):
+        self._activate_prompt_state()
+        node = self._rng.choice(self.nodes_to_prompt)
+        if node.turn() != self._session.options.side:
+            raise RuntimeError("Can only study moves for your side")
+        self._prompt_state.node = node
+        self._set_prompt_start()
 
-
+        return self._prompt_state
 
     def _choose_random_prompt(self) -> PromptState:
         for _ in range(self.MAX_PROMPT_SELECTION_ATTEMPTS):
@@ -2493,14 +2500,10 @@ class AppController:
         self._review_db_stats_inflight = False
         self._review_db_stats_request_id = 0
 
-    def _review_children_for(self, show_alternatives: bool, node: Node) -> list[Node]:
-        if show_alternatives:
-            return list(node.variations)
-
-        return mainline_children((self._session.options.side,))(node)
-
     def _review_children(self, node: Node) -> list[Node]:
-        return self._review_children_for(self._review_show_alternatives, node)
+        if self._review_show_alternatives:
+            return list(node.variations)
+        return mainline_children((self._session.options.side,))(node)
 
     def _payload_children(self) -> Callable[[Node], list[Node]]:
         """Choose children type depending on the current interaction mode."""
@@ -2509,13 +2512,11 @@ class AppController:
     def _review_node_at_path(
         self,
         path: list[int],
-        *,
-        show_alternatives: Optional[bool] = None,
     ) -> Node:
-        if show_alternatives is None:
+        if self._review_show_alternatives is None:
             get_children = self._review_children
         else:
-            get_children = lambda node: self._review_children_for(show_alternatives, node)
+            get_children = lambda node: self._review_children(node)
         return node_at_path(self._session.game, path, get_children)
 
     def _review_path_from_root(self, node: Node) -> list[int]:
@@ -2814,6 +2815,7 @@ class AppController:
     def start(self, options: SpacedRepetitionOptions, session: Optional[RepertoireSession] = None) -> None:
         try:
             self._cfg = options
+            self._state.prompt_source = PromptSource.GLOBAL
             self._review_show_alternatives = bool(options.check_alternatives)
             self._session = session or RepertoireSession(
                 options,
@@ -2890,9 +2892,12 @@ class AppController:
     def start_next_prompt(self) -> None:
         self.active = True
         self._state.interaction = InteractionMode.GUESS
-        self._state.prompt_source = PromptSource.GLOBAL
         self._bookmark_current_prompt_pending = False
-        self._rep_controller.start_next_prompt()
+        if self._state.prompt_source == PromptSource.GLOBAL:
+            self._rep_controller.start_next_prompt()
+        if self._state.prompt_source == PromptSource.STUDY_SET:
+            # TODO: rid of rep_conroller
+            self._rep_engine.engine.start_prompt(spec_id="node list")
         self.show_prompt()
 
     def show_prompt(
@@ -3202,9 +3207,19 @@ class AppController:
 
     def study_searched_move(self):
         """Study a move from move search """
-        path_to_move = self._search_move_payload["results"][0]["path"]
-        move_node = self._review_node_at_path(path_to_move)
-        self._rep_engine.study_moves(move_node)
+        self._state.interaction = InteractionMode.GUESS
+        self._state.prompt_source = PromptSource.STUDY_SET
+        nodes_to_study: list[Node] = []
+        for result in self._search_move_payload["results"]:
+            path_to_move = result["path"]
+            move_node = self._review_node_at_path(path_to_move)
+            if result["similarity"] > 0.8:
+                nodes_to_study.append(move_node)
+
+        self._rep_engine.study_moves(nodes_to_study)
+
+    def stop_study_searched_move(self):
+        self._state.prompt_source = PromptSource.GLOBAL
 
 
     def _set_search_move_payload(
@@ -3308,8 +3323,6 @@ class AppController:
             query_prev_uci=query_prev_uci,
             query_next_uci=query_next_uci,
         )
-
-        self.study_searched_move()
 
     def _marked_move_results(self) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
@@ -3627,7 +3640,6 @@ class AppController:
                 raise RuntimeError("Review mode requires a current review path")
             current_node = self._review_node_at_path(
                 list(self._review_path),
-                show_alternatives=self._review_show_alternatives,
             )
 
         self._review_show_alternatives = enabled
