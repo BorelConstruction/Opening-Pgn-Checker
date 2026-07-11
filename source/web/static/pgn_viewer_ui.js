@@ -522,7 +522,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       : 0;
     const note = document.createElement("div");
     note.className = "progress-note";
-    note.textContent = `Criterion: recall > ${threshold}%, latest success older than ${delaySeconds}s.`;
+    // note.textContent = `Criterion: recall > ${threshold}%, latest success older than ${delaySeconds}s.`;
     progressResults.appendChild(note);
 
     progressOverlay.hidden = false;

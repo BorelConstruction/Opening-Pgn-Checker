@@ -155,7 +155,7 @@ class RepetitionEngine():
     "attempts" is broader: has eval diff, hint history etc.
     """
     LEARNED_RIGHT_THRESHOLD = 0.85
-    PROGRESS_RECALL_THRESHOLD = 0.75
+    PROGRESS_RECALL_THRESHOLD = 0.5
     LEARNED_MOVE_SKIP_PROBABILITY = 0.90
     MAX_PROMPT_SELECTION_ATTEMPTS = 100
     MAX_OFF_BOOK_BLACKLIST_ATTEMPTS = 3
@@ -1127,7 +1127,8 @@ class RepetitionEngine():
             return False
         if now - latest_repetition.attempt_time <= DELAY_BEFORE_GUESSED_MEANS_REMEMBERS:
             return False
-        return self._move_predict_success(parent, move_uci) > self.PROGRESS_RECALL_THRESHOLD
+        # return self._move_predict_success(parent, move_uci) > self.PROGRESS_RECALL_THRESHOLD
+        return True # it seems to underestimate it, so let's lower the bar
 
     def progress_payload(self) -> dict[str, Any]:
         learned_moves = 0
