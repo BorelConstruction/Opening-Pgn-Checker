@@ -476,6 +476,7 @@ class PgnChecker:
                     depth += 2
 
                 if depth <= 0:  # even if depth was 0 we first added a move for ourselves
+                    self.try_append_master_game(best_move_child)
                     return
 
                 if (e[0].eval > 1.9 and len(e) > 1 and e[1].eval > 1.9):
@@ -500,8 +501,6 @@ class PgnChecker:
                 best_move_child.nags.add(
                     eval_to_nag(pov_eval_to_white_eval(best_choice.eval, self.session.options.side))
                 )
-
-            self.try_append_master_game(best_move_child)
 
     def try_append_master_game(self, node: Node, min_avg_rating: int = 2700):
         stats = self.session.query(fen(node), "db_masters")
@@ -703,7 +702,7 @@ def eval_to_nag(eval_pawns: float) -> int:
 
     if a < 0.32:
         return chess.pgn.NAG_QUIET_POSITION # =
-    elif a < 0.75:
+    elif a < 0.73:
         return (chess.pgn.NAG_WHITE_SLIGHT_ADVANTAGE if eval_pawns > 0 
                 else chess.pgn.NAG_BLACK_SLIGHT_ADVANTAGE)
     elif a < 1.8:
