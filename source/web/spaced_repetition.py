@@ -458,7 +458,7 @@ class RepetitionEngine():
     def start_prompt(self, spec_id: SpecId) -> PromptState:
         if DEBUG_MODE:
             seed = random.SystemRandom().randint(0, 2**32 - 1)
-            # seed = 717592441 # paste the latest seed to reproduce behavior
+            seed = 2386345615 # paste the latest seed to reproduce behavior
             self._rng.seed(seed)
             sys.stderr.write(f"RNG seed: {seed}\n")
 
@@ -1006,7 +1006,10 @@ class RepetitionEngine():
         if grade.correctness == MoveCorrectness.CORRECT:
             return
 
-        arrow_color = "red" if grade.eval_diff < -0.7 else "yellow"
+        if grade.opponent_reply is None:
+            return
+
+        arrow_color = "red" if grade.eval_diff is None or grade.eval_diff < -0.7 else "yellow"
         self._prompt_state.feedback += [Arrow.from_uci(move_uci, "blue")]
         self._prompt_state.feedback += [Arrow.from_uci(grade.opponent_reply, arrow_color)]
 
