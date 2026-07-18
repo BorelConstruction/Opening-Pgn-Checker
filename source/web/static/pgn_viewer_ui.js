@@ -22,6 +22,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srGuessFinishBtn = document.getElementById("srGuessFinish");
   const srGuessFinishNewBtn = document.getElementById("srGuessFinishNew");
   const srGuessBookmarkBtn = document.getElementById("srGuessBookmark");
+  const srGuessBookmarkMoveBtn = document.getElementById("srGuessBookmarkMove");
   const srGuessSkipBtn = document.getElementById("srGuessSkip");
   const srGuessBlacklistBtn = document.getElementById("srGuessBlacklist");
   const srGuessBlacklistLineBtn = document.getElementById("srGuessBlacklistLine");
@@ -78,6 +79,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     progressLoading: false,
     startRange: null,
     bookmarkQueued: false,
+    guessMoveBookmarkTarget: null,
     moveBookmarkPending: false,
     pendingAlternative: null,
   };
@@ -268,6 +270,22 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   }
 
   function currentMoveBookmarkTarget() {
+    if (state.active && state.mode === "guess") {
+      const target = state.guessMoveBookmarkTarget;
+      if (target === null) return null;
+      if (
+        !target ||
+        typeof target.fen !== "string" ||
+        !target.fen.trim() ||
+        typeof target.uci !== "string" ||
+        !target.uci.trim() ||
+        typeof target.bookmarked !== "boolean"
+      ) {
+        throw new Error("Invalid guess move bookmark target");
+      }
+      return target;
+    }
+
     const ctx = getReviewContext();
     if (!ctx) return null;
     if (!Array.isArray(ctx.currentPath) || ctx.currentPath.length === 0) return null;
@@ -588,9 +606,11 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srGuessBlacklistBtn.disabled = !isGuess;
     srGuessBlacklistLineBtn.disabled = !isGuess;
     const bookmarkTarget = currentMoveBookmarkTarget();
-    srBookmarkMoveBtn.disabled = !bookmarkTarget || state.moveBookmarkPending;
-    srBookmarkMoveBtn.textContent = bookmarkTarget && bookmarkTarget.bookmarked ? "Unbookmark move" : "Bookmark move";
-    srBookmarkMoveBtn.classList.toggle("active", !!bookmarkTarget && bookmarkTarget.bookmarked);
+    for (const button of [srGuessBookmarkMoveBtn, srBookmarkMoveBtn]) {
+      button.disabled = !bookmarkTarget || state.moveBookmarkPending;
+      button.textContent = bookmarkTarget && bookmarkTarget.bookmarked ? "Unbookmark move" : "Bookmark move";
+      button.classList.toggle("active", !!bookmarkTarget && bookmarkTarget.bookmarked);
+    }
     srAcceptAlternativeBtn.hidden = !canAcceptAlternative;
     srAcceptAlternativeBtn.disabled = !canAcceptAlternative;
     srShowAlternativesInput.disabled = !isReview;
@@ -1519,6 +1539,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     state.searchMove = sr.searchMove || null;
     state.startRange = Number.isInteger(sr.startRange) ? sr.startRange : null;
     state.bookmarkQueued = !!sr.bookmarkQueued;
+    state.guessMoveBookmarkTarget = sr.guessMoveBookmarkTarget || null;
     state.moveBookmarkPending = false;
     state.pendingAlternative = sr.pendingAlternative || null;
     if (!state.active) {
@@ -1669,9 +1690,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     renderSearchMove();
     send({ type: "sr_bookmarked_moves" });
   });
-  srBookmarkMoveBtn.addEventListener("click", () => {
+  function toggleCurrentMoveBookmark(button) {
     const target = currentMoveBookmarkTarget();
-    if (!target || srBookmarkMoveBtn.disabled) return;
+    if (!target || button.disabled) return;
     state.moveBookmarkPending = true;
     refreshButtons();
     if (target.bookmarked) {
@@ -1688,7 +1709,10 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       fen: target.fen,
       uci: target.uci,
     });
-  });
+  }
+
+  srGuessBookmarkMoveBtn.addEventListener("click", () => toggleCurrentMoveBookmark(srGuessBookmarkMoveBtn));
+  srBookmarkMoveBtn.addEventListener("click", () => toggleCurrentMoveBookmark(srBookmarkMoveBtn));
 
   refreshButtons();
 

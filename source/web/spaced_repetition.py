@@ -75,6 +75,12 @@ class MarkedMoveData(TypedDict):
     uci: UCI
 
 
+class MoveBookmarkTarget(TypedDict):
+    fen: str
+    uci: UCI
+    bookmarked: bool
+
+
 class HardestMoveData(TypedDict):
     fen: str
     uci: UCI
@@ -719,6 +725,24 @@ class RepetitionEngine():
 
     def move_is_bookmarked(self, parent: BoardLike, uci: UCI) -> bool:
         return uci in self._bookmarked_moves_for(parent)
+
+    def current_prompt_move_bookmark_target(self) -> MoveBookmarkTarget | None:
+        prompt_node = self._prompt_state.node
+        if (
+            self._prompt_state.off_file
+            or prompt_node is None
+            or prompt_node.parent is None
+            or prompt_node.move is None
+        ):
+            return None
+
+        parent = prompt_node.parent
+        move_uci = prompt_node.move.uci()
+        return MoveBookmarkTarget(
+            fen=fen(parent),
+            uci=move_uci,
+            bookmarked=self.move_is_bookmarked(parent, move_uci),
+        )
 
     def _unbookmark_move(self, position_fen: str, move_uci: UCI) -> None:
         position_data = self._pos_drill_data.get(position_fen)
@@ -2795,10 +2819,12 @@ class AppController:
 
     def ui_state(self) -> dict[str, Any]:
         pending_alternative = None
+        guess_move_bookmark_target = None
         if self.active and self._state.interaction == InteractionMode.GUESS:
             pending_uci = self._rep_engine.pending_alternative_uci()
             if pending_uci is not None:
                 pending_alternative = {"uci": pending_uci}
+            guess_move_bookmark_target = self._rep_engine.current_prompt_move_bookmark_target()
 
         state = {
             "active": self.active,
@@ -2806,6 +2832,7 @@ class AppController:
             "promptSource": self._state.prompt_source.value,
             "currentSpecId": self._rep_engine.current_spec_id() if self.active else None,
             "bookmarkQueued": self._bookmark_current_prompt_pending if self.active and self._state.interaction == InteractionMode.GUESS else False,
+            "guessMoveBookmarkTarget": guess_move_bookmark_target,
             "pendingAlternative": pending_alternative,
             "review": self._review_payload if self.active and self._state.interaction == InteractionMode.REVIEW else None,
             "reviewShowsAlternatives": self._review_show_alternatives,
@@ -3393,6 +3420,9 @@ class AppController:
         self._broadcast_ui_state()
 
     def _refresh_after_move_mark_change(self) -> None:
+        if self._state.interaction == InteractionMode.GUESS:
+            self._broadcast_ui_state()
+            return
         if self._state.interaction != InteractionMode.REVIEW:
             return
 
