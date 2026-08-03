@@ -176,6 +176,24 @@ def _parse_search_color(value: str) -> chess.Color:
     raise ValueError(f"Invalid move color: {value!r}")
 
 
+def _infer_pawn_color(from_square: int, to_square: int) -> chess.Color:
+    rank_delta = chess.square_rank(to_square) - chess.square_rank(from_square)
+    if rank_delta in (1, 2):
+        return chess.WHITE
+    if rank_delta in (-1, -2):
+        return chess.BLACK
+    raise ValueError("Cannot infer pawn color from the supplied origin and destination")
+
+
+def _infer_promotion_color(to_square: int) -> chess.Color:
+    to_rank = chess.square_rank(to_square)
+    if to_rank == 7:
+        return chess.WHITE
+    if to_rank == 0:
+        return chess.BLACK
+    raise ValueError("Cannot infer pawn color from a promotion outside the first or eighth rank")
+
+
 def _infer_pawn_origin(from_file: int, to_square: int, turn: chess.Color) -> int:
     to_rank = chess.square_rank(to_square)
     from_rank = to_rank - 1 if turn == chess.WHITE else to_rank + 1
@@ -195,15 +213,17 @@ def _parse_move_origin(origin: str, piece_type: int, to_square: int, turn: chess
 
 
 def parse_move_search_notation(notation: str) -> MoveIdentity:
-    """Produce a MoveIdentity objectfrom a search notation."""
+    """Produce a MoveIdentity object from search notation."""
     parts = notation.strip().split()
-    if len(parts) != 2:
-        raise ValueError('Move notation must include a move and color, e.g. "Nc3xd5 W"')
+    if not parts:
+        raise ValueError("Move notation is required")
+    if len(parts) > 2:
+        raise ValueError('Move notation must contain a move and optional color, e.g. "Nc3xd5 W"')
 
     text = parts[0].replace("-", "").replace("=", "")
     if not text:
         raise ValueError("Move notation is required")
-    turn = _parse_search_color(parts[1])
+    turn: chess.Color | None = _parse_search_color(parts[1]) if len(parts) == 2 else None
 
     piece_type = chess.PAWN
     body = text
@@ -227,8 +247,24 @@ def parse_move_search_notation(notation: str) -> MoveIdentity:
     left, right, is_capture = _capture_split(body)
     if is_capture:
         to_square = _parse_square_name(right)
-        from_square = _parse_move_origin(left, piece_type, to_square, turn)
+        if turn is None:
+            if piece_type != chess.PAWN:
+                raise ValueError("Move notation must include a color")
+            if _is_square_name(left):
+                from_square = chess.parse_square(left)
+                turn = _infer_pawn_color(from_square, to_square)
+            elif promotion is not None:
+                turn = _infer_promotion_color(to_square)
+                from_square = _parse_move_origin(left, piece_type, to_square, turn)
+            else:
+                raise ValueError("Move notation must include a color")
+        else:
+            from_square = _parse_move_origin(left, piece_type, to_square, turn)
     elif _is_square_name(left):
+        if turn is None:
+            if piece_type != chess.PAWN or promotion is None:
+                raise ValueError("Move notation must include a color")
+            turn = _infer_promotion_color(chess.parse_square(left))
         to_square = chess.parse_square(left)
         if piece_type != chess.PAWN:
             raise ValueError(f"Move notation is missing a square: {notation!r}")
@@ -236,8 +272,15 @@ def parse_move_search_notation(notation: str) -> MoveIdentity:
     elif len(left) == 4 and _is_square_name(left[:2]) and _is_square_name(left[2:]):
         from_square = chess.parse_square(left[:2])
         to_square = chess.parse_square(left[2:])
+        if turn is None:
+            if piece_type != chess.PAWN:
+                raise ValueError("Move notation must include a color")
+            turn = _infer_pawn_color(from_square, to_square)
     else:
         raise ValueError(f"Invalid move notation: {notation!r}")
+
+    if turn is None:
+        raise RuntimeError("Move color was not resolved")
 
     return MoveIdentity(
         turn=turn,

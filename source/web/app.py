@@ -19,6 +19,14 @@ def _format_exception_detail() -> str:
     return traceback.format_exc()
 
 
+def _search_move_error_payload(exc: Exception) -> dict[str, str]:
+    return {
+        "type": "sr_search_move_error",
+        "message": str(exc),
+        "detail": _format_exception_detail(),
+    }
+
+
 def _prompt_line_id_from_payload(payload: dict) -> PromptLineId:
     start_fen = payload.get("startFen")
     moves = payload.get("moves")
@@ -284,8 +292,8 @@ async def ws(ws: WebSocket) -> None:
             elif msg_type == "sr_search_move":
                 try:
                     search_notation = _search_move_notation_from_payload(msg.get("notation"))
-                except Exception:
-                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+                except Exception as exc:
+                    await ws.send_json(_search_move_error_payload(exc))
                     continue
                 try:
                     if search_notation is None:
@@ -293,7 +301,10 @@ async def ws(ws: WebSocket) -> None:
                     else:
                         sr_controller.search_nodes_by_move_notation(search_notation)
                 except Exception as exc:
-                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+                    if search_notation is not None:
+                        await ws.send_json(_search_move_error_payload(exc))
+                    else:
+                        await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
             elif msg_type == "sr_study_searched_move":
                 try:

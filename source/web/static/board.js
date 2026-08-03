@@ -318,6 +318,15 @@ function connect() {
       return;
     }
 
+    if (msg.type === "sr_search_move_error") {
+      const message = typeof msg.message === "string" && msg.message.trim()
+        ? msg.message
+        : "Unknown move-notation error";
+      alert(`Invalid move notation: ${message}`);
+      console.error("Move-search error:", msg.detail || message);
+      return;
+    }
+
     if (msg.type === "error") {
       log(`error: ${msg.message}`);
       // Log full details to browser console for debugging

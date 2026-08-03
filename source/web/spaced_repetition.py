@@ -3446,8 +3446,10 @@ class AppController:
         the same as those in the current review node.
         Each result also carries similarity data relative to the current position.
         """
-        if self._state.interaction != InteractionMode.REVIEW:
-            self.finish_prompt()
+        if self._state.interaction == InteractionMode.GUESS:
+            self.finish_prompt(gave_up=self._state.prompt_source == PromptSource.STUDY_SET)
+        elif self._state.interaction != InteractionMode.REVIEW:
+            raise RuntimeError("Move search requires an active guess or review")
 
         review_path = getattr(self, "_review_path", None)
         if review_path is None:

@@ -660,7 +660,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srProgressBtn.disabled = !active;
     srHintBtn.disabled = !isGuess;
     srStudyFromHereBtn.disabled = !isReview || isStudySet;
-    srSearchMoveBtn.disabled = !isReview;
+    srSearchMoveBtn.disabled = !isGuess && !isReview;
     srMarkedMovesBtn.disabled = !isReview;
     srBookmarkedMovesBtn.disabled = !isReview;
     srGuessGiveUpBtn.disabled = !isGuess;
@@ -728,7 +728,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   }
 
   function promptSearchMoveNotation() {
-    const notation = prompt('Enter algebraic notation and the side, such as "Nc3xd5 W".');
+    const notation = prompt('Enter move notation, such as "Nc3xd5 W", "b2b3", or "c8Q".');
     if (notation === null) return;
 
     const trimmedNotation = notation.trim();
