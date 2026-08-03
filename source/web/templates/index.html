@@ -29,6 +29,13 @@
         <button id="srMarkedMoves" title="Spaced repetition: review skipped, blacklisted, and bookmarked moves">Marked moves</button>
         <span id="status" class="status">disconnected</span>
       </div>
+      <div id="studySetBanner" class="study-set-banner" hidden>
+        <div class="study-set-summary">
+          <strong>Study set mode</strong>
+          <span id="studySetSummary"></span>
+        </div>
+        <button id="studySetReturn" type="button">Return to normal study</button>
+      </div>
     </div>
 
     <div class="app">
@@ -145,6 +152,14 @@
           </div>
         </div>
         <div id="searchMoveResults" class="search-results"></div>
+        <div id="searchMoveStudyTools" class="search-study-tools" hidden>
+          <button id="searchMoveStudy" class="search-study-trigger" type="button">Study similar positions</button>
+          <label id="searchMoveCutoffControl" class="search-cutoff" for="searchMoveCutoff">
+            Similarity &gt;
+            <input id="searchMoveCutoff" type="number" min="0" max="100" step="1" inputmode="decimal" />
+            %
+          </label>
+        </div>
       </div>
     </div>
 

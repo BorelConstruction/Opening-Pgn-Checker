@@ -52,6 +52,8 @@ from .memory_model import (
 
 K = TypeVar("K")
 MarkKind = Literal["blacklist", "skip", "bookmark"]
+GLOBAL_PROMPT_SPEC_ID = "new"
+STUDY_SET_PROMPT_SPEC_ID = "node list"
 
 
 class RequiredPositionDrillData(TypedDict):
@@ -87,6 +89,12 @@ class HardestMoveData(TypedDict):
     wrong_count: int
     attempt_count: int
     last_attempt_time: float
+
+
+class StudySetData(TypedDict):
+    move: str
+    candidateCount: int
+    cutoff: float
 
 
 class MoveCorrectness(Enum):
@@ -190,6 +198,9 @@ class RepetitionEngine():
         self._prompt_state = PromptState(node=None, message="", anchor_node=None)
         self._pending_alternative_uci: UCI | None = None
         self._prompt_candidates: list[Node] = []
+        self._study_nodes: list[Node] = []
+        self._study_node_queue: list[Node] = []
+        self._last_study_node: Node | None = None
 
         self.set_start(root=root, start_range=start_range)
 
@@ -324,6 +335,9 @@ class RepetitionEngine():
         self._clear_pending_alternative()
         self._finalize_current_move_performance()
         self._is_finished = True
+        if self._spec_id == STUDY_SET_PROMPT_SPEC_ID:
+            self._prompt_performance = []
+            return
         self._commit_prompt_performance(gave_up=gave_up)
         self._pos_drill_data.serialize()
         self._movemodel_data.serialize()
@@ -470,11 +484,11 @@ class RepetitionEngine():
 
         self._reset_prompt_state()
 
-        if spec_id == "new":
+        if spec_id == GLOBAL_PROMPT_SPEC_ID:
             self._spec_id = spec_id
-            self.nodes_to_prompt = []
+            self.clear_study_nodes()
             self._choose_random_prompt()
-        elif spec_id == "node list":
+        elif spec_id == STUDY_SET_PROMPT_SPEC_ID:
             self._spec_id = spec_id
             self._prompt_from_move_list()
         else:
@@ -489,17 +503,64 @@ class RepetitionEngine():
         self._activate_prompt_state()
         return self._prompt_state
 
-    def study_moves(self, nodes: list[Node]) -> None:
-        self.nodes_to_prompt = nodes
-        self.start_prompt(spec_id="node list")
+    def can_study_from_node(self, node: Node) -> bool:
+        return (
+            node.turn() == self._session.options.side
+            and bool(self._prompt_variations(node))
+        )
 
-    def _prompt_from_move_list(self):
-        self._activate_prompt_state()
-        node = self._rng.choice(self.nodes_to_prompt)
-        if node.turn() != self._session.options.side:
-            raise RuntimeError("Can only study moves for your side")
+    def set_study_nodes(self, nodes: list[Node]) -> None:
+        if not nodes:
+            raise ValueError("Cannot study an empty node set")
+
+        invalid_nodes = [node for node in nodes if not self.can_study_from_node(node)]
+        if invalid_nodes:
+            raise ValueError(
+                "Every study node must leave the configured side to move "
+                "with at least one repertoire response"
+            )
+
+        self._study_nodes = list(nodes)
+        self._study_node_queue = []
+        self._last_study_node = None
+
+    def clear_study_nodes(self) -> None:
+        self._study_nodes = []
+        self._study_node_queue = []
+        self._last_study_node = None
+
+    def study_moves(self, nodes: list[Node]) -> PromptState:
+        self.set_study_nodes(nodes)
+        return self.start_prompt(spec_id=STUDY_SET_PROMPT_SPEC_ID)
+
+    def _refill_study_node_queue(self) -> None:
+        if not self._study_nodes:
+            raise RuntimeError("Study-set prompt requested without configured nodes")
+
+        self._study_node_queue = list(self._study_nodes)
+        self._rng.shuffle(self._study_node_queue)
+        if (
+            len(self._study_node_queue) > 1
+            and self._last_study_node is not None
+            and self._study_node_queue[-1] is self._last_study_node
+        ):
+            self._study_node_queue[0], self._study_node_queue[-1] = (
+                self._study_node_queue[-1],
+                self._study_node_queue[0],
+            )
+
+    def _prompt_from_move_list(self) -> PromptState:
+        if not self._study_node_queue:
+            self._refill_study_node_queue()
+
+        node = self._study_node_queue.pop()
+        if not self.can_study_from_node(node):
+            raise RuntimeError("Configured study node is no longer eligible")
+
+        self._last_study_node = node
         self._prompt_state.node = node
         self._set_prompt_start()
+        self._activate_prompt_state()
 
         return self._prompt_state
 
@@ -692,6 +753,7 @@ class RepetitionEngine():
         blacklist = self._blacklist_for(parent)
         if uci not in blacklist:
             blacklist.append(uci)
+            self._pos_drill_data.serialize()
 
     def _mark_move_to_skip(self, parent: Node, uci: UCI) -> None:
         leads_to_skip = self._leads_to_skip_for(parent)
@@ -1399,6 +1461,9 @@ class RepetitionEngine():
         )
 
     def accept_pending_alternative(self) -> PromptState:
+        if self._spec_id == STUDY_SET_PROMPT_SPEC_ID:
+            raise RuntimeError("Accepted alternatives cannot be saved in study-set mode")
+
         parent = self._prompt_state.node
         if parent is None or self._prompt_state.off_file:
             raise RuntimeError("Cannot accept an alternative without an active file prompt")
@@ -2523,6 +2588,7 @@ class AppController:
         self._review_view_root_path: list[int] = []
         self._review_show_alternatives = False
         self._search_move_payload: Optional[dict[str, Any]] = None
+        self._study_set_payload: StudySetData | None = None
         self._review_db_stats_lock = threading.Lock()
         self._review_db_stats_pending: Optional[ReviewDbStatsTask] = None
         self._review_db_stats_inflight = False
@@ -2821,9 +2887,10 @@ class AppController:
         pending_alternative = None
         guess_move_bookmark_target = None
         if self.active and self._state.interaction == InteractionMode.GUESS:
-            pending_uci = self._rep_engine.pending_alternative_uci()
-            if pending_uci is not None:
-                pending_alternative = {"uci": pending_uci}
+            if self._state.prompt_source != PromptSource.STUDY_SET:
+                pending_uci = self._rep_engine.pending_alternative_uci()
+                if pending_uci is not None:
+                    pending_alternative = {"uci": pending_uci}
             guess_move_bookmark_target = self._rep_engine.current_prompt_move_bookmark_target()
 
         state = {
@@ -2837,6 +2904,7 @@ class AppController:
             "review": self._review_payload if self.active and self._state.interaction == InteractionMode.REVIEW else None,
             "reviewShowsAlternatives": self._review_show_alternatives,
             "searchMove": self._search_move_payload if self.active and self._state.interaction == InteractionMode.REVIEW else None,
+            "studySet": self._study_set_payload if self._state.prompt_source == PromptSource.STUDY_SET else None,
             "debugTree": self._debug_tree_payload(),
         }
         if hasattr(self, "_cfg"):
@@ -2847,6 +2915,7 @@ class AppController:
         try:
             self._cfg = options
             self._state.prompt_source = PromptSource.GLOBAL
+            self._study_set_payload = None
             self._review_show_alternatives = bool(options.check_alternatives)
             self._session = session or RepertoireSession(
                 options,
@@ -2913,6 +2982,8 @@ class AppController:
     def bookmark_current_prompt(self) -> None:
         if not self.active or self._state.interaction != InteractionMode.GUESS:
             raise RuntimeError("Can only bookmark the active prompt in guess mode")
+        if self._state.prompt_source == PromptSource.STUDY_SET:
+            raise RuntimeError("Study-set prompts are not saved to history")
         self._bookmark_current_prompt_pending = True
         self._broadcast_ui_state()
 
@@ -2926,9 +2997,10 @@ class AppController:
         self._bookmark_current_prompt_pending = False
         if self._state.prompt_source == PromptSource.GLOBAL:
             self._rep_controller.start_next_prompt()
-        if self._state.prompt_source == PromptSource.STUDY_SET:
-            # TODO: rid of rep_conroller
-            self._rep_engine.engine.start_prompt(spec_id="node list")
+        elif self._state.prompt_source == PromptSource.STUDY_SET:
+            self._rep_controller.start_prompt(STUDY_SET_PROMPT_SPEC_ID)
+        else:
+            raise RuntimeError(f"Unsupported prompt source: {self._state.prompt_source!r}")
         self.show_prompt()
 
     def show_prompt(
@@ -2969,6 +3041,7 @@ class AppController:
         self.active = False
         self._state.interaction = InteractionMode.IDLE
         self._state.prompt_source = PromptSource.GLOBAL
+        self._study_set_payload = None
         self._games = []
         self._close_session()
 
@@ -3236,21 +3309,68 @@ class AppController:
             result["similarity"] = round(similarity.similarity, 4)
         return result
 
-    def study_searched_move(self):
-        """Study a move from move search """
-        self._state.interaction = InteractionMode.GUESS
-        self._state.prompt_source = PromptSource.STUDY_SET
+    @staticmethod
+    def _validated_similarity_cutoff(cutoff: float) -> float:
+        if isinstance(cutoff, bool) or not isinstance(cutoff, (int, float)):
+            raise TypeError("Similarity cutoff must be a number")
+        validated = float(cutoff)
+        if not 0.0 <= validated <= 1.0:
+            raise ValueError("Similarity cutoff must be between 0 and 1")
+        return validated
+
+    def study_searched_move(self, cutoff: float) -> None:
+        """Enter ephemeral practice using eligible results from the active move search."""
+        if self._state.interaction != InteractionMode.REVIEW:
+            raise RuntimeError("A searched move can only be studied from review mode")
+        if self._search_move_payload is None:
+            raise RuntimeError("Cannot study without move-search results")
+        if self._search_move_payload.get("kind") != "searchMove":
+            raise RuntimeError("Only move-search results can become a study set")
+
+        validated_cutoff = self._validated_similarity_cutoff(cutoff)
         nodes_to_study: list[Node] = []
         for result in self._search_move_payload["results"]:
-            path_to_move = result["path"]
+            similarity = result.get("similarity")
+            if isinstance(similarity, bool) or not isinstance(similarity, (int, float)):
+                raise TypeError("Move-search result similarity must be numeric")
+            if float(similarity) <= validated_cutoff:
+                continue
+
+            path_to_move = result.get("path")
+            if not isinstance(path_to_move, list) or not all(
+                isinstance(index, int) and not isinstance(index, bool)
+                for index in path_to_move
+            ):
+                raise TypeError("Move-search result path must be a list of integers")
             move_node = self._review_node_at_path(path_to_move)
-            if result["similarity"] > 0.8:
+            if self._rep_engine.can_study_from_node(move_node):
                 nodes_to_study.append(move_node)
 
-        self._rep_engine.study_moves(nodes_to_study)
+        if not nodes_to_study:
+            raise ValueError("No eligible study positions exceed the selected similarity cutoff")
 
-    def stop_study_searched_move(self):
+        query = self._search_move_payload.get("query")
+        if not isinstance(query, dict):
+            raise TypeError("Move-search query must be a dictionary")
+        query_move = query.get("move")
+        if not isinstance(query_move, str) or not query_move:
+            raise TypeError("Move-search query must identify the searched move")
+
+        self._rep_engine.set_study_nodes(nodes_to_study)
+        self._study_set_payload = StudySetData(
+            move=query_move,
+            candidateCount=len(nodes_to_study),
+            cutoff=validated_cutoff,
+        )
+        self._state.prompt_source = PromptSource.STUDY_SET
+        self.start_next_prompt()
+
+    def stop_study_searched_move(self) -> None:
+        if self._state.prompt_source != PromptSource.STUDY_SET:
+            raise RuntimeError("Study-set mode is not active")
         self._state.prompt_source = PromptSource.GLOBAL
+        self._study_set_payload = None
+        self.start_next_prompt()
 
 
     def _set_search_move_payload(
@@ -3273,14 +3393,14 @@ class AppController:
             if not matches_move(node):
                 continue
 
-            results.append(
-                self._review_move_result(
-                    node,
-                    target_node=target_node,
-                    query_prev_uci=query_prev_uci,
-                    query_next_uci=query_next_uci,
-                )
+            result = self._review_move_result(
+                node,
+                target_node=target_node,
+                query_prev_uci=query_prev_uci,
+                query_next_uci=query_next_uci,
             )
+            result["studyEligible"] = self._rep_engine.can_study_from_node(node)
+            results.append(result)
 
         results.sort(
             key=lambda item: (-item["similarity"], item["distance"], item["path"])
@@ -3462,6 +3582,9 @@ class AppController:
         self.show_prompt(circles=self._rep_engine.get_hint_circles())
 
     def _finalize_finished_prompt(self) -> None:
+        if self._state.prompt_source == PromptSource.STUDY_SET:
+            self._bookmark_current_prompt_pending = False
+            return
         self._rep_controller.finalize_current_prompt()
         self._commit_pending_bookmark_to_latest_prompt()
 
@@ -3469,7 +3592,10 @@ class AppController:
         if self._state.interaction != InteractionMode.GUESS:
             raise RuntimeError("Not currently in guess mode")
 
-        continue_prompt = self._rep_controller.on_user_response(uci)
+        continue_prompt = self._rep_controller.on_user_response(
+            uci,
+            finalize=self._state.prompt_source != PromptSource.STUDY_SET,
+        )
         if not continue_prompt:
             self._commit_pending_bookmark_to_latest_prompt()
             prompt = self._rep_controller.get_prompt_view()
@@ -3482,6 +3608,8 @@ class AppController:
     def accept_pending_alternative(self) -> None:
         if self._state.interaction != InteractionMode.GUESS:
             raise RuntimeError("Not currently in guess mode")
+        if self._state.prompt_source == PromptSource.STUDY_SET:
+            raise RuntimeError("Accepted alternatives cannot be saved in study-set mode")
 
         continue_prompt = self._rep_controller.accept_pending_alternative()
         if not continue_prompt:
@@ -3506,6 +3634,8 @@ class AppController:
     def finish_prompt(self, gave_up: bool = False) -> None:
         if self._state.interaction != InteractionMode.GUESS:
             return
+        if self._state.prompt_source == PromptSource.STUDY_SET and not gave_up:
+            raise RuntimeError("Study-set prompts cannot be saved")
 
         self._rep_engine.finish_prompt(gave_up=gave_up)
         self._finalize_finished_prompt()
@@ -3514,6 +3644,8 @@ class AppController:
     def finish_prompt_and_start_new(self) -> None:
         if self._state.interaction != InteractionMode.GUESS:
             return
+        if self._state.prompt_source == PromptSource.STUDY_SET:
+            raise RuntimeError("Study-set prompts cannot be saved")
 
         self._rep_engine.finish_prompt()
         self._finalize_finished_prompt()
@@ -3537,6 +3669,8 @@ class AppController:
     def blacklist_current_line(self) -> None:
         if self._state.interaction != InteractionMode.GUESS:
             return
+        if self._state.prompt_source == PromptSource.STUDY_SET:
+            raise RuntimeError("Line blacklisting is unavailable in study-set mode")
 
         self._rep_engine.blacklist_current_line()
         self._rep_engine.finish_prompt()
@@ -3552,6 +3686,8 @@ class AppController:
         Off-file prompts can only be skipped when a reply transposes back into the file."""
         if self._state.interaction != InteractionMode.GUESS:
             return
+        if self._state.prompt_source == PromptSource.STUDY_SET:
+            raise RuntimeError("Move skipping is unavailable in study-set mode")
 
         was_off_file = self._rep_controller.get_prompt_view().off_file
         self._rep_engine.skip_current_move()
@@ -3609,6 +3745,8 @@ class AppController:
     def study_from_here(self, start_range: int) -> None:
         if self._state.interaction != InteractionMode.REVIEW:
             raise RuntimeError("Study root can only be changed in review mode")
+        if self._state.prompt_source == PromptSource.STUDY_SET:
+            raise RuntimeError("Return to normal study before changing its root")
 
         node = self._review_node_at_path(list(self._review_path))
         position_fen = fen(node)
@@ -3633,6 +3771,7 @@ class AppController:
         self.active = True
         self._state.interaction = InteractionMode.GUESS
         self._state.prompt_source = PromptSource.GLOBAL
+        self._study_set_payload = None
         self._bookmark_current_prompt_pending = False
         self._rep_controller.start_prompt_by_id(prompt_id, spec_id)
         self.show_prompt()

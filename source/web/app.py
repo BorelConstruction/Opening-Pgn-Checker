@@ -37,6 +37,15 @@ def _search_move_notation_from_payload(payload: Any) -> str | None:
     return payload.strip()
 
 
+def _study_similarity_cutoff_from_payload(payload: Any) -> float:
+    if isinstance(payload, bool) or not isinstance(payload, (int, float)):
+        raise TypeError("cutoff must be a number")
+    cutoff = float(payload)
+    if not 0.0 <= cutoff <= 1.0:
+        raise ValueError("cutoff must be between 0 and 1")
+    return cutoff
+
+
 class ConnectionManager:
     def __init__(self) -> None:
         self._connections: set[WebSocket] = set()
@@ -284,6 +293,19 @@ async def ws(ws: WebSocket) -> None:
                     else:
                         sr_controller.search_nodes_by_move_notation(search_notation)
                 except Exception as exc:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
+            elif msg_type == "sr_study_searched_move":
+                try:
+                    cutoff = _study_similarity_cutoff_from_payload(msg.get("cutoff"))
+                    sr_controller.study_searched_move(cutoff)
+                except Exception:
+                    await ws.send_json({"type": "error", "message": _format_exception_detail()})
+
+            elif msg_type == "sr_stop_study_searched_move":
+                try:
+                    sr_controller.stop_study_searched_move()
+                except Exception:
                     await ws.send_json({"type": "error", "message": _format_exception_detail()})
 
             elif msg_type == "sr_marked_moves":

@@ -3,6 +3,8 @@
 export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentFen }) {
   const MIN_STUDY_START_RANGE = 0;
   const MAX_STUDY_START_RANGE = 50;
+  const DEFAULT_SEARCH_STUDY_CUTOFF_PERCENT = 80;
+  const SEARCH_STUDY_CUTOFF_STORAGE_KEY = "pgnChecker.searchStudyCutoffPercent";
   // log("Creating PGN Viewer UI");
   const srNewBtn = document.getElementById("srNew");
   const srHistoryBtn = document.getElementById("srHistory");
@@ -15,6 +17,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srBookmarkMoveBtn = document.getElementById("srBookmarkMove");
   const srBookmarkedMovesBtn = document.getElementById("srBookmarkedMoves");
   const srAnalyzeLichessLink = document.getElementById("srAnalyzeLichess");
+  const studySetBanner = document.getElementById("studySetBanner");
+  const studySetSummary = document.getElementById("studySetSummary");
+  const studySetReturnBtn = document.getElementById("studySetReturn");
 
   const treePanel = document.getElementById("treePanel");
   const guessActions = document.getElementById("guessActions");
@@ -41,6 +46,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const searchMovePanel = document.getElementById("searchMovePanel");
   const searchMoveTitle = document.getElementById("searchMoveTitle");
   const searchMoveResults = document.getElementById("searchMoveResults");
+  const searchMoveStudyTools = document.getElementById("searchMoveStudyTools");
+  const searchMoveCutoffInput = document.getElementById("searchMoveCutoff");
+  const searchMoveStudyBtn = document.getElementById("searchMoveStudy");
   const searchMoveManualBtn = document.getElementById("searchMoveManual");
   const searchMoveCloseBtn = document.getElementById("searchMoveClose");
 
@@ -60,12 +68,16 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const state = {
     active: false,
     mode: "idle", // idle | guess | review
+    promptSource: "global",
     currentSpecId: null,
     review: null,
     reviewShowsAlternatives: false,
     debugTree: null,
     searchMove: null,
     searchMoveDismissed: false,
+    searchStudyCutoffPercent: loadSearchStudyCutoffPercent(),
+    searchStudyPreviewActive: false,
+    studySet: null,
     history: null,
     bookmarks: null,
     hardestMoves: null,
@@ -92,6 +104,28 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   let toastTimer = null;
   let toastHideTimer = null;
 
+  function parseSearchStudyCutoffPercent(rawValue) {
+    if (typeof rawValue === "string" && !rawValue.trim()) return null;
+    const parsed = Number(rawValue);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) return null;
+    return parsed;
+  }
+
+  function loadSearchStudyCutoffPercent() {
+    const stored = window.localStorage.getItem(SEARCH_STUDY_CUTOFF_STORAGE_KEY);
+    if (stored === null) return DEFAULT_SEARCH_STUDY_CUTOFF_PERCENT;
+
+    const parsed = parseSearchStudyCutoffPercent(stored);
+    if (parsed !== null) return parsed;
+
+    window.localStorage.removeItem(SEARCH_STUDY_CUTOFF_STORAGE_KEY);
+    return DEFAULT_SEARCH_STUDY_CUTOFF_PERCENT;
+  }
+
+  function saveSearchStudyCutoffPercent(cutoffPercent) {
+    window.localStorage.setItem(SEARCH_STUDY_CUTOFF_STORAGE_KEY, String(cutoffPercent));
+  }
+
   function clonePath(path) {
     return Array.isArray(path) ? [...path] : [];
   }
@@ -112,6 +146,10 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
 
   function isReviewMode() {
     return state.active && state.mode === "review";
+  }
+
+  function isStudySetMode() {
+    return state.active && state.promptSource === "study_set";
   }
 
   function getReviewContext() {
@@ -582,29 +620,57 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     renderProgress();
   }
 
+  function refreshStudySetMode() {
+    const active = isStudySetMode();
+    document.body.classList.toggle("study-set-mode", active);
+    studySetBanner.hidden = !active;
+    studySetReturnBtn.disabled = !active;
+
+    if (!active) {
+      studySetSummary.textContent = "";
+      return;
+    }
+    if (
+      !state.studySet
+      || typeof state.studySet.move !== "string"
+      || typeof state.studySet.candidateCount !== "number"
+      || typeof state.studySet.cutoff !== "number"
+    ) {
+      throw new Error("Study-set mode requires move, candidate count, and cutoff metadata");
+    }
+
+    const count = state.studySet.candidateCount;
+    const positionLabel = count === 1 ? "position" : "positions";
+    const cutoffPercent = Number((state.studySet.cutoff * 100).toFixed(2));
+    studySetSummary.textContent = (
+      `Responses after ${state.studySet.move} · ${count} ${positionLabel} · similarity > ${cutoffPercent}%`
+    );
+  }
+
   function refreshButtons() {
     const active = !!state.active;
     const isGuess = active && state.mode === "guess";
     const isReview = active && state.mode === "review";
+    const isStudySet = isStudySetMode();
     const canSkipGuess = isGuess && state.currentSpecId === "new";
-    const canAcceptAlternative = isGuess && !!state.pendingAlternative;
+    const canAcceptAlternative = isGuess && !isStudySet && !!state.pendingAlternative;
     srNewBtn.disabled = !active;
     srHistoryBtn.disabled = !active;
     srBookmarksBtn.disabled = !active;
     srProgressBtn.disabled = !active;
     srHintBtn.disabled = !isGuess;
-    srStudyFromHereBtn.disabled = !isReview;
-    // srSearchMoveBtn.disabled = !isReview;
+    srStudyFromHereBtn.disabled = !isReview || isStudySet;
+    srSearchMoveBtn.disabled = !isReview;
     srMarkedMovesBtn.disabled = !isReview;
     srBookmarkedMovesBtn.disabled = !isReview;
     srGuessGiveUpBtn.disabled = !isGuess;
-    srGuessFinishBtn.disabled = !isGuess;
-    srGuessFinishNewBtn.disabled = !isGuess;
-    srGuessBookmarkBtn.disabled = !isGuess || !!state.bookmarkQueued;
+    srGuessFinishBtn.disabled = !isGuess || isStudySet;
+    srGuessFinishNewBtn.disabled = !isGuess || isStudySet;
+    srGuessBookmarkBtn.disabled = !isGuess || isStudySet || !!state.bookmarkQueued;
     srGuessBookmarkBtn.textContent = state.bookmarkQueued ? "Bookmark queued" : "Bookmark";
     srGuessSkipBtn.disabled = !canSkipGuess;
     srGuessBlacklistBtn.disabled = !isGuess;
-    srGuessBlacklistLineBtn.disabled = !isGuess;
+    srGuessBlacklistLineBtn.disabled = !isGuess || isStudySet;
     const bookmarkTarget = currentMoveBookmarkTarget();
     for (const button of [srGuessBookmarkMoveBtn, srBookmarkMoveBtn]) {
       button.disabled = !bookmarkTarget || state.moveBookmarkPending;
@@ -657,6 +723,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
 
   function closeSearchMoveOverlay() {
     state.searchMoveDismissed = true;
+    state.searchStudyPreviewActive = false;
     searchMoveOverlay.hidden = true;
   }
 
@@ -671,6 +738,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     }
 
     state.searchMoveDismissed = false;
+    state.searchStudyPreviewActive = false;
     send({ type: "sr_search_move", notation: trimmedNotation });
   }
 
@@ -693,6 +761,16 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     return "Unbookmark";
   }
 
+  function isEligibleSearchStudyResult(item) {
+    if (typeof item.studyEligible !== "boolean") {
+      throw new Error("Move-search result is missing study eligibility");
+    }
+    if (typeof item.similarity !== "number") {
+      throw new Error("Move-search result is missing numeric similarity");
+    }
+    return item.studyEligible && item.similarity > state.searchStudyCutoffPercent / 100;
+  }
+
   function renderSearchMove() {
     const hasSearch = isReviewMode() && state.searchMove && Array.isArray(state.searchMove.results);
     if (!hasSearch) {
@@ -700,15 +778,27 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       state.searchMoveDismissed = false;
       searchMoveTitle.textContent = "Search move";
       searchMoveResults.innerHTML = "";
+      searchMoveStudyTools.hidden = true;
       return;
     }
 
     const kind = typeof state.searchMove.kind === "string" ? state.searchMove.kind : "searchMove";
     const isMarkedMoves = kind === "markedMoves";
+    const isMoveSearch = kind === "searchMove";
     const results = state.searchMove.results || [];
     const query = state.searchMove.query || {};
     const queryMove = typeof query.move === "string" ? query.move : "";
     const count = typeof state.searchMove.count === "number" ? state.searchMove.count : results.length;
+    const eligibleCount = isMoveSearch
+      ? results.filter((item) => isEligibleSearchStudyResult(item)).length
+      : 0;
+
+    searchMoveStudyTools.hidden = !isMoveSearch;
+    searchMoveCutoffInput.value = String(state.searchStudyCutoffPercent);
+    searchMoveStudyBtn.disabled = eligibleCount === 0;
+    searchMoveStudyBtn.textContent = state.searchStudyPreviewActive
+      ? `Study ${eligibleCount} eligible ${eligibleCount === 1 ? "position" : "positions"}`
+      : "Study similar positions";
 
     if (isMarkedMoves) {
       const title = typeof query.title === "string" && query.title ? query.title : "Marked moves";
@@ -736,7 +826,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
       const isCurrent = pathsEqual(path, currentPath);
 
       const div = document.createElement("div");
-      div.className = `search-item ${isCurrent ? "current" : ""}`;
+      const isStudyEligible = isMoveSearch && isEligibleSearchStudyResult(item);
+      const showStudyEligibility = state.searchStudyPreviewActive && isStudyEligible;
+      div.className = `search-item ${isCurrent ? "current" : ""} ${showStudyEligibility ? "study-eligible" : ""}`;
       div.addEventListener("click", (event) => {
         event.stopPropagation();
         queueReviewNavigation(path);
@@ -749,6 +841,13 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
         markSpan.textContent = markedMoveLabel(mark);
         div.appendChild(markSpan);
       } else {
+        if (showStudyEligibility) {
+          const studySpan = document.createElement("span");
+          studySpan.className = "search-study-marker";
+          studySpan.textContent = "Study";
+          div.appendChild(studySpan);
+        }
+
         const startDots = document.createElement("span");
         startDots.className = "search-ellipsis";
         startDots.textContent = "…";
@@ -1532,11 +1631,16 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   function applySrState(sr) {
     state.active = !!sr.active;
     state.mode = sr.mode || "idle";
+    state.promptSource = sr.promptSource || "global";
+    if (state.promptSource !== "global" && state.promptSource !== "study_set") {
+      throw new Error(`Unknown prompt source: ${state.promptSource}`);
+    }
     state.currentSpecId = typeof sr.currentSpecId === "string" ? sr.currentSpecId : null;
     state.review = sr.review || null;
     state.reviewShowsAlternatives = !!sr.reviewShowsAlternatives;
     state.debugTree = sr.debugTree || null;
     state.searchMove = sr.searchMove || null;
+    state.studySet = sr.studySet || null;
     state.startRange = Number.isInteger(sr.startRange) ? sr.startRange : null;
     state.bookmarkQueued = !!sr.bookmarkQueued;
     state.guessMoveBookmarkTarget = sr.guessMoveBookmarkTarget || null;
@@ -1552,6 +1656,7 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     }
     resetReviewNavigation();
 
+    refreshStudySetMode();
     refreshButtons();
     refreshReviewTreeOptions();
     renderReviewTree();
@@ -1605,8 +1710,32 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   });
   searchMoveOverlay.addEventListener("click", closeSearchMoveOverlay);
   searchMovePanel.addEventListener("click", (event) => event.stopPropagation());
+  searchMoveCutoffInput.addEventListener("input", () => {
+    const cutoffPercent = parseSearchStudyCutoffPercent(searchMoveCutoffInput.value);
+    if (cutoffPercent === null) {
+      searchMoveStudyBtn.disabled = true;
+      return;
+    }
+    state.searchStudyPreviewActive = true;
+    state.searchStudyCutoffPercent = cutoffPercent;
+    saveSearchStudyCutoffPercent(cutoffPercent);
+    renderSearchMove();
+  });
+  searchMoveStudyBtn.addEventListener("click", () => {
+    if (searchMoveStudyBtn.disabled) return;
+    searchMoveStudyBtn.disabled = true;
+    send({
+      type: "sr_study_searched_move",
+      cutoff: state.searchStudyCutoffPercent / 100,
+    });
+  });
   searchMoveManualBtn.addEventListener("click", promptSearchMoveNotation);
   searchMoveCloseBtn.addEventListener("click", closeSearchMoveOverlay);
+  studySetReturnBtn.addEventListener("click", () => {
+    if (studySetReturnBtn.disabled) return;
+    studySetReturnBtn.disabled = true;
+    send({ type: "sr_stop_study_searched_move" });
+  });
   historyOverlay.addEventListener("click", closeHistoryOverlay);
   historyPanel.addEventListener("click", (event) => event.stopPropagation());
   historyHardestMovesBtn.addEventListener("click", () => {
@@ -1676,7 +1805,9 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     send({ type: "sr_review_show_alternatives", enabled: srShowAlternativesInput.checked });
   });
   srSearchMoveBtn.addEventListener("click", () => {
+    if (srSearchMoveBtn.disabled) return;
     state.searchMoveDismissed = false;
+    state.searchStudyPreviewActive = false;
     renderSearchMove();
     send({ type: "sr_search_move" });
   });
@@ -1714,6 +1845,8 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   srGuessBookmarkMoveBtn.addEventListener("click", () => toggleCurrentMoveBookmark(srGuessBookmarkMoveBtn));
   srBookmarkMoveBtn.addEventListener("click", () => toggleCurrentMoveBookmark(srBookmarkMoveBtn));
 
+  searchMoveCutoffInput.value = String(state.searchStudyCutoffPercent);
+  refreshStudySetMode();
   refreshButtons();
 
   return {

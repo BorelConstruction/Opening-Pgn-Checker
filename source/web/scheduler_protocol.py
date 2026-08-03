@@ -131,10 +131,12 @@ class RepetitionController:
     def get_prompt_view(self) -> Prompt:
         return self._prompt
 
-    def start_next_prompt(self) -> None:
-        spec_id = self.scheduler.next()
+    def start_prompt(self, spec_id: SpecId) -> None:
         self.current_spec_id = spec_id
         self._prompt = self.engine.start_prompt(spec_id)
+
+    def start_next_prompt(self) -> None:
+        self.start_prompt(self.scheduler.next())
 
     def start_prompt_by_id(self, prompt_id: PromptId, spec_id: SpecId | None = None) -> None:
         spec_id = spec_id or "by id"
@@ -150,7 +152,7 @@ class RepetitionController:
         self.session_log.record_feedback(prompt_id, feedback)
         self.scheduler.feedback(spec_id, feedback)
 
-    def on_user_response(self, response: Any) -> bool:
+    def on_user_response(self, response: Any, *, finalize: bool = True) -> bool:
         """
         Process user response.
         Returns True if the prompt should continue, False if it should terminate.
@@ -160,7 +162,8 @@ class RepetitionController:
         if not self.engine.is_finished():
             return True
 
-        self.finalize_current_prompt()
+        if finalize:
+            self.finalize_current_prompt()
         return False
 
     def accept_pending_alternative(self) -> bool:
