@@ -947,20 +947,6 @@ class RepetitionEngine():
         ).strip()
         return blacklisted_uci
 
-    def blacklist_current_line(self) -> UCI: # TODO: remove
-        """Blacklists the first move of the current prompt line.
-        (Note that technically the current position may still appear, but via a different line.)"""
-        self._clear_pending_alternative()
-        prompt_start_node = self._prompt_state.node
-        while prompt_start_node is not self._root:
-            blacklisted_uci = prompt_start_node.move.uci()
-            prompt_start_node = prompt_start_node.parent
-        self._blacklist_move(prompt_start_node.parent, blacklisted_uci)
-        self._prompt_state.message = (
-            f"Blacklisted the line starting with {blacklisted_uci}. {self._prompt_state.message}"
-        ).strip()
-        return blacklisted_uci
-
     def skip_current_move(self) -> None:
         self._clear_pending_alternative()
         prompt_node = self._prompt_state.node
@@ -3667,17 +3653,6 @@ class AppController:
             return
 
         self.show_prompt()
-
-    def blacklist_current_line(self) -> None:
-        if self._state.interaction != InteractionMode.GUESS:
-            return
-        if self._state.prompt_source == PromptSource.STUDY_SET:
-            raise RuntimeError("Line blacklisting is unavailable in study-set mode")
-
-        self._rep_engine.blacklist_current_line()
-        self._rep_engine.finish_prompt()
-        self._finalize_finished_prompt()
-        self._reveal_prompt_in_review()
 
     def skip_current_move(self) -> None:
         """Skips the current move user has to enter (main line) now and from now on.

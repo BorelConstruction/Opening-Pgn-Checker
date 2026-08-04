@@ -30,7 +30,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
   const srGuessBookmarkMoveBtn = document.getElementById("srGuessBookmarkMove");
   const srGuessSkipBtn = document.getElementById("srGuessSkip");
   const srGuessBlacklistBtn = document.getElementById("srGuessBlacklist");
-  const srGuessBlacklistLineBtn = document.getElementById("srGuessBlacklistLine");
   const srAcceptAlternativeBtn = document.getElementById("srAcceptAlternative");
   const reviewTreeOptions = document.getElementById("reviewTreeOptions");
   const srShowAlternativesInput = document.getElementById("srShowAlternatives");
@@ -670,7 +669,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     srGuessBookmarkBtn.textContent = state.bookmarkQueued ? "Bookmark queued" : "Bookmark";
     srGuessSkipBtn.disabled = !canSkipGuess;
     srGuessBlacklistBtn.disabled = !isGuess;
-    srGuessBlacklistLineBtn.disabled = !isGuess || isStudySet;
     const bookmarkTarget = currentMoveBookmarkTarget();
     for (const button of [srGuessBookmarkMoveBtn, srBookmarkMoveBtn]) {
       button.disabled = !bookmarkTarget || state.moveBookmarkPending;
@@ -1800,7 +1798,6 @@ export function createPgnViewerUi({ send, onFlipBoard, onResetBoard, getCurrentF
     send({ type: "sr_accept_alternative" });
   });
   srGuessBlacklistBtn.addEventListener("click", () => send({ type: "sr_blacklist_move" }));
-  srGuessBlacklistLineBtn.addEventListener("click", () => send({ type: "sr_blacklist_line_prompt" }));
   srShowAlternativesInput.addEventListener("change", () => {
     send({ type: "sr_review_show_alternatives", enabled: srShowAlternativesInput.checked });
   });
