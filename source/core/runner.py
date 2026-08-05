@@ -17,7 +17,7 @@ from chess import WHITE
 from chess import BLACK
 
 
-from .options import CoreOptions, DEBUG_MODE
+from .options import CoreOptions, DB_LICHESS, DB_MASTERS, DEBUG_MODE
 from .timer import clock
 from .caching import CacheDict
 from .database import *
@@ -339,13 +339,13 @@ class PgnSession:
             # NOTE: will be a bug is self.opening_explorer changes
             # (as self.cache will then store the result relative to the old explorer)
             # If we expect this to happen, here and below such parameters have to be frozen (and not cached)
-            "db_lichess": lambda fen: safe_get_games(
+            DB_LICHESS: lambda fen: safe_get_games(
                 self.opening_explorer,
                 position=fen,
                 ratings=self.options.db_ratings,
             ),
 
-            "db_masters": lambda fen: safe_get_games(self.opening_explorer, position=fen, lichess=False),
+            DB_MASTERS: lambda fen: safe_get_games(self.opening_explorer, position=fen, lichess=False),
 
             "eval": lambda fen: EvalProvider(self, fen, self.engine_eval),
 
@@ -484,7 +484,12 @@ class PgnSession:
     
     
     # ============ Universal helper functions ============
-    def move_freq(self, board: Union[Node, chess.Board], move: Optional[Union[chess.Move, str]] = None) -> float:
+    def move_freq(
+        self,
+        board: Union[Node, chess.Board],
+        move: Optional[Union[chess.Move, str]] = None,
+        database_type: str = DB_LICHESS,
+    ) -> float:
         if isinstance(move, chess.Move):
             move = move.uci()
         if isinstance(board, Node):
@@ -493,21 +498,30 @@ class PgnSession:
             board = board.board()
         if move is None:
             raise ValueError("Expected a move or a Node")
-        stats = self.query(fen(board), "db_lichess")
+        stats = self.query(fen(board), database_type)
         md = stats_for_uci(stats, move)
         if not md:
             return -1
         return move_frequency(md, stats)
     
-    def total_games(self, board: Union[Node, chess.Board, str]) -> int:
+    def total_games(
+        self,
+        board: Union[Node, chess.Board, str],
+        database_type: str = DB_LICHESS,
+    ) -> int:
         if isinstance(board, Node):
             board = board.board()
         if isinstance(board, chess.Board):
             board = fen(board)
-        stats = self.query(board, "db_lichess")
+        stats = self.query(board, database_type)
         return total_games(stats)
     
-    def total_games_move(self, board: Union[Node, chess.Board, str], move: Union[chess.Move, str]) -> int:
+    def total_games_move(
+        self,
+        board: Union[Node, chess.Board, str],
+        move: Union[chess.Move, str],
+        database_type: str = DB_LICHESS,
+    ) -> int:
         if isinstance(move, str):
             move = chess.Move.from_uci(move)
         if isinstance(board, Node):
@@ -515,7 +529,7 @@ class PgnSession:
         if isinstance(board, str):
             board = chess.Board(board)
         board.push(move)
-        return self.total_games(board)
+        return self.total_games(board, database_type)
 
     def score_rate_pos(self, board: Union[Node, chess.Board, str]) -> float:
         if isinstance(board, Node):

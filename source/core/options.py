@@ -12,6 +12,15 @@ DEBUG_MODE = True
 VALID_DB_RATINGS = ["1900", "2200", "2500"]
 DEFAULT_DB_RATINGS = ["2200", "2500"]
 
+DB_LICHESS = "db_lichess"
+DB_MASTERS = "db_masters"
+NO_MOVE_PROMOTION = "none"
+MOVE_PROMOTION_CRITERIA = {
+    "No Promotion": NO_MOVE_PROMOTION,
+    "Masters Frequency": DB_MASTERS,
+    "Lichess Frequency": DB_LICHESS,
+}
+
 '''
     CoreOptions are the options that we expect to stay constant throughout the program.
     Note that this is is not the same as common options. For example,
@@ -55,8 +64,8 @@ class CoreOptions:
 
     # --- DATABASE SETTINGS ---
     db_types: list = field(
-        default_factory=lambda: ["db_lichess"],
-        metadata={"label": "Database Types", "options": {"Lichess": "db_lichess", "Masters": "db_masters"}}
+        default_factory=lambda: [DB_LICHESS],
+        metadata={"label": "Database Types", "options": {"Lichess": DB_LICHESS, "Masters": DB_MASTERS}}
     )
 
     db_ratings: list = field(
@@ -145,6 +154,16 @@ class CheckerOptions(RepertoireOptions):
                                                    "Mark Moves": "mark_moves", "Seek Consistency": "seek_consistency"}}
     )
 
+    move_promotion_criterion: str = field(
+        default=NO_MOVE_PROMOTION,
+        metadata={
+            "label": "Move Promotion Criterion",
+            "ui_hint": "dropdown",
+            "options": MOVE_PROMOTION_CRITERIA,
+            "ui_section": "Mark Moves Options",
+        },
+    )
+
     # --- HOW TO WORK WITH IT ---
     # --- MOVE CHOICE ---
     freq_threshold: float = field(
@@ -188,6 +207,12 @@ class CheckerOptions(RepertoireOptions):
         super().validate()
         if "fill_gaps" in self.actions and "find_gaps" not in self.actions:
             raise ValueError("Fill Gaps action requires Find Gaps to be selected")
+        if self.move_promotion_criterion not in MOVE_PROMOTION_CRITERIA.values():
+            raise ValueError(
+                "move_promotion_criterion must be one of "
+                f"{list(MOVE_PROMOTION_CRITERIA.values())}; "
+                f"got {self.move_promotion_criterion!r}"
+            )
 
 
 @dataclass

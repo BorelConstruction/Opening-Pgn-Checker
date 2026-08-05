@@ -20,7 +20,12 @@ from chess import WHITE
 from chess import BLACK
 
 
-from .options import CheckerOptions, DEBUG_MODE, cache_filename_from_string
+from .options import (
+    CheckerOptions,
+    DEBUG_MODE,
+    NO_MOVE_PROMOTION,
+    cache_filename_from_string,
+)
 from .timer import clock
 from .database import *
 from .runner import *
@@ -225,7 +230,48 @@ class PgnChecker:
         if gaps_info:
             self.act_on_gap_data_local(node, gaps_info)
 
+    def promote_move_local(self, log_node: Node) -> bool:
+        database_type = self.session.options.move_promotion_criterion
+        if database_type == NO_MOVE_PROMOTION:
+            return False
+        if log_node.turn() == self.session.options.side or len(log_node.variations) < 2:
+            return False
+        if self.session.total_games(
+            log_node,
+            database_type=database_type,
+        ) < FREQ_MARK_THRESHOLD:
+            return False
+
+        variation_frequencies = [
+            (
+                variation,
+                self.session.move_freq(
+                    log_node,
+                    variation.move,
+                    database_type=database_type,
+                ),
+            )
+            for variation in log_node.variations
+        ]
+        current_mainline_frequency = variation_frequencies[0][1]
+        best_frequency = max(frequency for _, frequency in variation_frequencies)
+        if best_frequency <= current_mainline_frequency:
+            return False
+
+        best_variations = [
+            variation
+            for variation, frequency in variation_frequencies
+            if frequency == best_frequency
+        ]
+        if len(best_variations) != 1:
+            return False
+
+        log_node.promote_to_main(best_variations[0])
+        return True
+
     def mark_move_local(self, log_node: Node):
+        self.promote_move_local(log_node)
+
         mark_fn = mark_based_on_freq_us if log_node.turn() == self.session.options.side else mark_based_on_freq_them
         if self.session.total_games(log_node) < FREQ_MARK_THRESHOLD:
             return
@@ -234,7 +280,6 @@ class PgnChecker:
             mark_fn(n, freq)
 
     def mark_moves(self, log_node):
-        # TODO: if a move is frequent, promote it?
         self.session.report(RunnerReport(kind="position", position=PositionSnapshot("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -", 0)))
         self.session.report_message("Marking moves...")
         self.session.progress.reset()

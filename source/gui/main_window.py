@@ -213,16 +213,49 @@ class MainWindow(QWidget):
                 continue  # Skip options already shown in the Core section
             all_fields.append(field)
 
+        self._add_option_fields(grid, all_fields, widgets, allow_sections=True)
+        return page_widget
+
+    def _add_option_fields(self, grid, option_fields, widgets, *, allow_sections):
         ui_group_fields = {}
-        for field in all_fields:
-            ui_group = field.metadata.get("ui_group")
-            if not ui_group:
-                continue
-            ui_group_fields.setdefault(ui_group, []).append(field)
+        ui_section_fields = {}
+        for option_field in option_fields:
+            ui_group = option_field.metadata.get("ui_group")
+            if ui_group:
+                ui_group_fields.setdefault(ui_group, []).append(option_field)
+
+            if allow_sections:
+                ui_section = option_field.metadata.get("ui_section")
+                if ui_section:
+                    ui_section_fields.setdefault(ui_section, []).append(option_field)
 
         rendered_ui_groups = set()
-        i = 0
-        for field in all_fields:
+        rendered_ui_sections = set()
+        item_index = 0
+        last_row = 0
+
+        for field in option_fields:
+            ui_section = field.metadata.get("ui_section") if allow_sections else None
+            if ui_section:
+                if ui_section in rendered_ui_sections:
+                    continue
+                rendered_ui_sections.add(ui_section)
+
+                section = QGroupBox(ui_section)
+                section_grid = QGridLayout(section)
+                self._add_option_fields(
+                    section_grid,
+                    ui_section_fields[ui_section],
+                    widgets,
+                    allow_sections=False,
+                )
+
+                col = item_index // MAX_ROWS
+                last_row = (item_index % MAX_ROWS) * 2
+                grid.addWidget(section, last_row, col, 2, 1)
+                item_index += 1
+                continue
+
             ui_group = field.metadata.get("ui_group")
             if ui_group:
                 if ui_group in rendered_ui_groups:
@@ -232,7 +265,7 @@ class MainWindow(QWidget):
                 group_fields = ui_group_fields.get(ui_group, [])
                 group_fields = sorted(
                     group_fields,
-                    key=lambda f: (f.metadata.get("ui_group_order", 0), all_fields.index(f)),
+                    key=lambda f: (f.metadata.get("ui_group_order", 0), option_fields.index(f)),
                 )
 
                 group_container = QWidget()
@@ -253,29 +286,26 @@ class MainWindow(QWidget):
                     hbox.addWidget(field_container)
                     widgets[gf.name] = widget
 
-                i += 1
-
-                col = i // MAX_ROWS
-                row = (i % MAX_ROWS) * 2
-                grid.addWidget(group_container, row, col, 2, 1)
+                col = item_index // MAX_ROWS
+                last_row = (item_index % MAX_ROWS) * 2
+                grid.addWidget(group_container, last_row, col, 2, 1)
+                item_index += 1
                 continue
 
             name = field.name
-            val = getattr(self.options, field.name)
-            label = field.metadata.get("label", field.name.replace("_", " ").title())
+            val = getattr(self.options, name)
+            label = field.metadata.get("label", name.replace("_", " ").title())
             widget = create_widget_for_field(field, val, label=label)
 
-            i += 1
+            col = item_index // MAX_ROWS
+            last_row = (item_index % MAX_ROWS) * 2
+            grid.addWidget(QLabel(label), last_row, col)
+            grid.addWidget(widget, last_row + 1, col)
+            widgets[name] = widget
+            item_index += 1
 
-            col = i // MAX_ROWS
-            row = (i % MAX_ROWS) * 2
-            grid.addWidget(QLabel(label), row, col)
-            grid.addWidget(widget, row+1, col)
-            widgets[field.name] = widget
-
-        grid.setRowStretch(row, 1)
-              
-        return page_widget
+        if item_index:
+            grid.setRowStretch(last_row + 2, 1)
 
     def switch_feature(self, index):
         self.options_class = feature_list[index]
@@ -314,6 +344,8 @@ class MainWindow(QWidget):
                     data[name] = field.type(widget.value())
                 elif isinstance(widget, QCheckBox):
                     data[name] = widget.isChecked()
+                elif isinstance(widget, QComboBox):
+                    data[name] = field.type(widget.currentData())
                 elif isinstance(widget, QGroupBox):
                     data[name] = widget.get_value()
                 elif hasattr(widget, "text"): 
@@ -429,6 +461,8 @@ class MainWindow(QWidget):
                     widget.setValue(f.default)
                 elif isinstance(widget, QCheckBox):
                     widget.setChecked(f.default)
+                elif isinstance(widget, QComboBox):
+                    set_dropdown_value(widget, f.default, f.name)
                 elif isinstance(widget, QGroupBox):
                     widget.set_value(f.default_factory())
                 else:
@@ -499,9 +533,7 @@ def create_widget_for_field(field_info, current_value, label=None):
         options = metadata.get("options", {})
         for label, val in options.items():
             widget.addItem(label, val)
-        # Set current selection
-        index = widget.findData(current_value)
-        widget.setCurrentIndex(index)
+        set_dropdown_value(widget, current_value, field_info.name)
         return widget
     
     if hint == "file_path":
@@ -539,6 +571,13 @@ def create_widget_for_field(field_info, current_value, label=None):
     widget = QLineEdit()
     widget.setText(str(current_value))
     return widget
+
+
+def set_dropdown_value(widget: QComboBox, value, field_name: str) -> None:
+    index = widget.findData(value)
+    if index < 0:
+        raise ValueError(f"Unknown value {value!r} for dropdown field {field_name!r}")
+    widget.setCurrentIndex(index)
 
 def browse_file(widget, dir: str):
     project_root = Path(__file__).resolve().parents[2]
