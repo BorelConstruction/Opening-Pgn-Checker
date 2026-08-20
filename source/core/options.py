@@ -187,6 +187,16 @@ class CheckerOptions(RepertoireOptions):
         metadata={"label": "Engine for Opponent's Move"}
     )
 
+    blunder_filter_aggression: float = field(
+        default=0.5,
+        metadata={
+            "label": "Blunder Filter Aggression",
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.05,
+        },
+    )
+
     # --- DETAILS ON WHAT TO DO ---
     add_nag: bool = field(
         default=True,
@@ -213,6 +223,8 @@ class CheckerOptions(RepertoireOptions):
                 f"{list(MOVE_PROMOTION_CRITERIA.values())}; "
                 f"got {self.move_promotion_criterion!r}"
             )
+        if not 0.0 <= self.blunder_filter_aggression <= 1.0:
+            raise ValueError("blunder_filter_aggression must be between 0 and 1")
 
 
 @dataclass

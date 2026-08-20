@@ -1,5 +1,6 @@
 from collections import defaultdict, Counter
 import datetime
+import math
 import os
 from platform import node
 import sys
@@ -44,6 +45,10 @@ from .repertoire import RepertoireSession, default_repertoire_cache_path
 
 STAT_SIGNIFICANCE_THRESHOLD = 15 # TODO: smarter choice
 FREQ_MARK_THRESHOLD = 10
+BLUNDER_FILTER_MAX_REQUIRED_FREQUENCY = 0.99
+BLUNDER_FILTER_CALIBRATION = 40 / 59
+BLUNDER_FILTER_HUMAN_REASON = "blunder_filter_human"
+BLUNDER_FILTER_ENGINE_REASON = "blunder_filter_engine"
 
 
 @dataclass
@@ -136,6 +141,7 @@ class PgnChecker:
             f'added depth {self.session.options.added_depth}, ' + \
             f'freq threshold {self.session.options.freq_threshold}, ' + \
             f'min games {self.session.options.min_games}, ' + \
+            f'blunder filter aggression {self.session.options.blunder_filter_aggression:.2f}, ' + \
             f'end ply {self.session.options.end_ply}, min engine depth {self.session.options.min_depth}.'
             print(game, file=open(self.session.options.output_pgn, "a", encoding="utf-8"), end="\n\n") # "a" for adding
 
@@ -178,8 +184,12 @@ class PgnChecker:
                 return GapsInfo(node.parent, [node.move.uci()])
             return
         
-        return GapsInfo(node, [mc.move.uci() for mc in self.generate_moves_them(node) if
-                not mc.move.uci() in pgn_ucis])
+        new_choices = [
+            choice
+            for choice in self.generate_moves_them(node)
+            if choice.move.uci() not in pgn_ucis
+        ]
+        return GapsInfo(node, [choice.move.uci() for choice in new_choices])
     
     def fill_gaps(self, gaps: list[GapsInfo]):
         self.session.moves_added = 0
@@ -450,20 +460,92 @@ class PgnChecker:
                 moves.append(MoveChoice(chess.Move.from_uci(uci_from_lichess_to_pgn(m['uci'])), None, "good", c))
         return moves
 
-    def generate_moves_them(self, node: Node, maybe_use_engine: bool = False) -> list[MoveChoice]:
+    def generate_moves_them(
+        self,
+        node: Node,
+        maybe_use_engine: bool = False,
+        add_filter_fallback: bool = False,
+    ) -> list[MoveChoice]:
         moves = []
         stat_list = [self.session.query(fen(node), type) for type in self.session.options.db_types]
         for stats in stat_list:
             moves += self.generate_moves_them_db(stats)
         moves = remove_duplicates(moves, equality_rel=lambda m:m.move)
 
+        filtered_moves = self.filter_generated_opponent_moves(node, moves)
+        if moves and not filtered_moves and add_filter_fallback:
+            return self.blunder_filter_fallback(node, moves)
+
         # if no DB moves and option enabled, add an engine move
         if not moves and self.session.options.use_engine_for_them and maybe_use_engine:
             engine_move = self.session.query(fen(node), "q-eval").best_move()
             c = "Engine".upper() if DEBUG_MODE else ""
-            moves.append(MoveChoice(engine_move, "eng", None, c)) 
+            return [MoveChoice(move=engine_move, reason="eng", comment=c)]
 
-        return moves
+        return filtered_moves
+
+    def filter_generated_opponent_moves(
+        self,
+        node: Node,
+        moves: list[MoveChoice],
+    ) -> list[MoveChoice]:
+        aggression = self.session.options.blunder_filter_aggression
+        if not moves or aggression == 0.0 or node.parent is None:
+            return moves
+
+        eval_was = self.session.query(fen(node.parent), "eval").best_eval()
+        included_moves = []
+        for choice in moves:
+            resulting_board = node.board()
+            resulting_board.push(choice.move)
+            eval_became = self.session.query(fen(resulting_board), "eval").best_eval()
+            eval_loss = eval_became - eval_was
+            frequency = self.max_selected_database_frequency(node, choice.move)
+            if blunder_filter_accepts_move(aggression, eval_loss, frequency):
+                included_moves.append(choice)
+
+        return included_moves
+
+    def max_selected_database_frequency(self, node: Node, move: chess.Move) -> float:
+        frequencies = [
+            self.session.move_freq(node, move, database_type=database_type)
+            for database_type in self.session.options.db_types
+        ]
+        found_frequencies = [frequency for frequency in frequencies if frequency >= 0.0]
+        
+        return max(found_frequencies)
+
+    def blunder_filter_fallback(
+        self,
+        node: Node,
+        rejected_moves: list[MoveChoice],
+    ) -> list[MoveChoice]:
+        most_popular = max(
+            rejected_moves,
+            key=lambda choice: self.max_selected_database_frequency(node, choice.move),
+        )
+
+        engine_move = self.session.query(fen(node), "q-eval").best_move()
+        if engine_move == most_popular.move:
+            return [MoveChoice(
+                move=engine_move,
+                reason=BLUNDER_FILTER_ENGINE_REASON,
+                comment=most_popular.comment,
+            )]
+
+        return [
+            MoveChoice(
+                move=most_popular.move,
+                reason=BLUNDER_FILTER_HUMAN_REASON,
+                eval=most_popular.eval,
+                comment=most_popular.comment,
+            ),
+            MoveChoice(
+                move=engine_move,
+                reason=BLUNDER_FILTER_ENGINE_REASON,
+                comment="ENGINE" if DEBUG_MODE else "",
+            ),
+        ]
 
     def add_moves_us(self, node: Node) -> tuple[Node, MoveChoice]:
         our_move_choices = self.generate_moves_us(node)
@@ -487,11 +569,19 @@ class PgnChecker:
 
     def add_moves_them(self, node: Node) -> list[Node]:
         children = []
-        opponent_move_choices = self.generate_moves_them(node, maybe_use_engine=True)
+        opponent_move_choices = self.generate_moves_them(
+            node,
+            maybe_use_engine=True,
+            add_filter_fallback=True,
+        )
 
         for choice in opponent_move_choices:
             reply_child = self.session._add_variation(node, choice.move)
             update_comment(reply_child, choice.comment)
+            if choice.reason == BLUNDER_FILTER_HUMAN_REASON:
+                reply_child.nags.add(chess.pgn.NAG_MISTAKE)
+            elif choice.reason == BLUNDER_FILTER_ENGINE_REASON:
+                reply_child.nags.add(chess.pgn.NAG_GOOD_MOVE)
             children.append(reply_child)
 
         return children
@@ -586,6 +676,8 @@ class PgnChecker:
             self.session._add_variation(popular_child, engine_reply, to_main=True)
 
     def set_question_marks(self, node: Node, eval_query="eval"):
+        if chess.pgn.NAG_MISTAKE in node.nags or chess.pgn.NAG_GOOD_MOVE in node.nags:
+            return
         pp = node.parent.parent
         if pp is None:
             return
@@ -768,6 +860,30 @@ def compute_question_marks(eval_was: float, eval_became: float) -> list[int]:
     elif eval_became - eval_was > 0.4:
         return [chess.pgn.NAG_DUBIOUS_MOVE]
     return []
+
+
+def blunder_filter_accepts_move(
+    aggression: float,
+    eval_loss: float,
+    move_frequency: float,
+) -> bool:
+    """
+    Return whether a generated database reply survives the blunder filter.
+
+    The required frequency is ``0.99 * x / (1 + x)``, where
+    ``x = (40 / 59) * aggression * max(eval_loss, 0)``.
+    """
+    if not 0.0 <= aggression <= 1.0:
+        raise ValueError("aggression must be between 0 and 1")
+    if not math.isfinite(eval_loss):
+        raise ValueError("eval_loss must be finite")
+    if not 0.0 <= move_frequency <= 1.0:
+        raise ValueError("move_frequency must be between 0 and 1")
+
+    loss = max(eval_loss, 0.0)
+    x = BLUNDER_FILTER_CALIBRATION * aggression * loss
+    required_frequency = BLUNDER_FILTER_MAX_REQUIRED_FREQUENCY * x / (1.0 + x)
+    return move_frequency >= required_frequency
 
 
 
